@@ -4,9 +4,13 @@ extends Node2D
 const TIERS := {
 	1: {"rate": 1.0, "uses": 20.0, "name": "基础", "color": Color(0.56, 0.70, 1.0)},
 	2: {"rate": 3.0, "uses": 24.0, "name": "加法", "color": Color(0.49, 0.94, 0.66)},
-	3: {"rate": 9.0, "uses": 28.0, "name": "阵列", "color": Color(1.0, 0.83, 0.47)},
+	3: {"rate": 9.0, "uses": 28.0, "name": "脉冲", "color": Color(0.36, 0.88, 0.82)},
 	4: {"rate": 27.0, "uses": 34.0, "name": "共振", "color": Color(1.0, 0.56, 0.64)},
 }
+
+## 脉冲：自身不产出，每 PULSE_SEC 把「自身基础值」加到相邻的主动模块上（叠加，见 PULSE_STACK_MAX）
+const PULSE_SEC := 3.0
+const PULSE_STACK_MAX := 9.0
 
 const CRAFT_UNLOCK := {2: 4, 3: 10, 4: 18}
 
@@ -83,6 +87,11 @@ var shot_at := -1.0
 var shot_build := false
 var shot_bot := false
 var ff := 0.0
+## 电路板规则自检：godot --headless --path . -- boardtest
+var boardtest := false
+var demo_board := false
+var bt_set := false
+var bt_print := 0.0
 
 
 func _ready() -> void:
@@ -104,6 +113,11 @@ func _ready() -> void:
 			shot_at = 12.0
 		elif a.begins_with("shotat="):
 			shot_at = float(a.substr(7))
+		elif a == "boardtest":
+			boardtest = true
+		elif a == "demoboard":
+			boardtest = true
+			demo_board = true
 		elif a == "shotbuild":
 			shot_build = true
 		elif a == "shotbot":
@@ -125,7 +139,7 @@ func _ready() -> void:
 
 
 func _new_module(tier: int) -> Dictionary:
-	return {"tier": tier, "left": float(TIERS[tier].uses)}
+	return {"tier": tier, "left": float(TIERS[tier].uses), "bonus": 0.0, "tick": 0.0}
 
 
 func _make_player() -> void:
@@ -262,6 +276,7 @@ func _physics_process(delta: float) -> void:
 	wave = int(elapsed / WAVE_SEC) + 1
 	_ensure_weapon()
 	_spawn(delta)
+	_pulse_tick(delta)
 	_fire(delta)
 	_contact(delta)
 	_hud_tick(delta)
@@ -269,6 +284,32 @@ func _physics_process(delta: float) -> void:
 		_playtest_step(delta)
 	elif shot_bot:
 		_bot_step(delta)
+	elif boardtest:
+		_boardtest(delta)
+
+
+## 电路板规则自检：固定摆一块已知的板，验证脉冲是否真的把基础值加给邻居
+func _boardtest(delta: float) -> void:
+	if not bt_set:
+		bt_set = true
+		weapon.interval = 1.0 if demo_board else 999.0  # 自检时不开火，排除弹药消耗的干扰
+		weapon.base = 1.0
+		weapon.slots[0] = _new_module(2)  # 加法
+		weapon.slots[1] = _new_module(3)  # 脉冲（与加法相邻）
+		weapon.slots[2] = _new_module(1)  # 基础（与脉冲相邻）
+		weapon.slots[3] = _new_module(1)  # 基础（只与加法相邻）
+		print("BOARD set  out=", _slot_out(), " power=", _shot_power())
+	bt_print += delta
+	if bt_print >= 0.5:
+		bt_print = 0.0
+		var out := _slot_out()
+		print("t=%4.1f  out=%s  power=%5.1f  bonus=[%.1f, %.1f, %.1f, %.1f]" % [
+			elapsed, str(out), _shot_power(),
+			float(weapon.slots[0].bonus), float(weapon.slots[1].bonus),
+			float(weapon.slots[2].bonus), float(weapon.slots[3].bonus),
+		])
+	if elapsed > 10.0 and shot_path == "":
+		get_tree().quit()
 
 
 func _playtest_step(delta: float) -> void:
@@ -298,16 +339,20 @@ func _bot_step(delta: float) -> void:
 
 func _pt_log() -> void:
 	var need: float = _spawn_rate() * _wave_hp()
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d kills=%d" % [
+	var comp := ""
+	for m in weapon.slots:
+		comp += "." if m == null else str(int(m.tier))
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d [%s] kills=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
-		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(),
+		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(), comp,
 		kills_total,
 	])
 
 
 func _hud_tick(delta: float) -> void:
 	flash_t = maxf(0.0, flash_t - delta)
-	flash.color = Color(1, 0.2, 0.25, flash_t * 0.9)
+	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
+	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else flash_t * 0.9)
 	if pulse_t > 0.0:
 		pulse_t = maxf(0.0, pulse_t - delta)
 		queue_redraw()
@@ -372,9 +417,15 @@ func _within(i: int, r: int) -> Array:
 
 ## 每个槽位这次的「出力」。镜像是对邻居读数再算一份，不做连锁传播（否则指数爆炸）。
 func _slot_out() -> Array:
+	# 基础值 = 阶级固有值 + 脉冲累加进来的加成（bonus 视作该模块自身基础值的一部分）
 	var base: Array = []
-	for m in weapon.slots:
-		base.append(0.0 if m == null else float(TIERS[int(m.tier)].rate))
+	base.resize(weapon.slots.size())
+	for i in weapon.slots.size():
+		var m = weapon.slots[i]
+		if m == null:
+			base[i] = 0.0
+		else:
+			base[i] = float(TIERS[int(m.tier)].rate) + float(m.get("bonus", 0.0))
 	var eff := base.duplicate()
 	# 共振：相邻同名（同阶）模块 +50%
 	for i in weapon.slots.size():
@@ -385,10 +436,11 @@ func _slot_out() -> Array:
 			if weapon.slots[j] != null and int(weapon.slots[j].tier) == 4:
 				eff[j] = float(eff[j]) + float(base[j]) * 0.5
 	var out: Array = []
+	out.resize(weapon.slots.size())
 	for i in weapon.slots.size():
 		var m = weapon.slots[i]
 		if m == null:
-			out.append(0.0)
+			out[i] = 0.0
 			continue
 		var v: float = eff[i]
 		var t := int(m.tier)
@@ -396,11 +448,9 @@ func _slot_out() -> Array:
 			for j in _neighbors(i):
 				if weapon.slots[j] != null and int(weapon.slots[j].tier) < t:
 					v += float(eff[j])
-		elif t == 3:  # 阵列：镜像半径 2 内的低阶模块
-			for j in _within(i, 2):
-				if weapon.slots[j] != null and int(weapon.slots[j].tier) < t:
-					v += float(eff[j])
-		out.append(v)
+		elif t == 3:
+			v = 0.0  # 脉冲：自身不产出，值全部给相邻主动模块
+		out[i] = v
 	return out
 
 
@@ -409,6 +459,24 @@ func _shot_power() -> float:
 	for v in _slot_out():
 		total += float(v)
 	return total * weapon.mul
+
+
+## 脉冲模块：每 PULSE_SEC 把自己的基础值加到相邻的「主动模块」上（叠加，封顶 PULSE_STACK_MAX 层）
+func _pulse_tick(delta: float) -> void:
+	var step := float(TIERS[3].rate)
+	for i in weapon.slots.size():
+		var m = weapon.slots[i]
+		if m == null or int(m.tier) != 3:
+			continue
+		m.tick = float(m.tick) + delta
+		while float(m.tick) >= PULSE_SEC:
+			m.tick = float(m.tick) - PULSE_SEC
+			for j in _neighbors(i):
+				var n = weapon.slots[j]
+				if n == null or int(n.tier) == 3:
+					continue
+				if float(n.bonus) + step <= step * PULSE_STACK_MAX + 0.001:
+					n.bonus = float(n.bonus) + step
 
 
 func _spawn(delta: float) -> void:
@@ -525,13 +593,20 @@ func _reward_damage(dmg: float) -> void:
 		modules_from_damage += 1
 		var t := _damage_reward_tier()
 		# 掉在玩家脚边，能看见它被吸走，反馈比直接进背包好
-		_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
+		var n := _damage_reward_count()
+		for k in n:
+			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
 
 
+## 补偿只给「能产出的」模块：脉冲自身 0 出力，当补偿发等于发了个空槽
 func _damage_reward_tier() -> int:
-	if wave >= 24:
-		return 3
 	if wave >= 12:
+		return 2
+	return 1
+
+
+func _damage_reward_count() -> int:
+	if wave >= 24:
 		return 2
 	return 1
 
@@ -615,25 +690,82 @@ func _take_tier(t: int, n: int, prefer_slots: bool = false) -> void:
 		left -= 1
 
 
-## 把一个模块装进电路板：优先空槽，否则替换槽里最弱（最低阶/剩余最少）的模块
+## 主动模块 = 自己会产出数值的模块（脉冲靠邻居吃饭，不算）
+func _count_active() -> int:
+	var n := 0
+	for m in weapon.slots:
+		if m != null and int(m.tier) != 3:
+			n += 1
+	return n
+
+
+## 整板出力（不含武器基础值，只用于互相比较）
+func _board_total() -> float:
+	var s := 0.0
+	for v in _slot_out():
+		s += v
+	return s
+
+
+## 把一个模块装进电路板。
+## 规则：空槽优先；满了就试每一格「换上去之后整板出力最高」的那一格，
+## 而且必须**严格高于当前出力**才换，否则留在库存等槽位空出来。
+## 旧规则是「替换最低阶」，结果会把喂加法的 T1 全换掉，最后板上全是互相吃不到的加法。
 func _install(t: int) -> void:
-	for i in weapon.slots.size():
-		if weapon.slots[i] == null:
-			weapon.slots[i] = _new_module(t)
+	var n: int = weapon.slots.size()
+	if t != 3:
+		for i in n:
+			if weapon.slots[i] == null:
+				weapon.slots[i] = _new_module(t)
+				return
+	# 脉冲自身不产出 → 不占空槽，必须有 ≥2 个主动邻居，且不能把最后一个主动模块换掉
+	if t == 3:
+		if _count_active() < 2:
+			inventory[t] += 1
 			return
-	var idx := -1
-	var best_tier := 99
-	var best_frac := 2.0
-	for i in weapon.slots.size():
+		var out := _slot_out()
+		var best := -1
+		var best_fed := 1
+		var best_own := 1e18
+		for i in n:
+			var m = weapon.slots[i]
+			if m == null or int(m.tier) == 3:
+				continue
+			# 只换「本身就没什么产出」的格子（T1 或吃不到料的加法），
+			# 别把板上的主力换成 3 秒不产出的脉冲
+			if float(out[i]) > 4.0:
+				continue
+			var fed := 0
+			for j in _neighbors(i):
+				var nb = weapon.slots[j]
+				if nb != null and int(nb.tier) != 3:
+					fed += 1
+			if fed < 2:
+				continue
+			if fed > best_fed or (fed == best_fed and float(out[i]) < best_own):
+				best_fed = fed
+				best_own = float(out[i])
+				best = i
+		if best >= 0:
+			weapon.slots[best] = _new_module(3)
+			return
+		inventory[3] += 1
+		return
+	var now := _board_total()
+	var best2 := -1
+	var best_v := now + 0.001
+	for i in n:
 		var m = weapon.slots[i]
-		var mt := int(m.tier)
-		var f: float = float(m.left) / float(TIERS[mt].uses)
-		if mt < best_tier or (mt == best_tier and f < best_frac):
-			best_tier = mt
-			best_frac = f
-			idx = i
-	if idx >= 0 and best_tier < t:
-		weapon.slots[idx] = _new_module(t)
+		if m == null or _count_active() <= 1:
+			continue
+		weapon.slots[i] = _new_module(t)
+		var v := _board_total()
+		weapon.slots[i] = m
+		if v > best_v:
+			best_v = v
+			best2 = i
+	if best2 >= 0:
+		weapon.slots[best2] = _new_module(t)
 		return
 	inventory[t] += 1
 
@@ -668,7 +800,11 @@ func try_craft() -> bool:
 			continue
 		if inventory[t - 1] >= 2:
 			inventory[t - 1] -= 2
-			_install(t)
+			if t == 3:
+				# 脉冲自身 0 出力：先存库存，凑够 2 个直接合成共振，别白占电路板的输出位
+				inventory[3] += 1
+			else:
+				_install(t)
 			return true
 	return false
 
@@ -741,7 +877,7 @@ func _refresh_build() -> void:
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []
-	info.append("库存    基础 %d    加法 %d    阵列 %d    共振 %d" % [
+	info.append("库存    基础 %d    加法 %d    脉冲 %d    共振 %d" % [
 		inventory[1], inventory[2], inventory[3], inventory[4]
 	])
 	info.append("受击补偿    +%d 个模块（每 %d HP 补 1 个）" % [
@@ -828,7 +964,21 @@ func _rebuild_board() -> void:
 		out_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		out_l.add_theme_font_size_override("font_size", 15)
 		out_l.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
-		out_l.text = "—" if m == null else "%.1f" % float(out[i])
+		if m == null:
+			out_l.text = "—"
+		elif int(m.tier) == 3:
+			# 脉冲不产出，显示「每次加多少 × 给几个邻居」
+			var fed := 0
+			for j in _neighbors(i):
+				var n = weapon.slots[j]
+				if n != null and int(n.tier) != 3:
+					fed += 1
+			out_l.text = "→%.0f×%d" % [float(TIERS[3].rate), fed]
+		elif float(m.bonus) > 0.5:
+			# 拆开显示：自身基础值 + 脉冲喂进来的加成
+			out_l.text = "%.0f+%.0f" % [float(out[i]) - float(m.bonus), float(m.bonus)]
+		else:
+			out_l.text = "%.1f" % float(out[i])
 		panel.add_child(out_l)
 
 		var use_l := Label.new()
@@ -839,3 +989,17 @@ func _rebuild_board() -> void:
 		use_l.add_theme_color_override("font_color", Color(0.55, 0.62, 0.72))
 		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(TIERS[int(m.tier)].uses)]
 		panel.add_child(use_l)
+
+		# 脉冲充能条：脉冲自己显示本次脉冲的倒计时，其它模块显示已累计的加成进度
+		if m != null:
+			var ratio := 0.0
+			if int(m.tier) == 3:
+				ratio = clampf(float(m.tick) / PULSE_SEC, 0.0, 1.0)
+			else:
+				ratio = clampf(float(m.bonus) / (float(TIERS[3].rate) * PULSE_STACK_MAX), 0.0, 1.0)
+			if ratio > 0.0:
+				var bar := ColorRect.new()
+				bar.color = Color(0.36, 0.88, 0.82, 0.9)
+				bar.position = Vector2(9, cell - 7)
+				bar.size = Vector2((cell - 18) * ratio, 3.0)
+				panel.add_child(bar)
