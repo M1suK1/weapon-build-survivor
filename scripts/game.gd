@@ -100,16 +100,16 @@ const WEAPONS := {
 ## 开局随机一把（激光环 wave 8 之后才入池）
 const START_POOL := ["pistol", "smg", "shotgun"]
 const WAVE_SEC := 40.0
-const DROP_CHANCE := 0.40
+const DROP_CHANCE := 0.30
 const CHEST_GUARANTEE := 90.0
-const HP_BASE := 4.0
-const HP_GROWTH := 1.130
-const SPAWN_BASE := 0.70
-const SPAWN_GROWTH := 0.120
-const MAX_ENEMIES := 240
+const HP_BASE := 1.80
+const HP_GROWTH := 1.118
+const SPAWN_BASE := 1.20
+const SPAWN_GROWTH := 0.620
+const MAX_ENEMIES := 420
 const LEVEL_COST_BASE := 3.0
 const LEVEL_COST_GROWTH := 1.18
-const CONTACT_DPS := 3.0
+const CONTACT_DPS := 2.2
 ## 受击补偿：每损失这么多 HP 补 1 个模块（弹药系统的劣势补偿，挨打就回填）
 const DAMAGE_PER_MODULE := 8.0
 const CROWD_CAP := 6
@@ -120,7 +120,7 @@ const PULSE_DUR := 0.30
 ## 以后加新怪直接套这个公式，不用一张张手调。
 const ENEMY_KINDS := {
 	"flood": {"speed": 100.0, "hp_mult": 1.00, "radius": 13.0, "color": Color(0.92, 0.30, 0.34)},
-	"runner": {"speed": 205.0, "hp_mult": 0.34, "radius": 9.0, "color": Color(1.00, 0.70, 0.26)},
+	"runner": {"speed": 205.0, "hp_mult": 0.45, "radius": 9.0, "color": Color(1.00, 0.70, 0.26)},
 	"rock": {"speed": 52.0, "hp_mult": 2.67, "radius": 19.0, "color": Color(0.56, 0.46, 0.86)},
 	"shooter": {"speed": 70.0, "hp_mult": 1.71, "radius": 12.0, "color": Color(0.62, 0.86, 1.00)},
 	# 精英血量是手设的 9.0（不套公式：它靠冲刺而非堆血量制造威胁）
@@ -339,6 +339,8 @@ func _make_player() -> void:
 	var cam := Camera2D.new()
 	cam.position_smoothing_enabled = true
 	cam.position_smoothing_speed = 8.0
+	# 视野缩放：刷怪半径 540–660，不缩小镜头的话敌人全在屏幕外，看不到「一圈合围」
+	cam.zoom = Vector2(0.72, 0.72)
 	player.add_child(cam)
 	cam.make_current()
 
@@ -718,7 +720,7 @@ func _plan_avg_mult() -> float:
 func _spawn_rate() -> float:
 	var base: float = SPAWN_BASE + wave * SPAWN_GROWTH
 	var raw: float = base * float(_plan()["coeff"]) / maxf(_plan_avg_mult(), 0.05)
-	return minf(raw, base * 1.2)
+	return minf(raw, base * 1.8)
 
 
 func _pick_kind() -> String:
@@ -1031,22 +1033,82 @@ func _spawn(delta: float) -> void:
 	var since := elapsed - last_chest_t
 	if since >= CHEST_GUARANTEE and get_tree().get_nodes_in_group("chest").is_empty():
 		_spawn_chest_random()
-	spawn_acc += delta * _spawn_rate()
+	spawn_acc = minf(spawn_acc + delta * _spawn_rate(), 24.0)  # 卡顿后不要一口气吐出几百个
 	while spawn_acc >= 1.0:
-		spawn_acc -= 1.0
 		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+			spawn_acc = minf(spawn_acc, 6.0)
 			break
-		_spawn_enemy()
+		var pat: Dictionary = _pick_pattern()
+		var size := rng.randi_range(int(pat["min"]), int(pat["max"]))
+		# 预算不够就等下一帧，让「一团 / 一圈」完整地出现
+		if spawn_acc < float(size):
+			break
+		spawn_acc -= float(size)
+		_emit_pattern(String(pat["id"]), size)
+
+
+## 生成编队：单点 / 一团 / 弧线 / 一圈。同样的人数，排布不同，压迫感完全不同。
+const PATTERNS := [
+	{"id": "single", "w": 46, "min": 1, "max": 1, "wave": 1},
+	{"id": "cluster", "w": 28, "min": 4, "max": 7, "wave": 2},
+	{"id": "arc", "w": 18, "min": 6, "max": 9, "wave": 4},
+	{"id": "ring", "w": 16, "min": 10, "max": 14, "wave": 6},
+]
+
+
+func _pick_pattern() -> Dictionary:
+	var pool: Array = []
+	var total := 0.0
+	for p in PATTERNS:
+		if wave < int(p["wave"]):
+			continue
+		pool.append(p)
+		total += float(p["w"])
+	var r := rng.randf() * total
+	for p in pool:
+		r -= float(p["w"])
+		if r <= 0.0:
+			return p
+	return pool[0]
+
+
+func _emit_pattern(id: String, n: int) -> void:
+	var base_ang: float = rng.randf() * TAU
+	var rad: float = rng.randf_range(540.0, 660.0)
+	for i in n:
+		var pos: Vector2
+		match id:
+			"cluster":
+				# 一团：同方向挤在一起，像一波小潮水
+				var a := base_ang + rng.randf_range(-0.30, 0.30)
+				pos = player.position + Vector2.from_angle(a) * rad + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(0.0, 70.0)
+			"arc":
+				# 弧线：一条 50° 的弧压过来，横向铺开
+				var a2 := base_ang + (float(i) / maxf(1.0, float(n - 1)) - 0.5) * 0.9
+				pos = player.position + Vector2.from_angle(a2) * rad
+			"ring":
+				# 一圈：整圈合围，逼玩家选一个方向突出去
+				var a3 := base_ang + TAU * float(i) / float(n)
+				pos = player.position + Vector2.from_angle(a3) * rad
+			_:
+				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(520.0, 660.0)
+		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+			return
+		_spawn_enemy_at(pos)
 
 
 func _spawn_enemy(forced: String = "") -> void:
+	var ang: float = rng.randf() * TAU
+	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(520.0, 660.0), forced)
+
+
+func _spawn_enemy_at(pos: Vector2, forced: String = "") -> void:
 	var kind := forced if forced != "" else _pick_kind()
 	var kd: Dictionary = ENEMY_KINDS[kind]
 	var e = Node2D.new()
 	e.set_script(load("res://scripts/enemy.gd"))
 	e.add_to_group("enemy")
-	var ang: float = rng.randf() * TAU
-	e.position = player.position + Vector2(cos(ang), sin(ang)) * rng.randf_range(520.0, 660.0)
+	e.position = pos
 	e.kind = kind
 	e.radius = float(kd["radius"])
 	e.body_color = kd["color"]
