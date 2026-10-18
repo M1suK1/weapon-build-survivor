@@ -104,8 +104,8 @@ const DROP_CHANCE := 0.30
 const CHEST_GUARANTEE := 90.0
 const HP_BASE := 1.80
 const HP_GROWTH := 1.118
-const SPAWN_BASE := 0.90
-const SPAWN_GROWTH := 1.420
+const SPAWN_BASE := 1.20
+const SPAWN_GROWTH := 1.190
 const MAX_ENEMIES := 560
 ## 生成半径必须落在**镜头视野之外**：zoom 0.62 时半个屏幕是 1032×580，
 ## 对角约 1184，所以 >1200 才能保证任何角度都在屏幕外，让敌人「走」进来而不是凭空出现
@@ -220,6 +220,17 @@ var shot_pick := false
 var pick_delay := 0.0
 var pick_wait := 0.0
 var start_force := ""
+var hud_stat: Label = null
+var dbg_root: Control = null
+var dbg_text: Label = null
+var dbg_on := false
+var seed_used := 0
+var vis_enemy := 0
+var dbg_acc := 0.0
+var _pick_from_build := false
+var frame_ms := 0.0
+var frame_ms_max := 0.0
+var enemy_ms := 0.0
 var swarm_test := false
 var ws_done := false
 var _cam_pos := Vector2.ZERO
@@ -258,8 +269,12 @@ func _ready() -> void:
 		elif a == "demoboard":
 			boardtest = true
 			demo_board = true
+		elif a == "shotdbg":
+			dbg_on = true
 		elif a == "shotbuild":
 			shot_build = true
+		elif a.begins_with("seed="):
+			seed_used = int(a.substr(5))
 		elif a.begins_with("start="):
 			start_force = a.substr(6)
 		elif a.begins_with("pickdelay="):
@@ -277,8 +292,14 @@ func _ready() -> void:
 		# 无头模拟按实时速度跑太慢，放大时间步（步长变粗，数值平衡够用）
 		Engine.time_scale = 8.0
 		Engine.max_fps = 0
-	rng.randomize()
+	if seed_used != 0:
+		rng.seed = seed_used
+	else:
+		rng.randomize()
+		seed_used = rng.seed
 	var start_id: String = START_POOL[rng.randi() % START_POOL.size()]
+	if seed_used == 0:
+		seed_used = rng.seed
 	if bot:
 		start_id = "smg"  # 测平衡时固定武器，免得随机开局把两次结果拉不开
 	if start_force != "":
@@ -374,10 +395,31 @@ func _make_hud() -> void:
 
 	hud_status = _label(layer, Vector2(18, 14), 20, Color(0.95, 0.96, 1.0))
 	hud_ammo = _label(layer, Vector2(18, 44), 20, Color(0.7, 0.95, 0.85))
+	hud_stat = _label(layer, Vector2(742, 16), 16, Color(0.55, 0.6, 0.68))
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
-	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   R 重开"
+	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   F3 调试   R 重开"
 
 	wpanel = _label(layer, Vector2(18, 84), 17, Color(0.78, 0.86, 1.0))
+
+	# F3 调试面板（默认关）
+	dbg_root = Control.new()
+	dbg_root.position = Vector2(836, 76)
+	dbg_root.size = Vector2(424, 160)
+	dbg_root.visible = dbg_on
+	dbg_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dbg_root.process_mode = Node.PROCESS_MODE_ALWAYS
+	layer.add_child(dbg_root)
+	var dbg_bg := Panel.new()
+	dbg_bg.size = Vector2(424, 160)
+	dbg_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var dbgsb := StyleBoxFlat.new()
+	dbgsb.bg_color = Color(0.03, 0.05, 0.09, 0.82)
+	dbgsb.border_color = Color(0.35, 0.5, 0.75, 0.7)
+	dbgsb.set_border_width_all(1)
+	dbgsb.set_corner_radius_all(6)
+	dbg_bg.add_theme_stylebox_override("panel", dbgsb)
+	dbg_root.add_child(dbg_bg)
+	dbg_text = _label(dbg_root, Vector2(12, 10), 15, Color(0.72, 0.86, 1.0))
 
 	build_root = Control.new()
 	build_root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -426,6 +468,12 @@ func _input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
+	if k == KEY_F3:
+		dbg_on = not dbg_on
+		if dbg_root != null:
+			dbg_root.visible = dbg_on
+		_refresh_dbg_panel(get_tree().get_nodes_in_group("enemy").size())
+		return
 	if picking:
 		if k >= KEY_1 and k <= KEY_4:
 			_take_card(k - KEY_1)
@@ -514,6 +562,9 @@ func _process(delta: float) -> void:
 			return
 	shot_at = -1.0
 	Engine.time_scale = 1.0
+	# 拍图的一帧里物理还没跑，选卡弹窗不会自己关，先替 bot 选掉
+	if picking and (shot_bot or playtest or pick_delay > 0.0):
+		_take_card(0)
 	if shot_pick and not picking:
 		_roll_offer()
 		_open_pick()
@@ -728,6 +779,50 @@ func _hud_tick(delta: float) -> void:
 	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
 	if fmod(elapsed, 0.1) < delta:
 		_refresh_hud()
+	_update_debug(delta)
+
+
+## 调试统计：FPS / 敌人数 / 可见敌人数 / 帧耗时。
+## 关闭 F3 面板时仍然维护常驻的那一小段（可见数 O(n) 遍历只在 0.25s 一次）
+func _update_debug(delta: float) -> void:
+	frame_ms = delta * 1000.0
+	frame_ms_max = maxf(frame_ms_max * 0.97, frame_ms)
+	dbg_acc += delta
+	if dbg_acc < 0.25:
+		return
+	dbg_acc = 0.0
+	var enemies := get_tree().get_nodes_in_group("enemy")
+	var t0 := Time.get_ticks_usec()
+	var ct: Transform2D = get_viewport().get_canvas_transform()
+	var vis := 0
+	for e in enemies:
+		var p: Vector2 = ct * (e as Node2D).global_position
+		if p.x >= 0.0 and p.y >= 0.0 and p.x <= 1280.0 and p.y <= 720.0:
+			vis += 1
+	vis_enemy = vis
+	enemy_ms = float(Time.get_ticks_usec() - t0) / 1000.0
+	if hud_stat != null:
+		hud_stat.text = "FPS %d · 敌 %d(可见 %d)" % [
+			int(Engine.get_frames_per_second()), enemies.size(), vis]
+	_refresh_dbg_panel(enemies.size())
+
+
+func _refresh_dbg_panel(enemy_total: int) -> void:
+	if dbg_text == null or not dbg_on:
+		return
+	dbg_text.text = "\n".join([
+		"FPS %d   帧 %.1fms   峰 %.1fms" % [int(Engine.get_frames_per_second()), frame_ms, frame_ms_max],
+		"敌人 %d   可见 %d   上限 %d   刷怪 %.2f/s" % [enemy_total, vis_enemy, MAX_ENEMIES, _spawn_rate()],
+		"掉落 %d   子弹 %d   宝箱 %d" % [
+			get_tree().get_nodes_in_group("pickup").size(),
+			get_tree().get_nodes_in_group("bullet").size(),
+			get_tree().get_nodes_in_group("chest").size()],
+		"需求 %.1f   实测 %.1f   需求比 %s" % [
+			_spawn_rate() * _wave_hp() * _plan_avg_mult(), cur_actual_dps(),
+			"%.0f%%" % (100.0 * _spawn_rate() * _wave_hp() * _plan_avg_mult() / maxf(cur_actual_dps(), 1.0))],
+		"敌人统计耗时 %.2fms" % enemy_ms,
+		"波次 %d   时间 %s   种子 %d   击杀 %d" % [wave, _fmt_time(elapsed), absi(seed_used) % 1000000000, kills_total],
+	])
 
 
 ## 波次血量：12 波之前走平缓曲线；之后额外乘 1.045/波 —— 这时玩家武器基本成型，
@@ -1934,6 +2029,11 @@ func _roll_recipe_card() -> Dictionary:
 
 
 func _open_pick() -> void:
+	# 两个全屏覆盖层不能同时开着：开选卡时先收起构筑屏，选完再放回来
+	var was_build: bool = build_root != null and build_root.visible
+	if was_build:
+		_pick_from_build = true
+		_toggle_build()
 	picking = true
 	pick_wait = 0.0
 	_paint_offer()
@@ -2002,6 +2102,10 @@ func _paint_offer() -> void:
 
 func _close_pick() -> void:
 	picking = false
+	# 选卡前如果正在构筑，选完回到构筑屏（材料变了，正好让玩家继续操作）
+	if not dead and build_root != null and not build_root.visible and _pick_from_build:
+		_toggle_build()
+	_pick_from_build = false
 	if pick_root != null:
 		for c in pick_root.get_children():
 			c.queue_free()
@@ -2276,8 +2380,8 @@ func _refresh_build() -> void:
 	info.append("等级 %d  →  %d     需要 %d 个模块     [U]" % [
 		level, level + 1, level_cost()
 	])
-	info.append("配方   [Q]/[E] 切换    [C] 合成选中    装置 %d 台（空闲 %d）" % [
-		devices.size(), devices.size() - _busy_devices()
+	info.append("配方 %d/%d   [Q]/[E] 翻页    [C] 合成选中    装置 %d 台（空闲 %d）" % [
+		recipe_sel + 1, MOD_ORDER.size(), devices.size(), devices.size() - _busy_devices()
 	])
 	# 只显示 8 行窗口：配方有 20 个，全列会顶出屏幕
 	var first := maxi(0, mini(recipe_sel - 3, MOD_ORDER.size() - 8))
