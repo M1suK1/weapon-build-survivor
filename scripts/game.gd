@@ -550,6 +550,10 @@ func _boardtest(delta: float) -> void:
 		bt_set = true
 		_set_quality(5)
 		weapon["mul"] = 1.0  # 把武器倍率钉成 1.0，否则随机开局的霰弹枪 1.11 会让自检数字飘
+		# 布局改成随机的了，但自检要的是固定 2×3，否则期望值对不上
+		weapon["layout"] = (LAYOUTS[5] as Array).duplicate()
+		while (weapon["slots"] as Array).size() < 6:
+			weapon["slots"].append(null)
 		weapon.interval = 1.0 if demo_board else 999.0  # 自检时不开火，排除弹药消耗的干扰
 		weapon.slots[0] = _new_module("reson")  # 共振（邻 1 共振、3 基础）
 		weapon.slots[1] = _new_module("reson")  # 共振（邻 0 共振、2 增幅、4 加法）
@@ -762,11 +766,94 @@ func _make_weapon(id: String, q: int) -> Dictionary:
 	return w
 
 
+## 布局生成：以基础网络（二连/折角/T/方形/十字）为积木，随机旋转镜像后拼到已有格子上。
+## 返回的格子永远连通（因为每块都贴着既有格子放），所以「插槽网络」不会出现孤岛。
+func _gen_layout(n: int) -> Array:
+	if n <= 2:
+		return [Vector2i(0, 0), Vector2i(1, 0)].slice(0, n)
+	var cells: Array = [Vector2i(0, 0)]
+	var compact := rng.randf() < 0.6  # 60% 密堆（枢纽集中），40% 留缝（多个小岛）
+	var guard := 0
+	while cells.size() < n and guard < 400:
+		guard += 1
+		var want := mini(n - cells.size(), rng.randi_range(2, 3))
+		var piece: Array = _roll_piece(want)
+		var placed := false
+		for attempt in 12:
+			# 选一个锚点格子，把积木贴到它的空邻居上
+			var anchor: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
+			var dirs: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+			var off: Vector2i = dirs[rng.randi_range(0, 3)]
+			var ghost: Array = []
+			for c in piece:
+				ghost.append(anchor + off * (2 if not compact else 1) + c)
+			var ok := cells.size() + ghost.size() <= n
+			for g in ghost:
+				if not ok:
+					break
+				if g in cells:
+					ok = false
+				if compact and not ok:
+					break
+			if not ok:
+				continue
+			if compact:
+				# 密堆要求至少一个格子与已有格子相邻（保证连通且紧凑）
+				var touch := false
+				for g in ghost:
+					for c2 in cells:
+						if absi(g.x - c2.x) + absi(g.y - c2.y) == 1:
+							touch = true
+				if not touch:
+					continue
+			cells.append_array(ghost)
+			placed = true
+			break
+		if not placed:
+			# 兜底：往任意空格补一格
+			for attempt2 in 40:
+				var a2: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
+				var dirs2: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+				var d2: Vector2i = dirs2[rng.randi_range(0, 3)]
+				var cand: Vector2i = a2 + d2
+				if not (cand in cells):
+					cells.append(cand)
+					break
+	# 平移到左上角从 (0,0) 开始，方便画
+	var minx := 999
+	var miny := 999
+	for c in cells:
+		minx = mini(minx, c.x)
+		miny = mini(miny, c.y)
+	var out: Array = []
+	for c in cells:
+		out.append(Vector2i(c.x - minx, c.y - miny))
+	out.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
+	return out
+
+
+## 从基础网络里抽一块（随机旋转 / 镜像）
+func _roll_piece(want: int) -> Array:
+	var base: Array
+	match want:
+		2: base = [Vector2i(0, 0), Vector2i(1, 0)]
+		_: base = [Vector2i(0, 0), Vector2i(1, 0), Vector2i(1, 1)]
+	var rot := rng.randi_range(0, 3)
+	var mir := rng.randi_range(0, 1)
+	var out: Array = []
+	for c in base:
+		var p := Vector2i(c.x, c.y)
+		if mir == 1:
+			p.x = -p.x
+		for r in rot:
+			p = Vector2i(-p.y, p.x)
+		out.append(p)
+	return out
 func _set_quality_of(w: Dictionary, q: int) -> void:
 	q = clampi(q, 1, 5)
 	w["quality"] = q
 	w["base"] = float(QUALITY_BASE[q])
-	w["layout"] = (LAYOUTS[q] as Array).duplicate()
+	w["layout"] = _gen_layout(int(LAYOUTS[q].size()))
 	var slots: Array = w["slots"]
 	while slots.size() < w["layout"].size():
 		slots.append(null)
