@@ -91,8 +91,11 @@ const WEAPONS := {
 	"pistol": {"name": "手枪", "range": 300.0, "interval": 0.70, "targets": 2, "mul": 1.00, "base": 1.0, "color": Color(0.55, 0.80, 1.00)},
 	"smg": {"name": "冲锋枪", "range": 210.0, "interval": 0.30, "targets": 1, "mul": 1.10, "base": 0.5, "color": Color(1.00, 0.85, 0.45)},
 	"shotgun": {"name": "霰弹枪", "range": 200.0, "interval": 0.90, "targets": 5, "mul": 1.11, "base": 0.8, "color": Color(1.00, 0.62, 0.35)},
-	"sniper": {"name": "狙击枪", "range": 640.0, "interval": 2.50, "targets": 1, "mul": 1.00, "base": 3.0, "color": Color(0.70, 0.95, 0.75)},
+	"sniper": {"name": "狙击枪", "range": 640.0, "interval": 2.50, "targets": 1, "mul": 1.00, "base": 3.0, "color": Color(0.70, 0.95, 0.75), "prefer": "shooter,charger"},
 	"laser": {"name": "激光环", "range": 420.0, "interval": 40.0, "targets": -1, "mul": 4.00, "base": 2.0, "color": Color(0.85, 0.55, 1.00)},
+	"beam": {"name": "镭射", "range": 380.0, "interval": 0.20, "targets": 1, "mul": 1.00, "base": 0.6, "color": Color(0.42, 0.98, 0.92), "prefer": "highest_hp"},
+	"grenade": {"name": "榴弹炮", "range": 460.0, "interval": 1.60, "targets": 1, "mul": 1.30, "base": 0.8, "color": Color(1.00, 0.52, 0.22)},
+	"blade": {"name": "环绕刃", "range": 105.0, "interval": 1.80, "targets": -1, "mul": 0.80, "base": 0.4, "color": Color(0.80, 0.92, 0.45)},
 }
 ## 开局随机一把（激光环 wave 8 之后才入池）
 const START_POOL := ["pistol", "smg", "shotgun"]
@@ -188,6 +191,7 @@ var flash: ColorRect
 var flash_t := 0.0
 var pulse_t := 0.0
 var shots: Array = []
+var blast_fx: Array = []
 
 # --- 合成：每台装置一个并行位，装置可反复买（材料堆积就多做几台） ---
 var devices: Array = []  # [{"kind": int, "left": float, "total": float}]，kind=0 表示空闲
@@ -211,6 +215,7 @@ var shot_guard := 0.0
 var shot_pick := false
 var pick_delay := 0.0
 var pick_wait := 0.0
+var start_force := ""
 var shot_build := false
 var shot_bot := false
 var ff := 0.0
@@ -247,6 +252,8 @@ func _ready() -> void:
 			demo_board = true
 		elif a == "shotbuild":
 			shot_build = true
+		elif a.begins_with("start="):
+			start_force = a.substr(6)
 		elif a.begins_with("pickdelay="):
 			pick_delay = float(a.substr(10))
 		elif a == "shotpick":
@@ -264,6 +271,8 @@ func _ready() -> void:
 	var start_id: String = START_POOL[rng.randi() % START_POOL.size()]
 	if bot:
 		start_id = "smg"  # 测平衡时固定武器，免得随机开局把两次结果拉不开
+	if start_force != "":
+		start_id = start_force
 	weapons.append(_make_weapon(start_id, 3))
 	_use_weapon(0)
 	for i in weapon.slots.size():
@@ -670,6 +679,12 @@ func _hud_tick(delta: float) -> void:
 		shots[i]["t"] = float(shots[i]["t"]) - delta
 		if float(shots[i]["t"]) <= 0.0:
 			shots.remove_at(i)
+	for i in range(blast_fx.size() - 1, -1, -1):
+		blast_fx[i]["t"] = float(blast_fx[i]["t"]) - delta
+		if float(blast_fx[i]["t"]) <= 0.0:
+			blast_fx.remove_at(i)
+	for w in weapons:
+		w["blade_ph"] = float(w.get("blade_ph", 0.0)) + delta * 2.2
 	queue_redraw()
 	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
 	if fmod(elapsed, 0.1) < delta:
@@ -1056,12 +1071,22 @@ func _fire(delta: float) -> void:
 		var tg := int(w["targets"])
 		if tg > 0:
 			tg += int(mo["targets"])
-		var targets := _targets_in_range(rng_d, tg)
-		if targets.is_empty():
+		var targets := _targets_for(w, rng_d, tg)
+		# 环绕刃不需要目标：空转一圈也照常烧弹药
+		if targets.is_empty() and String(w["id"]) != "blade":
 			w["fire_t"] = minf(float(w["fire_t"]), iv)
 			continue
 		w["fire_t"] = float(w["fire_t"]) - iv
 		var dmg := _shot_power_of(w)
+		# 镭射：对同一目标连续命中叠倍率，换目标归零（方案 §2.7）
+		if String(w["id"]) == "beam" and not targets.is_empty():
+			var tid := int(targets[0].get_instance_id())
+			if int(w.get("ramp_id", 0)) == tid:
+				w["ramp"] = minf(float(w.get("ramp", 0.0)) + 0.06, 1.20 + float(mo["ramp_cap"]))
+			else:
+				w["ramp"] = 0.0
+				w["ramp_id"] = tid
+			dmg *= 1.0 + float(w["ramp"])
 		# 时序核：每发连击 +4%，断连（超过 1.2 秒没开火）或换目标就重置
 		if float(mo["combo"]) > 0.0:
 			if float(w.get("combo_t", -99.0)) + 1.2 < elapsed:
@@ -1081,7 +1106,10 @@ func _fire(delta: float) -> void:
 				sl[i] = null
 				_refill(i, w)
 		var hits := float(targets.size())
-		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / hits
+		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / maxf(1.0, hits)
+		# 榴弹炮：主目标吃满，不叠多目标折扣（溅射在下面单独结算）
+		if String(w["id"]) == "grenade":
+			per = dmg
 		var dealt := 0.0
 		for e in targets:
 			if not is_instance_valid(e):
@@ -1110,6 +1138,22 @@ func _fire(delta: float) -> void:
 				e.hit = 0.18
 				if e.hp <= 0.0:
 					_kill(e)
+		# 榴弹炮：命中点周围 (90 + blast) 内的其他敌人吃 60%
+		if String(w["id"]) == "grenade" and not targets.is_empty():
+			var c0: Vector2 = targets[0].position
+			var br := 90.0 + float(mo["blast"])
+			for e in get_tree().get_nodes_in_group("enemy"):
+				if not is_instance_valid(e) or e in targets:
+					continue
+				if e.position.distance_to(c0) > br:
+					continue
+				var ds: float = dmg * 0.60
+				dealt += minf(ds, maxf(float(e.hp), 0.0))
+				e.hp = float(e.hp) - ds
+				e.hit = 0.18
+				if e.hp <= 0.0:
+					_kill(e)
+			blast_fx.append({"p": c0, "r": br, "t": 0.18})
 		_log_damage(w, dealt)
 		_add_shot(targets, w)
 
@@ -1134,6 +1178,40 @@ func _pierce_targets(from: Vector2, dir: Vector2, n: int, already: Array) -> Arr
 
 
 ## 搜寻目标：最近优先；targets < 0 表示范围内全部
+## 目标选择：支持 prefer（方案 §2.6/§2.7）
+##   "shooter,charger" → 先按优先种类过滤，再按距离
+##   "highest_hp"      → 按血量降序（镭射锁死精英，杂兵抢不走光束）
+func _targets_for(w: Dictionary, r: float, n: int) -> Array:
+	var pref := String(WEAPONS[w["id"]].get("prefer", ""))
+	if pref == "":
+		return _targets_in_range(r, n)
+	var cand: Array = []
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e):
+			continue
+		var d: float = e.position.distance_to(player.position)
+		if d <= r:
+			cand.append({"e": e, "d": d})
+	if pref == "highest_hp":
+		cand.sort_custom(func(a, b): return float(a["e"].hp) > float(b["e"].hp))
+	else:
+		var kinds := pref.split(",")
+		cand.sort_custom(func(a, b):
+			var pa := 0 if String(a["e"].kind) in kinds else 1
+			var pb := 0 if String(b["e"].kind) in kinds else 1
+			if pa != pb:
+				return pa < pb
+			return float(a["d"]) < float(b["d"]))
+	var out: Array = []
+	if n < 0:
+		for c in cand:
+			out.append(c["e"])
+	else:
+		for i in mini(n, cand.size()):
+			out.append(cand[i]["e"])
+	return out
+
+
 func _targets_in_range(r: float, n: int) -> Array:
 	var cand: Array = []
 	for e in get_tree().get_nodes_in_group("enemy"):
@@ -1170,6 +1248,20 @@ func _draw() -> void:
 		var c: Color = s["c"]
 		draw_line(s["a"], s["b"], Color(c.r, c.g, c.b, 0.85 * k), 2.5 * k + 0.5)
 		draw_circle(s["b"], 5.0 * k, Color(c.r, c.g, c.b, 0.5 * k))
+	# 榴弹爆炸：短暂扩散的橙色环
+	for b in blast_fx:
+		var k2: float = clampf(float(b["t"]) / 0.18, 0.0, 1.0)
+		draw_circle(b["p"], float(b["r"]), Color(1.0, 0.55, 0.22, 0.10 * k2))
+		draw_arc(b["p"], float(b["r"]) * (1.25 - 0.25 * k2), 0.0, TAU, 40, Color(1.0, 0.62, 0.28, 0.55 * k2), 2.0, true)
+	# 环绕刃：贴着玩家转的弧（每把刀一个相位）
+	for w in weapons:
+		if String(w["id"]) != "blade" or not bool(w["enabled"]):
+			continue
+		var rad := float(WEAPONS["blade"]["range"]) + float(_weapon_mods(w)["blade"])
+		var ph := float(w.get("blade_ph", 0.0))
+		for b in 2:
+			var a0 := ph + float(b) * PI
+			draw_arc(player.position, rad, a0, a0 + 1.5, 18, Color(0.82, 0.94, 0.45, 0.75), 4.0, true)
 
 
 func _nearest_enemy(max_dist: float) -> Node2D:
@@ -1277,6 +1369,12 @@ func grant_chest(from_chest: bool = false) -> void:
 	var pool: Array = START_POOL.duplicate()
 	# 狙击枪不适合当开局武器（单发/低射速，一个人清不动），只从宝箱里出
 	pool.append("sniper")
+	if wave >= 4:
+		pool.append("beam")
+	if wave >= 5:
+		pool.append("grenade")
+	if wave >= 6:
+		pool.append("blade")
 	if wave >= 8:
 		pool.append("laser")
 	var id: String = pool[rng.randi() % pool.size()]
