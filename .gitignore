@@ -1,0 +1,11 @@
+# Godot 4
+.godot/
+*.translation
+export_credentials.cfg
+
+# 本地工具链（不提交引擎本体）
+.tools/
+
+# 系统
+.DS_Store
+Thumbs.db
