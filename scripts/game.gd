@@ -345,7 +345,7 @@ func _make_hud() -> void:
 	build_root.add_child(board_root)
 
 	build_info = Label.new()
-	build_info.position = Vector2(100, 500)
+	build_info.position = Vector2(660, 190)
 	build_info.add_theme_font_size_override("font_size", 17)
 	build_info.add_theme_color_override("font_color", Color(0.82, 0.88, 0.98))
 	build_root.add_child(build_info)
