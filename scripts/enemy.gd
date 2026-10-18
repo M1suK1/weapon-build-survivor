@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 敌人：直线追击玩家。hp / max_hp / speed / kind / radius / body_color 由 game.gd 生成后赋值。
 ##
 ## 行为按 kind 分：
@@ -8,9 +8,9 @@ extends Node2D
 ##   shooter—— 保持 240~320 距离放风筝，每 2.6s 抬手 0.35s 后打一发子弹
 ##   charger—— 距玩家 ≤420 时蓄力 0.9s（画红线）→ 780px/s 冲刺 0.35s → 硬直 1.1s
 
-const SHOOT_MIN := 190.0
-const SHOOT_MAX := 240.0
-const SHOOT_CD := 2.6
+const SHOOT_MIN := 140.0
+const SHOOT_MAX := 190.0
+const SHOOT_CD := 3.2
 const SHOOT_WINDUP := 0.35
 const CHARGE_RANGE := 420.0
 const CHARGE_WINDUP := 0.9

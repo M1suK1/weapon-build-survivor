@@ -38,16 +38,31 @@ const QUALITY_NAME := {1: "白", 2: "绿", 3: "蓝", 4: "紫", 5: "金"}
 const QUALITY_SCHEDULE := {12: 4, 20: 5}
 ## 武器自带基础伤害：不吃模块次数，模块烧光时留一条底（否则 DPS 直接归零 = 必死）
 const QUALITY_BASE := {1: 0.5, 2: 0.8, 3: 1.0, 4: 1.5, 5: 2.0}
+
+## 武器种类：射程 / 间隔 / 目标数 是三种不同的资源。
+## 冲锋枪：高射速换弹药消耗；霰弹枪：多目标换单体伤害；狙击枪：长射程低消耗换出手频率。
+## targets = -1 表示「范围内全部敌人」（激光环的清场定位）。
+## 多目标伤害分摊：per = dmg × (1 + 0.1×(hits−1)) / hits —— 打得越多总伤越高，但每个目标更低。
+const WEAPONS := {
+	"pistol": {"name": "手枪", "range": 300.0, "interval": 0.70, "targets": 2, "mul": 1.00, "base": 1.0, "color": Color(0.55, 0.80, 1.00)},
+	"smg": {"name": "冲锋枪", "range": 210.0, "interval": 0.30, "targets": 1, "mul": 1.10, "base": 0.5, "color": Color(1.00, 0.85, 0.45)},
+	"shotgun": {"name": "霰弹枪", "range": 200.0, "interval": 0.90, "targets": 5, "mul": 1.11, "base": 0.8, "color": Color(1.00, 0.62, 0.35)},
+	"sniper": {"name": "狙击枪", "range": 640.0, "interval": 2.50, "targets": 1, "mul": 1.00, "base": 3.0, "color": Color(0.70, 0.95, 0.75)},
+	"laser": {"name": "激光环", "range": 420.0, "interval": 40.0, "targets": -1, "mul": 4.00, "base": 2.0, "color": Color(0.85, 0.55, 1.00)},
+}
+## 开局随机一把（激光环 wave 8 之后才入池）
+const START_POOL := ["pistol", "smg", "shotgun"]
 const WAVE_SEC := 40.0
 const DROP_CHANCE := 0.40
+const CHEST_GUARANTEE := 90.0
 const HP_BASE := 4.0
-const HP_GROWTH := 1.115
-const SPAWN_BASE := 2.0
-const SPAWN_GROWTH := 0.06
+const HP_GROWTH := 1.130
+const SPAWN_BASE := 0.70
+const SPAWN_GROWTH := 0.120
 const MAX_ENEMIES := 240
 const LEVEL_COST_BASE := 3.0
 const LEVEL_COST_GROWTH := 1.18
-const CONTACT_DPS := 7.0
+const CONTACT_DPS := 3.0
 ## 受击补偿：每损失这么多 HP 补 1 个模块（弹药系统的劣势补偿，挨打就回填）
 const DAMAGE_PER_MODULE := 8.0
 const CROWD_CAP := 6
@@ -79,9 +94,13 @@ const WAVE_PLANS := [
 const ELITE_FIRST_WAVE := 4
 const ELITE_EVERY := 6
 const ELITE_MAX := 3
-const SHOOTER_MAX := 10
+const SHOOTER_MAX := 5
 
-var weapon := {"interval": 1.0, "mul": 1.0, "quality": 3, "base": 1.0, "layout": [], "slots": []}
+## 背包：武器与合成装置共同占用容量（-1 = 先不做上限）
+var backpack_cap := -1
+var weapons: Array = []
+var weapon: Dictionary = {}
+var sel := 0
 var inventory := {1: 0, 2: 0, 3: 0, 4: 0}
 var level := 1
 var hp := 100.0
@@ -97,6 +116,7 @@ var kills_total := 0
 var dmg_src := {"contact": 0.0, "bullet": 0.0, "dash": 0.0}
 ## 最后一次挨打的时间：脱战 4s 后开始缓慢回血，否则子弹的零碎伤害会把人磨死
 var last_hit_t := -99.0
+var last_chest_t := 0.0
 const REGEN_DELAY := 4.0
 const REGEN_RATE := 1.2
 var damage_credit := 0.0
@@ -107,6 +127,7 @@ var player: Node2D
 var hud_status: Label
 var hud_ammo: Label
 var hud_tip: Label
+var wpanel: Label
 var build_root: Control
 var build_text: Label
 var board_root: Control
@@ -114,6 +135,7 @@ var build_info: Label
 var flash: ColorRect
 var flash_t := 0.0
 var pulse_t := 0.0
+var shots: Array = []
 
 # --- 合成：每台装置一个并行位，装置可反复买（材料堆积就多做几台） ---
 var devices: Array = []  # [{"kind": int, "left": float, "total": float}]，kind=0 表示空闲
@@ -133,6 +155,7 @@ var bot_ticks := 0
 # --- 截图（迭代视觉用）：godot --path . -- shot=abs/path.png shotat=12 shotbuild shotbot ff=60 ---
 var shot_path := ""
 var shot_at := -1.0
+var shot_guard := 0.0
 var shot_build := false
 var shot_bot := false
 var ff := 0.0
@@ -171,6 +194,7 @@ func _ready() -> void:
 			shot_build = true
 		elif a == "shotbot":
 			shot_bot = true
+			bot = true
 		elif a.begins_with("ff="):
 			ff = float(a.substr(3))
 	if playtest:
@@ -178,7 +202,11 @@ func _ready() -> void:
 		Engine.time_scale = 8.0
 		Engine.max_fps = 0
 	rng.randomize()
-	_set_quality(3)
+	var start_id: String = START_POOL[rng.randi() % START_POOL.size()]
+	if bot:
+		start_id = "smg"  # 测平衡时固定武器，免得随机开局把两次结果拉不开
+	weapons.append(_make_weapon(start_id, 3))
+	_use_weapon(0)
 	for i in weapon.slots.size():
 		weapon.slots[i] = _new_module(1)
 	inventory[1] = 2
@@ -261,7 +289,9 @@ func _make_hud() -> void:
 	hud_status = _label(layer, Vector2(18, 14), 20, Color(0.95, 0.96, 1.0))
 	hud_ammo = _label(layer, Vector2(18, 44), 20, Color(0.7, 0.95, 0.85))
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
-	hud_tip.text = "WASD 移动    TAB 构筑（暂停）    U 升级    C 加法    V 增幅    B 共振    X 造装置    R 重开"
+	hud_tip.text = "WASD 移动    TAB 构筑    U 升级    C 加法  V 增幅  B 共振    X 造装置    1-9 选武器  F 开关    R 重开"
+
+	wpanel = _label(layer, Vector2(18, 84), 17, Color(0.78, 0.86, 1.0))
 
 	build_root = Control.new()
 	build_root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -321,6 +351,15 @@ func _input(event: InputEvent) -> void:
 	elif k == KEY_R:
 		get_tree().paused = false
 		get_tree().reload_current_scene()
+	elif k == KEY_F and weapons.size() > 0:
+		var w: Dictionary = weapons[sel]
+		w["enabled"] = not bool(w["enabled"])
+		_pass()
+	elif k >= KEY_1 and k <= KEY_9:
+		var idx: int = k - KEY_1
+		if idx < weapons.size():
+			_use_weapon(idx)
+			_pass()
 	elif k == KEY_ESCAPE and build_root.visible:
 		_toggle_build()
 
@@ -331,6 +370,7 @@ func _toggle_build() -> void:
 	hud_status.visible = not build_root.visible
 	hud_ammo.visible = not build_root.visible
 	hud_tip.visible = not build_root.visible
+	wpanel.visible = not build_root.visible
 	if build_root.visible:
 		_refresh_build()
 
@@ -344,16 +384,26 @@ func _pass() -> void:
 
 func _process(delta: float) -> void:
 	# 快进：先按 8 倍速把局面推到 ff 秒，再恢复正常速度拍图
-	if ff > 0.0:
+	# 死亡时 elapsed 会停住，必须跳出快进分支，否则会一直等下去
+	if ff > 0.0 and not dead:
 		if elapsed < ff:
 			Engine.time_scale = 8.0
 			return
 		Engine.time_scale = 1.0
 		ff = 0.0
+	if ff > 0.0 and dead:
+		Engine.time_scale = 1.0
+		ff = 0.0
 	if shot_path == "" or shot_at < 0.0:
 		return
-	if elapsed < shot_at:
-		return
+	# 死了之后 elapsed 不再推进，如果还在等 shotat 就会永久挂住 —— 死亡即立刻拍
+	if not dead:
+		if elapsed < shot_at:
+			shot_guard += delta
+			if shot_guard > 90.0:
+				print("shot guard timeout")
+				get_tree().quit()
+			return
 	shot_at = -1.0
 	Engine.time_scale = 1.0
 	if shot_build and not build_root.visible:
@@ -446,7 +496,9 @@ func _bot_step(delta: float) -> void:
 ## 机器人走位：只躲「能秒人的东西」（子弹、冲刺精英的蓄力线），不躲杂兵。
 ## 原因：脉冲式武器最怕把怪拉成一长串尾巴——只有扎进怪堆里，一次开火才清得动。
 func _bot_move(delta: float) -> void:
-	if not (playtest and bot) or player == null or dead:
+	# 注意：条件里不能加 playtest——截图模式（shotbot）也要让 bot 动，否则它站着不动、
+	# 捡不到宝箱，拍出来的图跟无头测试的结果完全对不上。
+	if not bot or player == null or dead:
 		return
 	var push := Vector2.ZERO
 	for b in get_tree().get_nodes_in_group("bullet"):
@@ -460,7 +512,14 @@ func _bot_move(delta: float) -> void:
 				side = 1.0
 			push += b.dir.rotated(side * PI * 0.5) * (1.0 - d / 190.0) * 2.6
 	for e in get_tree().get_nodes_in_group("enemy"):
-		if not is_instance_valid(e) or e.kind != "charger":
+		if not is_instance_valid(e):
+			continue
+		var to_e: Vector2 = player.position - e.position
+		var de := to_e.length()
+		# 贴脸才退（不是风筝）——站着打才清得动，但也不能让怪白贴
+		if de < 70.0 and de > 1.0:
+			push += to_e / de * (1.0 - de / 70.0) * 0.6
+		if e.kind != "charger":
 			continue
 		if e.windup <= 0.0:
 			continue
@@ -471,6 +530,18 @@ func _bot_move(delta: float) -> void:
 			if side2 == 0.0:
 				side2 = 1.0
 			push += e.facing.rotated(side2 * PI * 0.5) * 2.4
+	# 宝箱是主要成长来源，有箱子就顺路去捡（躲子弹仍优先，因为权重更大）
+	var best: Node2D = null
+	var best_d := 760.0
+	for c in get_tree().get_nodes_in_group("chest"):
+		if not is_instance_valid(c):
+			continue
+		var dd: float = player.position.distance_to(c.position)
+		if dd < best_d:
+			best_d = dd
+			best = c
+	if best != null and best_d > 26.0:
+		push += player.position.direction_to(best.position) * 4.0
 	if push.length() > 0.05:
 		player.position += push.normalized() * float(player.SPEED) * delta
 		if player.position.length() > 1100.0:
@@ -501,7 +572,11 @@ func _hud_tick(delta: float) -> void:
 	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else flash_t * 0.9)
 	if pulse_t > 0.0:
 		pulse_t = maxf(0.0, pulse_t - delta)
-		queue_redraw()
+	for i in range(shots.size() - 1, -1, -1):
+		shots[i]["t"] = float(shots[i]["t"]) - delta
+		if float(shots[i]["t"]) <= 0.0:
+			shots.remove_at(i)
+	queue_redraw()
 	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
 	if fmod(elapsed, 0.1) < delta:
 		_refresh_hud()
@@ -534,7 +609,7 @@ func _plan_avg_mult() -> float:
 func _spawn_rate() -> float:
 	var base: float = SPAWN_BASE + wave * SPAWN_GROWTH
 	var raw: float = base * float(_plan()["coeff"]) / maxf(_plan_avg_mult(), 0.05)
-	return minf(raw, base * 1.7)
+	return minf(raw, base * 1.2)
 
 
 func _pick_kind() -> String:
@@ -563,34 +638,110 @@ func _count_kind(k: String) -> int:
 	return n
 
 
-func _set_quality(q: int) -> void:
+## 造一把武器：品质决定电路板布局，种类决定射程/间隔/目标数
+func _make_weapon(id: String, q: int) -> Dictionary:
+	var kd: Dictionary = WEAPONS[id]
+	var w := {
+		"id": id, "quality": clampi(q, 1, 5), "base": 0.0, "layout": [], "slots": [],
+		"range": float(kd["range"]), "interval": float(kd["interval"]),
+		"targets": int(kd["targets"]), "mul": float(kd["mul"]),
+		"enabled": true, "fire_t": 0.0,
+	}
+	_set_quality_of(w, q)
+	return w
+
+
+func _set_quality_of(w: Dictionary, q: int) -> void:
 	q = clampi(q, 1, 5)
-	weapon.quality = q
-	weapon.base = float(QUALITY_BASE[q])
-	weapon.layout = LAYOUTS[q].duplicate()
-	while weapon.slots.size() < weapon.layout.size():
-		weapon.slots.append(null)
-	while weapon.slots.size() > weapon.layout.size():
-		weapon.slots.pop_back()
+	w["quality"] = q
+	w["base"] = float(QUALITY_BASE[q])
+	w["layout"] = (LAYOUTS[q] as Array).duplicate()
+	var slots: Array = w["slots"]
+	while slots.size() < w["layout"].size():
+		slots.append(null)
+	while slots.size() > w["layout"].size():
+		slots.pop_back()
+
+
+func _set_quality(q: int) -> void:
+	_set_quality_of(weapon, q)
+
+
+## 切换「正在编辑/查看」的武器（电路板和合成都作用在它上面）
+func _use_weapon(i: int) -> void:
+	sel = clampi(i, 0, weapons.size() - 1)
+	weapon = weapons[sel]
+
+
+## 背包占用 = 武器数 + 装置数
+func _backpack_used() -> int:
+	return weapons.size() + devices.size()
+
+
+## 一把武器此刻的 DPS（多目标按分摊公式算总伤）
+func _weapon_dps(w: Dictionary) -> float:
+	var t := int(w["targets"])
+	var hits: float = 1.0
+	if t < 0:
+		hits = float(maxi(1, _count_in_range(float(w["range"]))))
+	elif t > 1:
+		hits = float(mini(t, maxi(1, _count_in_range(float(w["range"])))))
+	var per := _shot_power_of(w) * (1.0 + 0.1 * (hits - 1.0)) / hits
+	return per * hits / float(w["interval"])
+
+
+## 理论 DPS：空槽按「当前能合成的最高阶」填满后能打到多少（给玩家看成长空间）
+func _theory_dps(w: Dictionary) -> float:
+	var best := 2
+	if level >= int(CRAFT_UNLOCK[4]):
+		best = 4
+	elif level >= int(CRAFT_UNLOCK[3]):
+		best = 3
+	var fill: Array = (w["slots"] as Array).duplicate()
+	for i in fill.size():
+		if fill[i] == null:
+			fill[i] = _new_module(best)
+	var total := float(w["base"])
+	for v in _slot_out(fill, w):
+		total += float(v)
+	total *= float(w["mul"])
+	var t := int(w["targets"])
+	var hits: float = 1.0
+	if t < 0:
+		hits = 4.0
+	elif t > 1:
+		hits = float(t)
+	return total * (1.0 + 0.1 * (hits - 1.0)) / float(w["interval"])
+
+
+func _count_in_range(r: float) -> int:
+	var n := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(e) and e.position.distance_to(player.position) <= r:
+			n += 1
+	return n
 
 
 func _ensure_weapon() -> void:
 	var q := 3
-	for w in QUALITY_SCHEDULE:
-		if wave >= w:
-			q = maxi(q, int(QUALITY_SCHEDULE[w]))
-	if q != int(weapon.quality):
-		_set_quality(q)
+	for wv in QUALITY_SCHEDULE:
+		if wave >= wv:
+			q = maxi(q, int(QUALITY_SCHEDULE[wv]))
+	# 只升不降：宝箱给的品质高于当前波次基线时保留（否则随机品质毫无意义）
+	for w in weapons:
+		if q > int(w["quality"]):
+			_set_quality_of(w, q)
 
 
 ## 相邻 = 网格曼哈顿距离 1
-func _neighbors(i: int) -> Array:
+func _neighbors(i: int, w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
 	var out: Array = []
-	var a: Vector2i = weapon.layout[i]
-	for j in weapon.layout.size():
+	var a: Vector2i = ww["layout"][i]
+	for j in (ww["layout"] as Array).size():
 		if j == i:
 			continue
-		var b: Vector2i = weapon.layout[j]
+		var b: Vector2i = ww["layout"][j]
 		if absi(a.x - b.x) + absi(a.y - b.y) == 1:
 			out.append(j)
 	return out
@@ -611,52 +762,59 @@ func _within(i: int, r: int) -> Array:
 
 ## 每个槽位这次的「出力」。
 ## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
-func _slot_out() -> Array:
+## slots 显式传入时用它（理论 DPS 会传一份「填满的假板子」）
+func _slot_out(slots = null, w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	var sl: Array = (ww["slots"] as Array) if slots == null else slots
 	var base: Array = []
-	base.resize(weapon.slots.size())
-	for i in weapon.slots.size():
-		var m = weapon.slots[i]
+	base.resize(sl.size())
+	for i in sl.size():
+		var m = sl[i]
 		base[i] = 0.0 if m == null else float(TIERS[int(m.tier)].rate)
 	var eff := base.duplicate()
 	# 共振：相邻同阶（T4）模块 +50% 基础值
-	for i in weapon.slots.size():
-		var m = weapon.slots[i]
+	for i in sl.size():
+		var m = sl[i]
 		if m == null or int(m.tier) != 4:
 			continue
-		for j in _neighbors(i):
-			if weapon.slots[j] != null and int(weapon.slots[j].tier) == 4:
+		for j in _neighbors(i, ww):
+			if sl[j] != null and int(sl[j].tier) == 4:
 				eff[j] = float(eff[j]) + float(base[j]) * 0.5
 	var out: Array = []
-	out.resize(weapon.slots.size())
-	for i in weapon.slots.size():
-		var m = weapon.slots[i]
+	out.resize(sl.size())
+	for i in sl.size():
+		var m = sl[i]
 		if m == null:
 			out[i] = 0.0
 			continue
 		var v: float = eff[i]
 		var t := int(m.tier)
 		if t == 2:  # 加法：镜像相邻的低阶（基础）模块
-			for j in _neighbors(i):
-				if weapon.slots[j] != null and int(weapon.slots[j].tier) < t:
+			for j in _neighbors(i, ww):
+				if sl[j] != null and int(sl[j].tier) < t:
 					v += float(eff[j])
 		out[i] = v
 	# 增幅：自身 0 出力，每次开火把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
-	for i in weapon.slots.size():
-		var m = weapon.slots[i]
+	for i in sl.size():
+		var m = sl[i]
 		if m == null or int(m.tier) != 3:
 			continue
 		var b := float(TIERS[3].boost)
-		for j in _neighbors(i):
-			if weapon.slots[j] != null and int(weapon.slots[j].tier) != 3:
+		for j in _neighbors(i, ww):
+			if sl[j] != null and int(sl[j].tier) != 3:
 				out[j] = float(out[j]) + b
 	return out
 
 
-func _shot_power() -> float:
-	var total := float(weapon.base)
-	for v in _slot_out():
+func _shot_power_of(w: Dictionary) -> float:
+	var total := float(w["base"])
+	for v in _slot_out(null, w):
 		total += float(v)
-	return total * weapon.mul
+	return total * float(w["mul"])
+
+
+func _shot_power() -> float:
+	return _shot_power_of(weapon)
 
 
 ## 合成计时：每台装置各自倒计时，到点后产物进电路板
@@ -676,7 +834,9 @@ func _craft_tick(delta: float) -> void:
 
 
 ## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
+## 同时在地图上随机扔一个宝箱，让玩家有理由离开中心区域。
 func _on_wave_start() -> void:
+	_spawn_chest_random()
 	if wave < ELITE_FIRST_WAVE:
 		return
 	if (wave - ELITE_FIRST_WAVE) % ELITE_EVERY != 0:
@@ -693,6 +853,10 @@ func _on_wave_start() -> void:
 
 
 func _spawn(delta: float) -> void:
+	# 90 秒保底一个宝箱，防止运气差到一把新武器都拿不到
+	var since := elapsed - last_chest_t
+	if since >= CHEST_GUARANTEE and get_tree().get_nodes_in_group("chest").is_empty():
+		_spawn_chest_random()
 	spawn_acc += delta * _spawn_rate()
 	while spawn_acc >= 1.0:
 		spawn_acc -= 1.0
@@ -718,42 +882,81 @@ func _spawn_enemy(forced: String = "") -> void:
 	add_child(e)
 
 
+## 开火：每把武器各自按自己的间隔寻找目标。
+## 无目标不开火（不消耗次数，也不打空气）；多目标按分摊公式结算。
 func _fire(delta: float) -> void:
-	fire_t += delta
-	if fire_t < weapon.interval:
-		return
-	fire_t -= weapon.interval
-	if _nearest_enemy(FIRE_RANGE) == null:
-		return  # 无目标不开火 → 不消耗次数（基础伤害也不打空气）
-	var dmg := _shot_power()
-	for i in weapon.slots.size():
-		var m = weapon.slots[i]
-		if m == null:
+	for w in weapons:
+		if not bool(w["enabled"]):
 			continue
-		m.left = float(m.left) - 1.0
-		if m.left <= 0.0:
-			weapon.slots[i] = null
-			_refill(i)
-	if dmg <= 0.0:
-		return
-	# 开火脉冲：射程内全部敌人吃满这次伤害（单目标 1 发/秒 追不上海量刷怪）
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if not is_instance_valid(e):
+		var iv := float(w["interval"])
+		w["fire_t"] = float(w["fire_t"]) + delta
+		if float(w["fire_t"]) < iv:
 			continue
-		if e.position.distance_to(player.position) <= FIRE_RANGE:
-			e.hp = float(e.hp) - dmg
+		var targets := _targets_in_range(float(w["range"]), int(w["targets"]))
+		if targets.is_empty():
+			w["fire_t"] = minf(float(w["fire_t"]), iv)
+			continue
+		w["fire_t"] = float(w["fire_t"]) - iv
+		var dmg := _shot_power_of(w)
+		# 消耗次数：每次开火每个模块 -1（与目标数无关 → 高射速 = 高消耗）
+		var sl: Array = w["slots"]
+		for i in sl.size():
+			var m = sl[i]
+			if m == null:
+				continue
+			m["left"] = float(m["left"]) - 1.0
+			if float(m["left"]) <= 0.0:
+				sl[i] = null
+				_refill(i, w)
+		var hits := float(targets.size())
+		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / hits
+		for e in targets:
+			if not is_instance_valid(e):
+				continue
+			e.hp = float(e.hp) - per
 			e.hit = 0.18
 			if e.hp <= 0.0:
 				_kill(e)
-	pulse_t = PULSE_DUR
+		_add_shot(targets, w)
+
+
+## 搜寻目标：最近优先；targets < 0 表示范围内全部
+func _targets_in_range(r: float, n: int) -> Array:
+	var cand: Array = []
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e):
+			continue
+		var d: float = e.position.distance_to(player.position)
+		if d <= r:
+			cand.append({"e": e, "d": d})
+	cand.sort_custom(func(a, b): return float(a["d"]) < float(b["d"]))
+	var out: Array = []
+	if n < 0:
+		for c in cand:
+			out.append(c["e"])
+	else:
+		for i in mini(n, cand.size()):
+			out.append(cand[i]["e"])
+	return out
+
+
+## 弹道特效：瞬发 hitscan + 短命拖尾线（比脉冲圆环更能读出「谁在打谁」）
+func _add_shot(targets: Array, w: Dictionary) -> void:
+	var col: Color = Color(WEAPONS[w["id"]]["color"])
+	for e in targets:
+		if not is_instance_valid(e):
+			continue
+		shots.append({"a": player.position, "b": e.position, "t": 0.16, "c": col})
+	if shots.size() > 80:
+		shots = shots.slice(shots.size() - 80)
 
 
 func _draw() -> void:
-	if pulse_t > 0.0 and player != null:
-		var k: float = 1.0 - pulse_t / PULSE_DUR
-		var r: float = FIRE_RANGE * (0.25 + 0.75 * k)
-		draw_arc(player.position, r, 0.0, TAU, 48,
-			Color(0.5, 0.75, 1.0, (1.0 - k) * 0.55), 3.0, true)
+	for s in shots:
+		var k: float = clampf(float(s["t"]) / 0.16, 0.0, 1.0)
+		var c: Color = s["c"]
+		draw_line(s["a"], s["b"], Color(c.r, c.g, c.b, 0.85 * k), 2.5 * k + 0.5)
+		draw_circle(s["b"], 5.0 * k, Color(c.r, c.g, c.b, 0.5 * k))
 
 
 func _nearest_enemy(max_dist: float) -> Node2D:
@@ -774,7 +977,67 @@ func _kill(e: Node2D) -> void:
 	kill_times.append(elapsed)
 	if rng.randf() < DROP_CHANCE:
 		_spawn_pickup(e.position, 1)
+	if e.kind == "charger" and rng.randf() < 0.5:
+		_spawn_chest(e.position)
 	e.queue_free()
+
+
+## 宝箱：一局的主要成长来源（新武器）。品质按波次给，激光环 8 波后才入池。
+func _spawn_chest_random() -> void:
+	# 别刷在 HUD 底下（屏幕左上那块），否则图标被文字盖住、看不见也点不到
+	var half := get_viewport().get_visible_rect().size * 0.5
+	for attempt in 8:
+		var ang := rng.randf() * TAU
+		var d := rng.randf_range(220.0, 620.0)
+		var pos: Vector2 = player.position + Vector2(cos(ang), sin(ang)) * d
+		var scr: Vector2 = pos - player.position + half
+		if scr.x > 600.0 or scr.y > 190.0:
+			_spawn_chest(pos)
+			return
+	_spawn_chest(player.position + Vector2(0.0, 380.0))
+
+
+func _spawn_chest(pos: Vector2) -> void:
+	last_chest_t = elapsed
+	# 场上同时最多 3 个，多了先清掉最旧的
+	var olds := get_tree().get_nodes_in_group("chest")
+	if olds.size() >= 3:
+		olds[0].queue_free()
+	var c = Node2D.new()
+	c.set_script(load("res://scripts/chest.gd"))
+	c.add_to_group("chest")
+	c.position = pos
+	add_child(c)
+
+
+## 开箱：优先给新武器；背包满了就给一包模块
+func grant_chest(from_chest: bool = false) -> void:
+	if from_chest:
+		last_chest_t = elapsed
+	if backpack_cap >= 0 and _backpack_used() >= backpack_cap:
+		var t := 2 if wave >= 12 else 1
+		for k in 2:
+			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(30.0, 50.0), t)
+		return
+	var pool: Array = START_POOL.duplicate()
+	# 狙击枪不适合当开局武器（单发/低射速，一个人清不动），只从宝箱里出
+	pool.append("sniper")
+	if wave >= 8:
+		pool.append("laser")
+	var id: String = pool[rng.randi() % pool.size()]
+	var q := 2
+	if wave >= 20:
+		q = 4
+	elif wave >= 10:
+		q = 3
+	# 30% 概率再高一档，让开箱有惊喜
+	if rng.randf() < 0.3:
+		q = mini(5, q + 1)
+	var w := _make_weapon(id, q)
+	w["slots"][0] = _new_module(1)
+	weapons.append(w)
+	_use_weapon(weapons.size() - 1)
+	_refresh_hud()
 
 
 func _spawn_pickup(pos: Vector2, tier: int) -> void:
@@ -926,30 +1189,32 @@ func _take_tier(t: int, n: int, prefer_slots: bool = false) -> void:
 
 
 ## 整板出力（不含武器基础值，只用于互相比较）
-func _board_total() -> float:
+func _board_total(w = null) -> float:
 	var s := 0.0
-	for v in _slot_out():
+	for v in _slot_out(null, w):
 		s += v
 	return s
 
 
 ## 模块烧光后立刻用库存里「补上去出力最高」的那一阶补上同一格（保拓扑），没有就空着
 ## ——不能简单地「取最高阶」：增幅在没有载体相邻时出力是 0，会把格子填成空槽
-func _refill(i: int) -> void:
+func _refill(i: int, w = null) -> void:
+	var ww: Dictionary = weapon if w == null else w
+	var sl: Array = ww["slots"]
 	var best_t := 0
 	var best_v := -0.001
 	for t in [4, 3, 2, 1]:
 		if inventory[t] <= 0:
 			continue
-		weapon.slots[i] = _new_module(t)
-		var v := _board_total()
-		weapon.slots[i] = null
+		sl[i] = _new_module(t)
+		var v := _board_total(ww)
+		sl[i] = null
 		if v > best_v:
 			best_v = v
 			best_t = t
 	if best_t > 0:
 		inventory[best_t] -= 1
-		weapon.slots[i] = _new_module(best_t)
+		sl[i] = _new_module(best_t)
 
 
 ## 把一个模块装进电路板。
@@ -1061,15 +1326,25 @@ func add_module(tier: int) -> void:
 	inventory[tier] += 1
 
 
+## 总 DPS：所有启用武器之和（多目标按分摊公式）
 func cur_dps() -> float:
-	return _shot_power() / weapon.interval
+	var s := 0.0
+	for w in weapons:
+		if bool(w["enabled"]):
+			s += _weapon_dps(w)
+	return s
 
 
+## 总弹药消耗/秒：每把启用武器各自按「每次开火每个模块 -1」累加
 func cur_burn() -> float:
 	var b := 0.0
-	for m in weapon.slots:
-		if m != null:
-			b += 1.0 / (float(TIERS[m.tier].uses) * weapon.interval)
+	for w in weapons:
+		if not bool(w["enabled"]):
+			continue
+		var iv := float(w["interval"])
+		for m in w["slots"]:
+			if m != null:
+				b += 1.0 / (float(TIERS[m.tier].uses) * iv)
 	return b
 
 
@@ -1095,9 +1370,34 @@ func _refresh_hud() -> void:
 	]
 	if _count_filled() == 0:
 		hud_ammo.text += "    模块耗尽 · 仅基础 %.1f" % float(weapon.base)
-	hud_ammo.text += "    装置 %d/%d 台" % [_busy_devices(), devices.size()]
+	hud_ammo.text += "    装置 %d/%d 台    背包 %d%s" % [
+		_busy_devices(), devices.size(), _backpack_used(),
+		"" if backpack_cap < 0 else "/%d" % backpack_cap
+	]
 	hud_ammo.add_theme_color_override("font_color",
 		Color(0.7, 0.95, 0.85) if net >= 0.0 else Color(1.0, 0.55, 0.5))
+	_refresh_weapon_panel()
+
+
+## 左侧武器栏：每把武器一行，显示开关状态与「当前 DPS / 理论 DPS」
+func _refresh_weapon_panel() -> void:
+	if wpanel == null:
+		return
+	var s := ""
+	for i in weapons.size():
+		var w: Dictionary = weapons[i]
+		var kd: Dictionary = WEAPONS[w["id"]]
+		var on: bool = bool(w["enabled"])
+		var mark := "▸" if i == sel else " "
+		var cur := _weapon_dps(w) if on else 0.0
+		var th := _theory_dps(w)
+		var state := "[开]" if on else "[关]"
+		s += "%s%d %s %s %s  %s  当前 %5.1f / 理论 %5.1f\n" % [
+			mark, i + 1, state, str(kd["name"]), QUALITY_NAME[int(w["quality"])],
+			("%d槽" % (w["slots"] as Array).size()), cur, th
+		]
+	wpanel.text = s
+	wpanel.modulate = Color(1, 1, 1, 0.95)
 
 
 func _count_filled() -> int:
@@ -1115,10 +1415,21 @@ func _refresh_build() -> void:
 	var lines: Array = []
 	lines.append("构筑（暂停中）     TAB 返回")
 	lines.append("")
-	lines.append("武器  %s·%d 槽    interval %.2fs    mul ×%.2f    基础 %.1f    单次出力 %.1f" % [
-		QUALITY_NAME[int(weapon.quality)], weapon.slots.size(), weapon.interval,
-		weapon.mul, float(weapon.base), _shot_power()
+	lines.append("武器  %s·%s·%d 槽    射程 %.0f    间隔 %.2fs    目标 %s    基础 %.1f    单次出力 %.1f    当前 DPS %.1f" % [
+		str(WEAPONS[weapon["id"]]["name"]), QUALITY_NAME[int(weapon["quality"])],
+		(weapon["slots"] as Array).size(), float(weapon["range"]), float(weapon["interval"]),
+		"全部" if int(weapon["targets"]) < 0 else str(int(weapon["targets"])),
+		float(weapon["base"]), _shot_power(), _weapon_dps(weapon)
 	])
+	if weapons.size() > 1:
+		var names: Array = []
+		for i in weapons.size():
+			var w: Dictionary = weapons[i]
+			names.append("%d.%s%s(%s)" % [
+				i + 1, "▸" if i == sel else "", str(WEAPONS[w["id"]]["name"]),
+				"开" if bool(w["enabled"]) else "关"
+			])
+		lines.append("切换   " + "   ".join(names) + "    1-9 选   F 开关")
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []

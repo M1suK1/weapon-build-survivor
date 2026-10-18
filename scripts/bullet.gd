@@ -2,7 +2,7 @@ extends Node2D
 ## 射手子弹：直线飞行、命中玩家后消失。由 enemy.gd._fire_bullet() 生成。
 
 const SPEED := 290.0
-const DAMAGE := 7.0
+const DAMAGE := 5.0
 const LIFE := 5.0
 const RADIUS := 6.0
 
