@@ -22,21 +22,25 @@ const LAYOUTS := {
 const QUALITY_NAME := {1: "白", 2: "绿", 3: "蓝", 4: "紫", 5: "金"}
 ## 波次 → 品质：开局蓝（4 槽 T 型），12 波紫（5 槽十字），20 波金（6 槽双排）
 const QUALITY_SCHEDULE := {12: 4, 20: 5}
+## 武器自带基础伤害：不吃模块次数，模块烧光时留一条底（否则 DPS 直接归零 = 必死）
+const QUALITY_BASE := {1: 0.5, 2: 0.8, 3: 1.0, 4: 1.5, 5: 2.0}
 const WAVE_SEC := 40.0
 const DROP_CHANCE := 0.65
 const HP_BASE := 4.0
 const HP_GROWTH := 1.115
-const SPAWN_BASE := 1.10
-const SPAWN_GROWTH := 0.035
+const SPAWN_BASE := 2.0
+const SPAWN_GROWTH := 0.06
 const MAX_ENEMIES := 240
 const LEVEL_COST_BASE := 3.0
 const LEVEL_COST_GROWTH := 1.18
 const CONTACT_DPS := 7.0
+## 受击补偿：每损失这么多 HP 补 1 个模块（弹药系统的劣势补偿，挨打就回填）
+const DAMAGE_PER_MODULE := 8.0
 const CROWD_CAP := 6
-const FIRE_RANGE := 320.0
+const FIRE_RANGE := 260.0
 const PULSE_DUR := 0.30
 
-var weapon := {"interval": 1.0, "mul": 1.0, "quality": 3, "layout": [], "slots": []}
+var weapon := {"interval": 1.0, "mul": 1.0, "quality": 3, "base": 1.0, "layout": [], "slots": []}
 var inventory := {1: 0, 2: 0, 3: 0, 4: 0}
 var level := 1
 var hp := 100.0
@@ -48,6 +52,8 @@ var spawn_acc := 0.0
 var dead := false
 var kill_times: Array = []
 var kills_total := 0
+var damage_credit := 0.0
+var modules_from_damage := 0
 var rng := RandomNumberGenerator.new()
 
 var player: Node2D
@@ -69,12 +75,14 @@ var pt_limit := 0.0
 var pt_t := 0.0
 var pt_print := 0.0
 var bot_t := 0.0
+var bot_ticks := 0
 
-# --- 截图（迭代视觉用）：godot --path . -- shot=abs/path.png shotat=12 shotbuild=1 ---
+# --- 截图（迭代视觉用）：godot --path . -- shot=abs/path.png shotat=12 shotbuild shotbot ff=60 ---
 var shot_path := ""
-var shot_at := 0.0
-var shot_t := -1.0
+var shot_at := -1.0
 var shot_build := false
+var shot_bot := false
+var ff := 0.0
 
 
 func _ready() -> void:
@@ -93,11 +101,15 @@ func _ready() -> void:
 			pt_limit = float(a.substr(3))
 		elif a.begins_with("shot="):
 			shot_path = a.substr(5)
-			shot_t = 6.0
+			shot_at = 12.0
 		elif a.begins_with("shotat="):
-			shot_t = float(a.substr(7))
+			shot_at = float(a.substr(7))
 		elif a == "shotbuild":
 			shot_build = true
+		elif a == "shotbot":
+			shot_bot = true
+		elif a.begins_with("ff="):
+			ff = float(a.substr(3))
 	if playtest:
 		# 无头模拟按实时速度跑太慢，放大时间步（步长变粗，数值平衡够用）
 		Engine.time_scale = 8.0
@@ -167,12 +179,12 @@ func _make_hud() -> void:
 	build_root.add_child(build_text)
 
 	board_root = Control.new()
-	board_root.position = Vector2(80, 210)
+	board_root.position = Vector2(100, 185)
 	build_root.add_child(board_root)
 
 	build_info = Label.new()
-	build_info.position = Vector2(80, 440)
-	build_info.add_theme_font_size_override("font_size", 18)
+	build_info.position = Vector2(100, 500)
+	build_info.add_theme_font_size_override("font_size", 17)
 	build_info.add_theme_color_override("font_color", Color(0.82, 0.88, 0.98))
 	build_root.add_child(build_info)
 
@@ -220,12 +232,19 @@ func _pass() -> void:
 
 
 func _process(delta: float) -> void:
-	if shot_t <= 0.0:
+	# 快进：先按 8 倍速把局面推到 ff 秒，再恢复正常速度拍图
+	if ff > 0.0:
+		if elapsed < ff:
+			Engine.time_scale = 8.0
+			return
+		Engine.time_scale = 1.0
+		ff = 0.0
+	if shot_path == "" or shot_at < 0.0:
 		return
-	shot_t -= delta
-	if shot_t > 0.0:
+	if elapsed < shot_at:
 		return
-	shot_t = -1.0
+	shot_at = -1.0
+	Engine.time_scale = 1.0
 	if shot_build and not build_root.visible:
 		_toggle_build()
 	await get_tree().process_frame
@@ -248,6 +267,8 @@ func _physics_process(delta: float) -> void:
 	_hud_tick(delta)
 	if playtest:
 		_playtest_step(delta)
+	elif shot_bot:
+		_bot_step(delta)
 
 
 func _playtest_step(delta: float) -> void:
@@ -261,19 +282,18 @@ func _playtest_step(delta: float) -> void:
 		get_tree().quit()
 
 
-## 简化版「玩家」：压力大就合成，宽松就升级
+## 简化版「玩家」：每 3 次决策里有一次优先升级（解锁配方），其余优先合成（直接提升出力）
 func _bot_step(delta: float) -> void:
 	bot_t += delta
 	if bot_t < 0.5:
 		return
 	bot_t = 0.0
-	var need: float = _spawn_rate() * _wave_hp()
-	if cur_dps() * 1.15 < need:
-		try_craft()
-	elif _all_total() >= level_cost():
-		try_level()
-	else:
-		try_craft()
+	bot_ticks += 1
+	if bot_ticks % 3 == 0 and try_level():
+		return
+	if try_craft():
+		return
+	try_level()
 
 
 func _pt_log() -> void:
@@ -307,6 +327,7 @@ func _spawn_rate() -> float:
 func _set_quality(q: int) -> void:
 	q = clampi(q, 1, 5)
 	weapon.quality = q
+	weapon.base = float(QUALITY_BASE[q])
 	weapon.layout = LAYOUTS[q].duplicate()
 	while weapon.slots.size() < weapon.layout.size():
 		weapon.slots.append(null)
@@ -384,7 +405,7 @@ func _slot_out() -> Array:
 
 
 func _shot_power() -> float:
-	var total := 0.0
+	var total := float(weapon.base)
 	for v in _slot_out():
 		total += float(v)
 	return total * weapon.mul
@@ -404,7 +425,7 @@ func _spawn_enemy() -> void:
 	e.set_script(load("res://scripts/enemy.gd"))
 	e.add_to_group("enemy")
 	var ang: float = rng.randf() * TAU
-	e.position = player.position + Vector2(cos(ang), sin(ang)) * rng.randf_range(600.0, 700.0)
+	e.position = player.position + Vector2(cos(ang), sin(ang)) * rng.randf_range(520.0, 660.0)
 	e.max_hp = _wave_hp()
 	e.hp = e.max_hp
 	e.speed = rng.randf_range(80.0, 105.0) + wave * 1.2
@@ -416,10 +437,8 @@ func _fire(delta: float) -> void:
 	if fire_t < weapon.interval:
 		return
 	fire_t -= weapon.interval
-	if _count_filled() == 0:
-		return
 	if _nearest_enemy(FIRE_RANGE) == null:
-		return  # 无目标不开火 → 不消耗次数
+		return  # 无目标不开火 → 不消耗次数（基础伤害也不打空气）
 	var dmg := _shot_power()
 	for i in weapon.slots.size():
 		var m = weapon.slots[i]
@@ -490,10 +509,31 @@ func _contact(delta: float) -> void:
 			if touching >= CROWD_CAP:
 				break
 	if touching > 0:
-		hp -= CONTACT_DPS * touching * delta
+		var dmg: float = CONTACT_DPS * touching * delta
+		hp -= dmg
 		flash_t = 0.35
+		_reward_damage(dmg)
 	if hp <= 0.0:
 		_die()
+
+
+## 挨打换模块：弹药会耗尽，所以掉血要反哺构筑（越挨打越有料补）
+func _reward_damage(dmg: float) -> void:
+	damage_credit += dmg
+	while damage_credit >= DAMAGE_PER_MODULE:
+		damage_credit -= DAMAGE_PER_MODULE
+		modules_from_damage += 1
+		var t := _damage_reward_tier()
+		# 掉在玩家脚边，能看见它被吸走，反馈比直接进背包好
+		_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
+
+
+func _damage_reward_tier() -> int:
+	if wave >= 24:
+		return 3
+	if wave >= 12:
+		return 2
+	return 1
 
 
 func _die() -> void:
@@ -519,8 +559,8 @@ func _die() -> void:
 
 
 func _run_summary() -> String:
-	return "存活 %s   ·   波次 %d   ·   等级 %d   ·   击杀 %d" % [
-		_fmt_time(elapsed), wave, level, kills_total
+	return "存活 %s   ·   波次 %d   ·   等级 %d   ·   击杀 %d   ·   受击补偿 %d" % [
+		_fmt_time(elapsed), wave, level, kills_total, modules_from_damage
 	]
 
 
@@ -673,6 +713,8 @@ func _refresh_hud() -> void:
 		cur_dps(), sign_s, net, _inv_total(),
 		_count_filled(), weapon.slots.size()
 	]
+	if _count_filled() == 0:
+		hud_ammo.text += "    模块耗尽 · 仅基础 %.1f" % float(weapon.base)
 	hud_ammo.add_theme_color_override("font_color",
 		Color(0.7, 0.95, 0.85) if net >= 0.0 else Color(1.0, 0.55, 0.5))
 
@@ -692,15 +734,18 @@ func _refresh_build() -> void:
 	var lines: Array = []
 	lines.append("构筑（暂停中）     TAB 返回")
 	lines.append("")
-	lines.append("武器  %s·%d 槽    interval %.2fs    mul ×%.2f    单次出力 %.1f" % [
+	lines.append("武器  %s·%d 槽    interval %.2fs    mul ×%.2f    基础 %.1f    单次出力 %.1f" % [
 		QUALITY_NAME[int(weapon.quality)], weapon.slots.size(), weapon.interval,
-		weapon.mul, _shot_power()
+		weapon.mul, float(weapon.base), _shot_power()
 	])
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []
 	info.append("库存    基础 %d    加法 %d    阵列 %d    共振 %d" % [
 		inventory[1], inventory[2], inventory[3], inventory[4]
+	])
+	info.append("受击补偿    +%d 个模块（每 %d HP 补 1 个）" % [
+		modules_from_damage, int(DAMAGE_PER_MODULE)
 	])
 	info.append("")
 	info.append("等级 %d  →  %d     需要 %d 个模块     [U]" % [

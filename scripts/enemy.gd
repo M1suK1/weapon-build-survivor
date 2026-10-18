@@ -10,7 +10,7 @@ var hit := 0.0
 
 
 func _ready() -> void:
-	radius = randf_range(9.0, 13.0)
+	radius = randf_range(11.0, 15.0)
 	hpth = randf() * TAU
 
 
