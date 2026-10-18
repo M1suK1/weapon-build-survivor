@@ -1,4 +1,4 @@
-﻿extends Node2D
+extends Node2D
 ## 敌人：直线追击玩家。hp / max_hp / speed / kind / radius / body_color 由 game.gd 生成后赋值。
 ##
 ## 行为按 kind 分：
@@ -26,8 +26,13 @@ var speed := 100.0
 var radius := 13.0
 var kind := "flood"
 var body_color := Color(0.92, 0.30, 0.34)
+var hp_mult := 1.0  # 该种类的血量倍率：掉落量与它成正比（血厚 = 掉得多）
 var hpth := 0.0
 var hit := 0.0
+var _p: Node2D = null
+var orbit_dir := 1.0
+var hold_bias := 0.0
+var _g: Node = null
 var facing := Vector2.RIGHT
 
 ## 通用计时
@@ -44,6 +49,9 @@ func _ready() -> void:
 	hpth = randf() * TAU
 	shoot_t = randf() * SHOOT_CD
 	charge_cd = randf_range(1.0, 3.0)
+	orbit_dir = 1.0 if randf() < 0.5 else -1.0
+	# 每只怪站的距离不同，几十只才会围成一圈「有厚度」的包围圈，而不是挤成一个点
+	hold_bias = randf_range(0.0, 52.0)
 
 
 func _physics_process(delta: float) -> void:
@@ -117,7 +125,8 @@ func _shooter_step(delta: float, dist: float) -> void:
 
 
 func _fire_bullet() -> void:
-	var game = get_tree().get_first_node_in_group("game")
+	var game = _g if is_instance_valid(_g) else get_tree().get_first_node_in_group("game")
+	_g = game
 	if game == null:
 		return
 	var b = Node2D.new()

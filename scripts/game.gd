@@ -104,9 +104,13 @@ const DROP_CHANCE := 0.30
 const CHEST_GUARANTEE := 90.0
 const HP_BASE := 1.80
 const HP_GROWTH := 1.118
-const SPAWN_BASE := 1.20
-const SPAWN_GROWTH := 0.620
-const MAX_ENEMIES := 420
+const SPAWN_BASE := 0.90
+const SPAWN_GROWTH := 1.420
+const MAX_ENEMIES := 560
+## 生成半径必须落在**镜头视野之外**：zoom 0.62 时半个屏幕是 1032×580，
+## 对角约 1184，所以 >1200 才能保证任何角度都在屏幕外，让敌人「走」进来而不是凭空出现
+const SPAWN_R_MIN := 1220.0
+const SPAWN_R_MAX := 1400.0
 const LEVEL_COST_BASE := 3.0
 const LEVEL_COST_GROWTH := 1.18
 const CONTACT_DPS := 2.2
@@ -216,6 +220,10 @@ var shot_pick := false
 var pick_delay := 0.0
 var pick_wait := 0.0
 var start_force := ""
+var swarm_test := false
+var ws_done := false
+var _cam_pos := Vector2.ZERO
+var _cam: Camera2D = null
 var shot_build := false
 var shot_bot := false
 var ff := 0.0
@@ -256,6 +264,8 @@ func _ready() -> void:
 			start_force = a.substr(6)
 		elif a.begins_with("pickdelay="):
 			pick_delay = float(a.substr(10))
+		elif a == "swarmtest":
+			swarm_test = true
 		elif a == "shotpick":
 			shot_pick = true
 		elif a == "shotbot":
@@ -337,12 +347,14 @@ func _make_player() -> void:
 	player.add_to_group("player")
 	add_child(player)
 	var cam := Camera2D.new()
-	cam.position_smoothing_enabled = true
-	cam.position_smoothing_speed = 8.0
+	# 不开平滑：Godot 4.7 里 Camera2D 的 position smoothing 会和 zoom 打架，
+	# 偶尔把 screen_center 算成 NaN → 整个世界凭空消失（实测 t=520 全黑）
+	cam.position_smoothing_enabled = false
 	# 视野缩放：刷怪半径 540–660，不缩小镜头的话敌人全在屏幕外，看不到「一圈合围」
-	cam.zoom = Vector2(0.72, 0.72)
+	cam.zoom = Vector2(0.62, 0.62)
 	player.add_child(cam)
 	cam.make_current()
+	_cam = cam
 
 
 func _label(parent: Node, pos: Vector2, size: int, col: Color) -> Label:
@@ -516,6 +528,12 @@ func _process(delta: float) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if swarm_test and elapsed > 1.0 and not ws_done:
+		ws_done = true
+		for i in 120:
+			var gx := (i % 12) - 6
+			var gy := int(i / 12) - 5
+			_spawn_enemy_at(player.position + Vector2(gx * 52.0, gy * 46.0))
 	if dead or get_tree().paused:
 		return
 	# 升级选卡时冻结战斗（但 bot 会自动选，免得无头测试卡住）
@@ -592,6 +610,19 @@ func _bot_step(delta: float) -> void:
 	# 升级与合成抢同一批材料：只在材料明显富余时升级，否则板子会被饿空
 	if bot_ticks % 3 == 0 and _inv_total() >= level_cost() * 2:
 		try_level()
+	# 每 ~4 秒把编辑目标切到「最空的那把枪」，让材料摊到各把武器上（否则全堆在第一把）
+	if bot_ticks % 8 == 0:
+		var pick_i := sel
+		var best_n := 99
+		for i in weapons.size():
+			var n2 := 0
+			for m2 in weapons[i]["slots"]:
+				if m2 != null:
+					n2 += 1
+			if n2 < best_n:
+				best_n = n2
+				pick_i = i
+		_use_weapon(pick_i)
 	var guard := 0
 	while guard < 4 and try_craft():
 		guard += 1
@@ -663,22 +694,24 @@ func _pt_log() -> void:
 	var comp := ""
 	for m in weapon.slots:
 		comp += "." if m == null else str(int(m.tier))
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, _count_filled(), _board_weapon()["slots"].size(),
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		get_tree().get_nodes_in_group("enemy").size(),
+		get_tree().get_nodes_in_group("enemy").size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y,
 	])
 
 
 func _hud_tick(delta: float) -> void:
+	if _cam != null:
+		_cam_pos = _cam.get_screen_center_position()
 	flash_t = maxf(0.0, flash_t - delta)
 	if elapsed - last_hit_t > REGEN_DELAY:
 		hp = minf(max_hp, hp + (REGEN_RATE + 0.5 * float(_bl("regen"))) * delta)
 	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
-	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else flash_t * 0.9)
+	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else minf(flash_t * 0.9, 0.26))
 	if pulse_t > 0.0:
 		pulse_t = maxf(0.0, pulse_t - delta)
 	for i in range(shots.size() - 1, -1, -1):
@@ -697,8 +730,11 @@ func _hud_tick(delta: float) -> void:
 		_refresh_hud()
 
 
+## 波次血量：12 波之前走平缓曲线；之后额外乘 1.045/波 —— 这时玩家武器基本成型，
+## 难度不提就会被碾压（曲线要追着玩家的构筑跑，而不是线性增长）
 func _wave_hp() -> float:
-	return HP_BASE * pow(HP_GROWTH, wave - 1)
+	var late := maxf(0.0, float(wave - 12))
+	return HP_BASE * pow(HP_GROWTH, wave - 1) * pow(1.045, late)
 
 
 ## 当前波次的编成模板（每 5 波循环一次）
@@ -722,8 +758,9 @@ func _plan_avg_mult() -> float:
 ## → 每波「总血量/秒」大致相同，但密度与单个强度差别很大（这就是玩法的差别）
 ## 上限 1.7× 是同血量预算的补充：速度快的怪本来就多，不给上限疾行波会变成 9 只/秒的墙
 func _spawn_rate() -> float:
-	var base: float = SPAWN_BASE + wave * SPAWN_GROWTH
-	var raw: float = base * float(_plan()["coeff"]) / maxf(_plan_avg_mult(), 0.05)
+	# 数量优先：指数刷怪（1.20 × 1.19^波），血量只温和地涨，压力主要来自「人多」
+	var base: float = SPAWN_BASE * pow(SPAWN_GROWTH, float(wave))
+	var raw: float = base * float(_plan()["coeff"])
 	return minf(raw, base * 1.8)
 
 
@@ -1161,7 +1198,7 @@ func _pick_pattern() -> Dictionary:
 
 func _emit_pattern(id: String, n: int) -> void:
 	var base_ang: float = rng.randf() * TAU
-	var rad: float = rng.randf_range(540.0, 660.0)
+	var rad: float = rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
 	for i in n:
 		var pos: Vector2
 		match id:
@@ -1178,7 +1215,7 @@ func _emit_pattern(id: String, n: int) -> void:
 				var a3 := base_ang + TAU * float(i) / float(n)
 				pos = player.position + Vector2.from_angle(a3) * rad
 			_:
-				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(520.0, 660.0)
+				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
 		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
 			return
 		_spawn_enemy_at(pos)
@@ -1186,7 +1223,7 @@ func _emit_pattern(id: String, n: int) -> void:
 
 func _spawn_enemy(forced: String = "") -> void:
 	var ang: float = rng.randf() * TAU
-	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(520.0, 660.0), forced)
+	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX), forced)
 
 
 func _spawn_enemy_at(pos: Vector2, forced: String = "") -> void:
@@ -1197,6 +1234,7 @@ func _spawn_enemy_at(pos: Vector2, forced: String = "") -> void:
 	e.add_to_group("enemy")
 	e.position = pos
 	e.kind = kind
+	e.hp_mult = float(kd["hp_mult"])
 	e.radius = float(kd["radius"])
 	e.body_color = kd["color"]
 	e.max_hp = _wave_hp() * float(kd["hp_mult"])
@@ -1429,7 +1467,12 @@ func _nearest_enemy(max_dist: float) -> Node2D:
 func _kill(e: Node2D) -> void:
 	kills_total += 1
 	kill_times.append(elapsed)
-	if rng.randf() < DROP_CHANCE + 0.04 * float(_bl("drop")):
+	# 掉落与血量成正比：血厚的敌人掉更多（平均值 = DROP_CHANCE，所以总产出不变，只是分配变公平）
+	var chance := (DROP_CHANCE + 0.04 * float(_bl("drop"))) * float(e.hp_mult) / maxf(_plan_avg_mult(), 0.35)
+	while chance >= 1.0:
+		_spawn_pickup(e.position, "base")
+		chance -= 1.0
+	if rng.randf() < chance:
 		_spawn_pickup(e.position, "base")
 	if e.kind == "charger" and rng.randf() < 0.5:
 		_spawn_chest(e.position)
@@ -1529,7 +1572,10 @@ func grant_chest(from_chest: bool = false) -> void:
 	var id: String = pool[rng.randi() % pool.size()]
 	var q := _chest_quality()
 	var w := _make_weapon(id, q)
-	w["slots"][0] = _new_module("base")
+	# 新武器自带几块料，否则「宝箱给的新枪」永远只有 1 个基础模块，等于废铁
+	var seeded := 1 + int(wave / 8)
+	for i in mini(seeded, (w["slots"] as Array).size()):
+		w["slots"][i] = _new_module("base" if i == 0 else ("add" if wave >= 10 else "base"))
 	weapons.append(w)
 	# 不自动切到新武器：切过去会把「合成目标」和「当前编辑」拆成两把枪，两边都喂不饱
 	_refresh_hud()
@@ -1785,20 +1831,21 @@ func _board_weapon() -> Dictionary:
 	return best
 
 
-func _install(mid: String) -> void:
-	var w := _board_weapon()
-	var sl: Array = w["slots"]
+func _install(mid: String, w = null) -> void:
+	# 手动构筑（合成/升级/拾取）默认装到「当前选中的那把」，玩家按 1-9 切枪就能分别喂饱
+	var ww: Dictionary = weapon if w == null else w
+	var sl: Array = ww["slots"]
 	# 增幅是「支撑件」：板上一旦有载体（共振）且支撑已经 2 个，就攒在库存里当共振的料
 	if mid == "amp" and _installed_count(4) >= 1 and _installed_id("amp") >= 2:
 		_add_inv(mid, 1)
 		return
-	var now := _board_total(w)
+	var now := _board_total(ww)
 	var best := -1
 	var best_v := now + 0.001
 	for i in sl.size():
 		var m = sl[i]
 		sl[i] = _new_module(mid)
-		var v := _board_total(w)
+		var v := _board_total(ww)
 		sl[i] = m
 		if v > best_v:
 			best_v = v
@@ -2054,7 +2101,7 @@ func try_craft(mid: String = "") -> bool:
 func _auto_recipe() -> String:
 	# 板子没满 → 先拿加法把格子垫起来；满了 → 先攒增幅，够 2 个立刻换共振
 	var empty := 0
-	var sl: Array = _board_weapon()["slots"]
+	var sl: Array = weapon["slots"]
 	for i in sl.size():
 		if sl[i] == null:
 			empty += 1
@@ -2074,7 +2121,7 @@ func _auto_recipe() -> String:
 
 func _installed_count(t: int) -> int:
 	var n := 0
-	for m in _board_weapon()["slots"]:
+	for m in weapon["slots"]:
 		if m != null and int(m["tier"]) == t:
 			n += 1
 	return n
@@ -2082,14 +2129,14 @@ func _installed_count(t: int) -> int:
 
 func _installed_id(mid: String) -> int:
 	var n := 0
-	for m in _board_weapon()["slots"]:
+	for m in weapon["slots"]:
 		if m != null and String(m["id"]) == mid:
 			n += 1
 	return n
 
 
 func add_module(mid: String) -> void:
-	var sl: Array = _board_weapon()["slots"]
+	var sl: Array = weapon["slots"]
 	for i in sl.size():
 		if sl[i] == null:
 			sl[i] = _new_module(mid)
