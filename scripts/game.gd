@@ -43,6 +43,25 @@ const MOD_ORDER := ["add", "amp", "reson", "edge", "temper", "light", "extend", 
 	"breaker", "coolant", "recycle", "overload", "tempo", "multi", "belt", "spread", "focus", "charge", "blade"]
 const CORE_ORDER := ["base", "add", "amp", "reson"]
 
+## 升级三选一 buff 池（方案 §7.5）。cat：atk 攻击 / eco 经济 / sur 生存。
+## 每张卡只给 1 层，max 是层数上限；层数影响见 _weapon_mods / _new_module / device_cost 等处。
+const BUFFS := {
+	"pierce": {"name": "穿透", "cat": "atk", "rar": "blue", "max": 3, "desc": "主目标身后 120px 内最近敌人吃 60%"},
+	"elite": {"name": "破甲", "cat": "atk", "rar": "blue", "max": 4, "desc": "对冲刺精英与磐石 +25% 伤害"},
+	"rate": {"name": "攻速", "cat": "atk", "rar": "white", "max": 8, "desc": "开火间隔 ×0.92"},
+	"power": {"name": "强化", "cat": "atk", "rar": "white", "max": 6, "desc": "伤害倍率 ×1.10"},
+	"range": {"name": "射程", "cat": "atk", "rar": "white", "max": 4, "desc": "射程 +60"},
+	"target": {"name": "多目标", "cat": "atk", "rar": "gold", "max": 3, "desc": "每把武器目标数 +1"},
+	"drop": {"name": "掉落", "cat": "eco", "rar": "white", "max": 6, "desc": "敌人掉落率 +0.04"},
+	"uses": {"name": "耐久", "cat": "eco", "rar": "white", "max": 5, "desc": "新模块寿命 ×1.08"},
+	"craft": {"name": "工艺", "cat": "eco", "rar": "blue", "max": 5, "desc": "合成时间 ×0.90"},
+	"device": {"name": "降本", "cat": "eco", "rar": "blue", "max": 4, "desc": "装置造价 ×0.92"},
+	"hp": {"name": "体魄", "cat": "sur", "rar": "white", "max": 6, "desc": "最大 HP +15，立即回血"},
+	"contact": {"name": "护甲", "cat": "sur", "rar": "white", "max": 5, "desc": "接触伤害 ×0.92"},
+	"regen": {"name": "恢复", "cat": "sur", "rar": "blue", "max": 4, "desc": "脱战回血 +0.5/s"},
+	"iframe": {"name": "闪避", "cat": "sur", "rar": "gold", "max": 3, "desc": "受击无敌帧 +0.10s"},
+}
+
 ## 合成装置：每台 = 1 个并行合成位。可反复制造，材料堆积就多做几台（变相缩短合成时间）。
 ## 开局免费 1 台，第 n 台的价钱 = 12 × 1.7^(n-2) 个基础模块，上限 8 台。
 const DEVICE_COST_BASE := 12
@@ -129,6 +148,11 @@ var sel := 0
 ## 构筑屏里当前选中的配方（MOD_ORDER 下标），[Q]/[E] 切换
 var recipe_sel := 0
 var inventory := {}
+## 升级三选一：buffs[id] = 层数；offer = 本次 4 张卡；picking = 正在选卡（暂停战斗）
+var buffs := {}
+var offer: Array = []
+var picking := false
+var reroll_used := false
 var level := 1
 var hp := 100.0
 var max_hp := 100.0
@@ -156,6 +180,7 @@ var hud_ammo: Label
 var hud_tip: Label
 var wpanel: Label
 var build_root: Control
+var pick_root: Control
 var build_text: Label
 var board_root: Control
 var build_info: Label
@@ -183,6 +208,9 @@ var bot_ticks := 0
 var shot_path := ""
 var shot_at := -1.0
 var shot_guard := 0.0
+var shot_pick := false
+var pick_delay := 0.0
+var pick_wait := 0.0
 var shot_build := false
 var shot_bot := false
 var ff := 0.0
@@ -219,6 +247,10 @@ func _ready() -> void:
 			demo_board = true
 		elif a == "shotbuild":
 			shot_build = true
+		elif a.begins_with("pickdelay="):
+			pick_delay = float(a.substr(10))
+		elif a == "shotpick":
+			shot_pick = true
 		elif a == "shotbot":
 			shot_bot = true
 			bot = true
@@ -246,7 +278,7 @@ func _ready() -> void:
 ## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
 func _new_module(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
-	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15)
+	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15) * pow(1.08, float(_bl("uses")))
 	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u}
 
 
@@ -256,7 +288,8 @@ func _new_device() -> Dictionary:
 
 ## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
 func device_cost() -> int:
-	return int(round(DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))))
+	var base := DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))
+	return int(round(base * pow(0.92, float(_bl("device")))))
 
 
 func _idle_device() -> int:
@@ -319,7 +352,7 @@ func _make_hud() -> void:
 	hud_status = _label(layer, Vector2(18, 14), 20, Color(0.95, 0.96, 1.0))
 	hud_ammo = _label(layer, Vector2(18, 44), 20, Color(0.7, 0.95, 0.85))
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
-	hud_tip.text = "WASD 移动    TAB 构筑    U 升级    C 加法  V 增幅  B 共振    X 造装置    1-9 选武器  F 开关    R 重开"
+	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   R 重开"
 
 	wpanel = _label(layer, Vector2(18, 84), 17, Color(0.78, 0.86, 1.0))
 
@@ -328,6 +361,15 @@ func _make_hud() -> void:
 	build_root.visible = false
 	build_root.process_mode = Node.PROCESS_MODE_ALWAYS
 	layer.add_child(build_root)
+
+	pick_root = Control.new()
+	pick_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pick_root.visible = true
+	layer.add_child(pick_root)
+	var pbg := ColorRect.new()
+	pbg.color = Color(0.03, 0.04, 0.07, 0.86)
+	pbg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	pick_root.add_child(pbg)
 
 	var bg := ColorRect.new()
 	bg.color = Color(0.04, 0.05, 0.08, 0.88)
@@ -361,6 +403,12 @@ func _input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
+	if picking:
+		if k >= KEY_1 and k <= KEY_4:
+			_take_card(k - KEY_1)
+		elif k == KEY_T:
+			_reroll_recipe()
+		return
 	if k == KEY_TAB and not dead:
 		_toggle_build()
 	elif k == KEY_U:
@@ -428,6 +476,9 @@ func _process(delta: float) -> void:
 	if ff > 0.0 and dead:
 		Engine.time_scale = 1.0
 		ff = 0.0
+	# 选卡界面会冻结 elapsed，截图逻辑若还在等 shotat 就会永久挂住
+	if picking and shot_path != "":
+		elapsed = shot_at
 	if shot_path == "" or shot_at < 0.0:
 		return
 	# 死了之后 elapsed 不再推进，如果还在等 shotat 就会永久挂住 —— 死亡即立刻拍
@@ -440,6 +491,9 @@ func _process(delta: float) -> void:
 			return
 	shot_at = -1.0
 	Engine.time_scale = 1.0
+	if shot_pick and not picking:
+		_roll_offer()
+		_open_pick()
 	if shot_build and not build_root.visible:
 		_toggle_build()
 	await get_tree().process_frame
@@ -452,6 +506,12 @@ func _process(delta: float) -> void:
 
 func _physics_process(delta: float) -> void:
 	if dead or get_tree().paused:
+		return
+	# 升级选卡时冻结战斗（但 bot 会自动选，免得无头测试卡住）
+	if picking:
+		pick_wait += delta
+		if ((playtest or shot_bot) and not shot_pick) or (pick_delay > 0.0 and pick_wait > pick_delay):
+			_take_card(0)
 		return
 	elapsed += delta
 	var prev_wave := wave
@@ -601,7 +661,7 @@ func _pt_log() -> void:
 func _hud_tick(delta: float) -> void:
 	flash_t = maxf(0.0, flash_t - delta)
 	if elapsed - last_hit_t > REGEN_DELAY:
-		hp = minf(max_hp, hp + REGEN_RATE * delta)
+		hp = minf(max_hp, hp + (REGEN_RATE + 0.5 * float(_bl("regen"))) * delta)
 	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
 	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else flash_t * 0.9)
 	if pulse_t > 0.0:
@@ -889,6 +949,18 @@ func _weapon_mods(w: Dictionary) -> Dictionary:
 		for m in w["slots"]:
 			if m != null and String(m["id"]) == "spread":
 				mo["targets"] = int(mo["targets"]) + 1
+	# 升级 buff：全局修正
+	var bl := float(_bl("rate"))
+	if bl > 0.0:
+		mo["iv"] = float(mo["iv"]) * pow(0.92, bl)
+	var bpow := float(_bl("power"))
+	if bpow > 0.0:
+		mo["mul"] = float(mo["mul"]) * pow(1.10, bpow)
+	mo["range"] = float(mo["range"]) + 60.0 * float(_bl("range"))
+	mo["pierce"] = int(mo["pierce"]) + _bl("pierce")
+	mo["elite"] = float(mo["elite"]) + 0.25 * float(_bl("elite"))
+	if int(w["targets"]) > 0:
+		mo["targets"] = int(mo["targets"]) + _bl("target")
 	return mo
 
 
@@ -1116,7 +1188,7 @@ func _nearest_enemy(max_dist: float) -> Node2D:
 func _kill(e: Node2D) -> void:
 	kills_total += 1
 	kill_times.append(elapsed)
-	if rng.randf() < DROP_CHANCE:
+	if rng.randf() < DROP_CHANCE + 0.04 * float(_bl("drop")):
 		_spawn_pickup(e.position, "base")
 	if e.kind == "charger" and rng.randf() < 0.5:
 		_spawn_chest(e.position)
@@ -1251,7 +1323,7 @@ func _contact(delta: float) -> void:
 			if touching >= CROWD_CAP:
 				break
 	if touching > 0:
-		var dmg: float = CONTACT_DPS * touching * delta
+		var dmg: float = CONTACT_DPS * pow(0.92, float(_bl("contact"))) * touching * delta
 		dmg_src["contact"] = float(dmg_src["contact"]) + dmg
 		last_hit_t = elapsed
 		hp -= dmg
@@ -1512,7 +1584,174 @@ func try_level() -> bool:
 	if left > 0:
 		return false
 	level += 1
+	_roll_offer()
+	_open_pick()
 	return true
+
+
+## buff 层数
+func _bl(id: String) -> int:
+	return int(buffs.get(id, 0))
+
+
+## 抽 4 张卡：3 张 buff（攻击/经济/生存各 1）+ 1 张配方卡
+func _roll_offer() -> void:
+	offer.clear()
+	reroll_used = false
+	var cats := ["atk", "eco", "sur"]
+	for c in cats:
+		var pool: Array = []
+		for id in BUFFS:
+			var d: Dictionary = BUFFS[id]
+			if String(d["cat"]) != c:
+				continue
+			if _bl(id) >= int(d["max"]):
+				continue
+			if String(d["rar"]) == "gold" and level <= 4:
+				continue
+			pool.append(id)
+		if pool.is_empty():
+			pool = ["rate", "drop", "hp"]
+		var pick: String = String(pool[rng.randi_range(0, pool.size() - 1)])
+		offer.append({"kind": "buff", "id": pick})
+	offer.append(_roll_recipe_card())
+
+
+## 配方卡：从已解锁的配方里抽一个（特化配方只在拥有对应武器时进池）
+func _roll_recipe_card() -> Dictionary:
+	var pool: Array = []
+	for mid in MOD_ORDER:
+		var d: Dictionary = MODULES[mid]
+		var bind := String(d.get("bind", ""))
+		if bind != "":
+			var has := false
+			for w in weapons:
+				if String(w["id"]) == bind:
+					has = true
+			if not has:
+				continue
+		if level < int(CRAFT_UNLOCK.get(mid, 99)) - 3:
+			continue
+		pool.append(mid)
+	if pool.is_empty():
+		pool = ["add"]
+	var mid2: String = String(pool[rng.randi_range(0, pool.size() - 1)])
+	return {"kind": "recipe", "id": mid2}
+
+
+func _open_pick() -> void:
+	picking = true
+	pick_wait = 0.0
+	_paint_offer()
+
+
+func _paint_offer() -> void:
+	if pick_root == null:
+		return
+	for c in pick_root.get_children():
+		c.queue_free()
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.07, 0.88)
+	bg.position = Vector2.ZERO
+	bg.size = Vector2(1280, 720)
+	pick_root.add_child(bg)
+	var w_card := 250.0
+	var gap := 18.0
+	var total := 4.0 * w_card + 3.0 * gap
+	var x0 := (1280.0 - total) * 0.5
+	var title := _label(pick_root, Vector2(x0, 118), 28, Color(0.95, 0.93, 0.86))
+	title.text = "升级！点卡片 或 按 1–4 选择"
+	var sub := _label(pick_root, Vector2(x0, 158), 17, Color(0.72, 0.78, 0.88))
+	sub.text = ("配方卡可以按 T 换成第 4 张 buff" % level) if not reroll_used else "配方卡已经换过了"
+	for i in offer.size():
+		var card: Dictionary = offer[i]
+		var col := Color(0.55, 0.58, 0.66)
+		var nm := ""
+		var ds := ""
+		if String(card["kind"]) == "buff":
+			var d: Dictionary = BUFFS[String(card["id"])]
+			nm = "%s  Lv%d→%d" % [String(d["name"]), _bl(String(card["id"])), _bl(String(card["id"])) + 1]
+			ds = String(d["desc"])
+			var r := String(d["rar"])
+			col = Color(0.62, 0.86, 1.0) if r == "blue" else (Color(1.0, 0.84, 0.35) if r == "gold" else Color(0.82, 0.84, 0.90))
+		else:
+			var d2: Dictionary = MODULES[String(card["id"])]
+			nm = "配方 · %s" % String(d2["name"])
+			ds = "立刻获得 1 个（%d 阶）" % int(d2["tier"])
+			col = Color(0.55, 0.95, 0.72)
+		var btn := Button.new()
+		btn.position = Vector2(x0 + float(i) * (w_card + gap), 200)
+		btn.size = Vector2(w_card, 210)
+		btn.text = "%d   %s\n\n%s" % [i + 1, nm, ds]
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		btn.add_theme_font_size_override("font_size", 18)
+		btn.add_theme_color_override("font_color", col)
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
+		sb.border_color = col
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(10)
+		sb.content_margin_left = 14
+		sb.content_margin_right = 14
+		sb.content_margin_top = 12
+		btn.add_theme_stylebox_override("normal", sb)
+		var sh := sb.duplicate() as StyleBoxFlat
+		sh.bg_color = Color(0.18, 0.20, 0.26, 0.99)
+		sh.border_color = Color(1, 1, 1)
+		btn.add_theme_stylebox_override("hover", sh)
+		btn.add_theme_stylebox_override("pressed", sh)
+		btn.add_theme_stylebox_override("focus", sh)
+		pick_root.add_child(btn)
+		btn.pressed.connect(_take_card.bind(i))
+
+
+func _close_pick() -> void:
+	picking = false
+	if pick_root != null:
+		for c in pick_root.get_children():
+			c.queue_free()
+
+
+## 领第 i 张卡
+func _take_card(i: int) -> void:
+	if i < 0 or i >= offer.size():
+		return
+	var card: Dictionary = offer[i]
+	var id := String(card["id"])
+	if String(card["kind"]) == "buff":
+		buffs[id] = _bl(id) + 1
+		if id == "hp":
+			max_hp += 15.0
+			hp = minf(max_hp, hp + 15.0)
+	else:
+		_add_inv(id, 1 + int(level / 12))
+	_close_pick()
+	_refresh_hud()
+
+
+## 把配方卡 reroll 成第 4 张 buff（每级一次）
+func _reroll_recipe() -> void:
+	if reroll_used or picking == false or offer.size() < 4:
+		return
+	if String(offer[3]["kind"]) != "recipe":
+		return
+	var used := {}
+	for c in offer:
+		if String(c["kind"]) == "buff":
+			used[String(c["id"])] = true
+	var pool: Array = []
+	for id in BUFFS:
+		if used.has(id):
+			continue
+		if _bl(id) >= int(BUFFS[id]["max"]):
+			continue
+		pool.append(id)
+	if pool.is_empty():
+		return
+	offer[3] = {"kind": "buff", "id": String(pool[rng.randi_range(0, pool.size() - 1)])}
+	reroll_used = true
+	_paint_offer()
 
 
 ## 该配方当前能不能开：绑定武器、解锁等级、材料
@@ -1558,7 +1797,7 @@ func try_craft(mid: String = "") -> bool:
 		return false
 	var t := int(st["tier"])
 	_take_tier(t - 1, int(st["cost"]))
-	var dur := float(CRAFT_TIME[t])
+	var dur := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
 	devices[idx]["kind"] = mid
 	devices[idx]["total"] = dur
 	devices[idx]["left"] = dur
@@ -1755,7 +1994,7 @@ func _refresh_build() -> void:
 		var mark := "▸" if i == recipe_sel else " "
 		info.append("  %s %-6s %d×%d阶  %4.0fs  %s" % [
 			mark, String(MODULES[mid]["name"]), int(st["cost"]), t - 1,
-			float(CRAFT_TIME[t]), String(st["state"])
+			float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft"))), String(st["state"])
 		])
 	if devices.size() < DEVICE_MAX:
 		info.append("    [X] 造装置  需要 %d 个基础模块" % device_cost())

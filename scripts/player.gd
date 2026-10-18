@@ -44,7 +44,7 @@ func take_hit(dmg: float, push: Vector2) -> bool:
 	var g = get_tree().get_first_node_in_group("game")
 	if g == null or not g.has_method("hurt_player"):
 		return false
-	invuln = 0.35
+	invuln = 0.35 + 0.10 * float(g._bl("iframe"))
 	g.hurt_player(dmg, push)
 	return true
 
