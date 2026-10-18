@@ -97,7 +97,7 @@ const ELITE_MAX := 3
 const SHOOTER_MAX := 5
 
 ## 背包：武器与合成装置共同占用容量（-1 = 先不做上限）
-var backpack_cap := -1
+var backpack_cap := 6
 var weapons: Array = []
 var weapon: Dictionary = {}
 var sel := 0
@@ -249,6 +249,8 @@ func _busy_devices() -> int:
 ## 用基础模块造一台新装置（材料堆积时的唯一出口）
 func buy_device() -> bool:
 	if devices.size() >= DEVICE_MAX:
+		return false
+	if _backpack_used() >= backpack_cap:
 		return false
 	var cost := device_cost()
 	if inventory[1] < cost:
@@ -424,8 +426,6 @@ func _physics_process(delta: float) -> void:
 	wave = int(elapsed / WAVE_SEC) + 1
 	if wave != prev_wave:
 		_on_wave_start()
-	if not boardtest:
-		_ensure_weapon()
 	_bot_move(delta)
 	_spawn(delta)
 	_craft_tick(delta)
@@ -645,7 +645,7 @@ func _make_weapon(id: String, q: int) -> Dictionary:
 		"id": id, "quality": clampi(q, 1, 5), "base": 0.0, "layout": [], "slots": [],
 		"range": float(kd["range"]), "interval": float(kd["interval"]),
 		"targets": int(kd["targets"]), "mul": float(kd["mul"]),
-		"enabled": true, "fire_t": 0.0,
+		"enabled": true, "fire_t": 0.0, "dmg": {},
 	}
 	_set_quality_of(w, q)
 	return w
@@ -678,7 +678,8 @@ func _backpack_used() -> int:
 	return weapons.size() + devices.size()
 
 
-## 一把武器此刻的 DPS（多目标按分摊公式算总伤）
+## 一把武器此刻的 DPS（按板面实装模块算；多目标按分摊公式算总伤）
+## 这是「理论 DPS」：假设目标一直够、弹药一直有
 func _weapon_dps(w: Dictionary) -> float:
 	var t := int(w["targets"])
 	var hits: float = 1.0
@@ -690,28 +691,37 @@ func _weapon_dps(w: Dictionary) -> float:
 	return per * hits / float(w["interval"])
 
 
-## 理论 DPS：空槽按「当前能合成的最高阶」填满后能打到多少（给玩家看成长空间）
+## 理论 DPS 与 _weapon_dps 同义（v2.6 起不再假设空槽填满：那是「未来」不是「现在」）
 func _theory_dps(w: Dictionary) -> float:
-	var best := 2
-	if level >= int(CRAFT_UNLOCK[4]):
-		best = 4
-	elif level >= int(CRAFT_UNLOCK[3]):
-		best = 3
-	var fill: Array = (w["slots"] as Array).duplicate()
-	for i in fill.size():
-		if fill[i] == null:
-			fill[i] = _new_module(best)
-	var total := float(w["base"])
-	for v in _slot_out(fill, w):
-		total += float(v)
-	total *= float(w["mul"])
-	var t := int(w["targets"])
-	var hits: float = 1.0
-	if t < 0:
-		hits = 4.0
-	elif t > 1:
-		hits = float(t)
-	return total * (1.0 + 0.1 * (hits - 1.0)) / float(w["interval"])
+	return _weapon_dps(w)
+
+
+## 实测 DPS：最近 5 秒真正打出去的伤害 ÷ 5
+## 用 0.5 秒一个桶（10 个桶 = 5 秒），比存每条伤害省内存，也天然做成滚动窗口
+const DMG_BUCKET := 0.5
+const DMG_BUCKETS := 10
+
+
+func _log_damage(w: Dictionary, dmg: float) -> void:
+	if dmg <= 0.0:
+		return
+	var b := int(elapsed / DMG_BUCKET)
+	var hist: Dictionary = w["dmg"]
+	hist[b] = float(hist.get(b, 0.0)) + dmg
+	# 顺手剪掉窗口外的桶，避免字典无限长
+	for k in hist.keys():
+		if int(k) < b - DMG_BUCKETS:
+			hist.erase(k)
+
+
+func _actual_dps(w: Dictionary) -> float:
+	var b := int(elapsed / DMG_BUCKET)
+	var hist: Dictionary = w["dmg"]
+	var sum := 0.0
+	for k in hist.keys():
+		if int(k) > b - DMG_BUCKETS:
+			sum += float(hist[k])
+	return sum / (DMG_BUCKET * DMG_BUCKETS)
 
 
 func _count_in_range(r: float) -> int:
@@ -722,15 +732,10 @@ func _count_in_range(r: float) -> int:
 	return n
 
 
+## v2.6 起品质只由「宝箱」决定：拿到即定死，不再跟着波次统一抬升
+## （否则抽到什么最后都是紫 5 槽，宝箱的赌性就没了）
 func _ensure_weapon() -> void:
-	var q := 3
-	for wv in QUALITY_SCHEDULE:
-		if wave >= wv:
-			q = maxi(q, int(QUALITY_SCHEDULE[wv]))
-	# 只升不降：宝箱给的品质高于当前波次基线时保留（否则随机品质毫无意义）
-	for w in weapons:
-		if q > int(w["quality"]):
-			_set_quality_of(w, q)
+	pass
 
 
 ## 相邻 = 网格曼哈顿距离 1
@@ -910,13 +915,17 @@ func _fire(delta: float) -> void:
 				_refill(i, w)
 		var hits := float(targets.size())
 		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / hits
+		var dealt := 0.0
 		for e in targets:
 			if not is_instance_valid(e):
 				continue
+			# 实际打掉的血量（不超过剩余血量），否则溢出伤害会把实测 DPS 撑高
+			dealt += minf(per, maxf(float(e.hp), 0.0))
 			e.hp = float(e.hp) - per
 			e.hit = 0.18
 			if e.hp <= 0.0:
 				_kill(e)
+		_log_damage(w, dealt)
 		_add_shot(targets, w)
 
 
@@ -1010,6 +1019,38 @@ func _spawn_chest(pos: Vector2) -> void:
 	add_child(c)
 
 
+## 宝箱品质权重表（方案 §9.2）：白2 / 绿3 / 蓝4 / 紫5 / 金6 槽，按波次加权
+## 这是「宝箱」唯一的品质来源，不再有第二个人往回改它
+func _chest_quality() -> int:
+	var rows := [
+		[55, 35, 10, 0, 0],    # 1–5
+		[30, 42, 24, 4, 0],    # 6–10
+		[10, 35, 40, 14, 1],   # 11–15
+		[0, 20, 40, 32, 8],    # 16–20
+		[0, 10, 30, 42, 18],   # 21+
+	]
+	var idx := 0
+	if wave >= 21:
+		idx = 4
+	elif wave >= 16:
+		idx = 3
+	elif wave >= 11:
+		idx = 2
+	elif wave >= 6:
+		idx = 1
+	var w: Array = rows[idx]
+	var total := 0
+	for v in w:
+		total += int(v)
+	var roll := rng.randi() % total
+	var acc := 0
+	for i in w.size():
+		acc += int(w[i])
+		if roll < acc:
+			return i + 1
+	return 1
+
+
 ## 开箱：优先给新武器；背包满了就给一包模块
 func grant_chest(from_chest: bool = false) -> void:
 	if from_chest:
@@ -1025,14 +1066,7 @@ func grant_chest(from_chest: bool = false) -> void:
 	if wave >= 8:
 		pool.append("laser")
 	var id: String = pool[rng.randi() % pool.size()]
-	var q := 2
-	if wave >= 20:
-		q = 4
-	elif wave >= 10:
-		q = 3
-	# 30% 概率再高一档，让开箱有惊喜
-	if rng.randf() < 0.3:
-		q = mini(5, q + 1)
+	var q := _chest_quality()
 	var w := _make_weapon(id, q)
 	w["slots"][0] = _new_module(1)
 	weapons.append(w)
@@ -1326,12 +1360,21 @@ func add_module(tier: int) -> void:
 	inventory[tier] += 1
 
 
-## 总 DPS：所有启用武器之和（多目标按分摊公式）
+## 总理论 DPS：所有启用武器之和（按板面实装模块算）
 func cur_dps() -> float:
 	var s := 0.0
 	for w in weapons:
 		if bool(w["enabled"]):
 			s += _weapon_dps(w)
+	return s
+
+
+## 总实测 DPS：最近 5 秒真实伤害之和（HUD 主指标）
+func cur_actual_dps() -> float:
+	var s := 0.0
+	for w in weapons:
+		if bool(w["enabled"]):
+			s += _actual_dps(w)
 	return s
 
 
@@ -1364,8 +1407,8 @@ func _refresh_hud() -> void:
 	]
 	var net := cur_drop() - cur_burn()
 	var sign_s := "+" if net >= 0.0 else ""
-	hud_ammo.text = "DPS %5.1f    净弹药 %s%.2f/s    库存 %d    槽位 %d/%d" % [
-		cur_dps(), sign_s, net, _inv_total(),
+	hud_ammo.text = "DPS 实测 %5.1f / 理论 %5.1f    净弹药 %s%.2f/s    库存 %d    槽位 %d/%d" % [
+		cur_actual_dps(), cur_dps(), sign_s, net, _inv_total(),
 		_count_filled(), weapon.slots.size()
 	]
 	if _count_filled() == 0:
@@ -1379,7 +1422,8 @@ func _refresh_hud() -> void:
 	_refresh_weapon_panel()
 
 
-## 左侧武器栏：每把武器一行，显示开关状态与「当前 DPS / 理论 DPS」
+## 左侧武器栏：每把武器一行，显示开关状态与「实测 DPS / 理论 DPS」
+## 实测 > 理论 通常是多目标溢出或溅射；实测 << 理论 通常是没目标空转或弹药断档
 func _refresh_weapon_panel() -> void:
 	if wpanel == null:
 		return
@@ -1389,12 +1433,12 @@ func _refresh_weapon_panel() -> void:
 		var kd: Dictionary = WEAPONS[w["id"]]
 		var on: bool = bool(w["enabled"])
 		var mark := "▸" if i == sel else " "
-		var cur := _weapon_dps(w) if on else 0.0
-		var th := _theory_dps(w)
+		var actual := _actual_dps(w) if on else 0.0
+		var theory := _theory_dps(w)
 		var state := "[开]" if on else "[关]"
-		s += "%s%d %s %s %s  %s  当前 %5.1f / 理论 %5.1f\n" % [
+		s += "%s%d %s %s %s  %s  实测 %5.1f / 理论 %5.1f\n" % [
 			mark, i + 1, state, str(kd["name"]), QUALITY_NAME[int(w["quality"])],
-			("%d槽" % (w["slots"] as Array).size()), cur, th
+			("%d槽" % (w["slots"] as Array).size()), actual, theory
 		]
 	wpanel.text = s
 	wpanel.modulate = Color(1, 1, 1, 0.95)
