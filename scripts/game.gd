@@ -231,6 +231,7 @@ var _pick_from_build := false
 var frame_ms := 0.0
 var frame_ms_max := 0.0
 var enemy_ms := 0.0
+var roll_test := false
 var swarm_test := false
 var ws_done := false
 var _cam_pos := Vector2.ZERO
@@ -279,6 +280,8 @@ func _ready() -> void:
 			start_force = a.substr(6)
 		elif a.begins_with("pickdelay="):
 			pick_delay = float(a.substr(10))
+		elif a == "rolltest":
+			roll_test = true
 		elif a == "swarmtest":
 			swarm_test = true
 		elif a == "shotpick":
@@ -300,6 +303,10 @@ func _ready() -> void:
 	var start_id: String = START_POOL[rng.randi() % START_POOL.size()]
 	if seed_used == 0:
 		seed_used = rng.seed
+	if roll_test:
+		_run_rolltest()
+		get_tree().quit()
+		return
 	if bot:
 		start_id = "smg"  # 测平衡时固定武器，免得随机开局把两次结果拉不开
 	if start_force != "":
@@ -893,9 +900,106 @@ func _make_weapon(id: String, q: int) -> Dictionary:
 		"range": float(kd["range"]), "interval": float(kd["interval"]),
 		"targets": int(kd["targets"]), "mul": float(kd["mul"]),
 		"enabled": true, "fire_t": 0.0, "dmg": {},
+		"blast": 90.0, "ramp_max": 1.20,
+		"score": 0.0, "p0": 0.0, "band": 1.0, "dr": {},
 	}
 	_set_quality_of(w, q)
+	_roll_weapon(w)
 	return w
+
+
+# --- 武器随机数值（方案 v2.8 §17）------------------------------------------------
+# 分值只在同种类内比较：P0(id) = 该类型的「蓝档 100 分」。
+# 随机改的是「形状」（射程/间隔/基础/目标数/专属字段），总分用 mul 归一化钉回 band，
+# 所以同类型同品级的两把一定强度相当、手感不同。
+const QM := {1: 0.55, 2: 0.75, 3: 1.00, 4: 1.35, 5: 1.80}
+
+# 每种武器自己的浮动幅度：r 射程 / i 间隔 / b 基础 / tg 目标+1 概率 / x 专属字段
+const ROLL_P := {
+	"pistol": {"r": 0.10, "i": 0.12, "b": 0.15, "tg": 0.12},
+	"smg": {"r": 0.08, "i": 0.10, "b": 0.20, "tg": 0.0},
+	"shotgun": {"r": 0.08, "i": 0.10, "b": 0.15, "tg": 0.0},
+	"sniper": {"r": 0.12, "i": 0.08, "b": 0.18, "tg": 0.10},
+	"beam": {"r": 0.10, "i": 0.08, "b": 0.15, "tg": 0.0, "x": 0.20},
+	"grenade": {"r": 0.10, "i": 0.10, "b": 0.15, "tg": 0.0, "x": 0.15},
+	"blade": {"r": 0.12, "i": 0.10, "b": 0.15, "tg": 0.0, "x": 0.12},
+	"laser": {"r": 0.10, "i": 0.15, "b": 0.15, "tg": 0.0},
+}
+
+
+func _eff_targets(w: Dictionary) -> float:
+	var id := String(w["id"])
+	var t := int(w["targets"])
+	if id == "grenade":
+		return 1.0 + 0.6 * float(w.get("blast", 90.0)) / 90.0
+	if id == "blade":
+		return 3.0 * float(w["range"]) / 105.0
+	if id == "laser":
+		return 3.0
+	if t < 0:
+		return 3.0
+	return float(mini(t, 5))
+
+
+func _range_w(r: float) -> float:
+	return 1.0 + clampf((r - 150.0) / 1500.0, 0.0, 0.5)
+
+
+func weapon_score(w: Dictionary) -> float:
+	var iv := maxf(float(w["interval"]), 0.05)
+	return (float(w["base"]) * float(w["mul"]) / iv) * _eff_targets(w) * _range_w(float(w["range"]))
+
+
+## 该类型的典型模板分（品质 3），代码现算，不写死表
+func p0_of(id: String) -> float:
+	var kd: Dictionary = WEAPONS[id]
+	var w := {
+		"id": id, "base": float(QUALITY_BASE[3]), "mul": float(kd["mul"]),
+		"interval": float(kd["interval"]), "range": float(kd["range"]),
+		"targets": int(kd["targets"]), "blast": 90.0,
+	}
+	return weapon_score(w)
+
+
+func _roll_weapon(w: Dictionary) -> void:
+	var id := String(w["id"])
+	var rp: Dictionary = ROLL_P.get(id, {"r": 0.10, "i": 0.10, "b": 0.15, "tg": 0.0})
+	var dr := {}
+	var r0 := float(w["range"])
+	var i0 := float(w["interval"])
+	var b0 := float(w["base"])
+	w["range"] = r0 * (1.0 + rng.randf_range(-float(rp["r"]), float(rp["r"])))
+	w["interval"] = i0 * (1.0 + rng.randf_range(-float(rp["i"]), float(rp["i"])))
+	w["base"] = b0 * (1.0 + rng.randf_range(-float(rp["b"]), float(rp["b"])))
+	dr["range"] = float(w["range"]) / maxf(r0, 0.0001) - 1.0
+	dr["interval"] = float(w["interval"]) / maxf(i0, 0.0001) - 1.0
+	dr["base"] = float(w["base"]) / maxf(b0, 0.0001) - 1.0
+	if float(rp.get("tg", 0.0)) > 0.0 and int(w["targets"]) > 0 and int(w["targets"]) < 6 \
+			and rng.randf() < float(rp["tg"]):
+		w["targets"] = int(w["targets"]) + 1
+		dr["targets"] = 1.0
+	if rp.has("x"):
+		var x := float(rp["x"])
+		if id == "grenade":
+			w["blast"] = 90.0 * (1.0 + rng.randf_range(-x, x))
+			dr["blast"] = float(w["blast"]) / 90.0 - 1.0
+		elif id == "beam":
+			w["ramp_max"] = 1.20 * (1.0 + rng.randf_range(-x, x))
+			dr["ramp_max"] = float(w["ramp_max"]) / 1.20 - 1.0
+		else:
+			w["range"] = float(w["range"]) * (1.0 + rng.randf_range(-x, x))
+			dr["range"] = float(w["range"]) / maxf(r0, 0.0001) - 1.0
+	# 归一化：先把 mul 归 1 算分数，再反解 mul 让总分正好落在 band 上。
+	# 归一化只能用 mul —— 它是唯一不改射程/射速/目标数的乘数，用别的会把武器性格抹平。
+	var q := int(w["quality"])
+	var p0 := p0_of(id)
+	w["p0"] = p0
+	w["band"] = p0 * float(QM[q]) * rng.randf_range(0.94, 1.06)
+	w["mul"] = 1.0
+	var sc := weapon_score(w)
+	w["mul"] = clampf(float(w["band"]) / maxf(sc, 0.0001), 0.05, 40.0)
+	w["score"] = weapon_score(w)
+	w["dr"] = dr
 
 
 ## 布局生成：以基础网络（二连/折角/T/方形/十字）为积木，随机旋转镜像后拼到已有格子上。
@@ -1364,7 +1468,7 @@ func _fire(delta: float) -> void:
 		if String(w["id"]) == "beam" and not targets.is_empty():
 			var tid := int(targets[0].get_instance_id())
 			if int(w.get("ramp_id", 0)) == tid:
-				w["ramp"] = minf(float(w.get("ramp", 0.0)) + 0.06, 1.20 + float(mo["ramp_cap"]))
+				w["ramp"] = minf(float(w.get("ramp", 0.0)) + 0.06, float(w.get("ramp_max", 1.20)) + float(mo["ramp_cap"]))
 			else:
 				w["ramp"] = 0.0
 				w["ramp_id"] = tid
@@ -1423,7 +1527,7 @@ func _fire(delta: float) -> void:
 		# 榴弹炮：命中点周围 (90 + blast) 内的其他敌人吃 60%
 		if String(w["id"]) == "grenade" and not targets.is_empty():
 			var c0: Vector2 = targets[0].position
-			var br := 90.0 + float(mo["blast"])
+			var br := float(w.get("blast", 90.0)) + float(mo["blast"])
 			for e in get_tree().get_nodes_in_group("enemy"):
 				if not is_instance_valid(e) or e in targets:
 					continue
@@ -2326,9 +2430,10 @@ func _refresh_weapon_panel() -> void:
 		var actual := _actual_dps(w) if on else 0.0
 		var theory := _theory_dps(w)
 		var state := "[开]" if on else "[关]"
-		s += "%s%d %s %s %s  %s  实测 %5.1f / 理论 %5.1f\n" % [
+		s += "%s%d %s %s %s  %s  实测 %5.1f / 理论 %5.1f   %.2f/%.2f\n" % [
 			mark, i + 1, state, str(kd["name"]), QUALITY_NAME[int(w["quality"])],
-			("%d槽" % (w["slots"] as Array).size()), actual, theory
+			("%d槽" % (w["slots"] as Array).size()), actual, theory,
+			float(w["score"]), float(w["p0"]) * float(QM[3])
 		]
 	wpanel.text = s
 	wpanel.modulate = Color(1, 1, 1, 0.95)
@@ -2494,3 +2599,36 @@ func _rebuild_board() -> void:
 		use_l.add_theme_color_override("font_color", Color(0.55, 0.62, 0.72))
 		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(m.max)]
 		panel.add_child(use_l)
+
+
+## 随机掷数自检：每种武器 × 每个品级各掷 N 次，检查同类型内「低品级不会超过高品级」。
+## 打印每档的分数区间与 mul 区间，便于判断归一化是否把倍率推到不合理的位置。
+func _run_rolltest(n: int = 300) -> void:
+	print("== 武器随机掷数自检（每种每档 %d 次） ==" % n)
+	print("%-8s %-3s %8s %8s %8s %9s %9s" % ["类型", "档", "P0档分", "min", "max", "mul均", "倒挂"])
+	var total_bad := 0
+	var order := ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]
+	for id in order:
+		var p0 := p0_of(String(id))
+		var prev_max := -1.0
+		for q in range(1, 6):
+			var lo := 1e9
+			var hi := -1e9
+			var mul_sum := 0.0
+			for i in n:
+				var w := _make_weapon(String(id), q)
+				var sc := weapon_score(w)
+				lo = minf(lo, sc)
+				hi = maxf(hi, sc)
+				mul_sum += float(w["mul"])
+			var bad := 0
+			if prev_max >= 0.0 and lo <= prev_max:
+				bad = 1
+				total_bad += 1
+			prev_max = hi
+			print("%-8s %-3d %8.2f %8.2f %8.2f %9.2f %9s" % [
+				String(WEAPONS[id]["name"]) if q == 1 else "",
+				q, p0 * float(QM[q]), lo, hi, mul_sum / float(n),
+				"倒挂" if bad == 1 else "-"])
+		print("")
+	print("总倒挂次数 %d（必须为 0）" % total_bad)
