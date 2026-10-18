@@ -219,6 +219,7 @@ var shot_guard := 0.0
 var shot_pick := false
 var shot_chest := false
 var hold_pick := false
+var pick_pre := false
 var chest_test := false
 var ct_t := 0.0
 var ct_opened := false
@@ -574,7 +575,7 @@ func _process(delta: float) -> void:
 	if picking:
 		ff = 0.0
 		Engine.time_scale = 1.0
-		if shot_path != "":
+		if shot_path != "" and hold_pick:
 			elapsed = shot_at
 	# 快进：先按 8 倍速把局面推到 ff 秒，再恢复正常速度拍图
 	# 死亡时 elapsed 会停住，必须跳出快进分支，否则会一直等下去
@@ -587,25 +588,28 @@ func _process(delta: float) -> void:
 	if ff > 0.0 and dead:
 		Engine.time_scale = 1.0
 		ff = 0.0
-	# 选卡界面会冻结 elapsed，截图逻辑若还在等 shotat 就会永久挂住
-	if picking and shot_path != "":
+	# 选卡界面会冻结 elapsed，截图逻辑若还在等 shotat 就会永久挂住（holdpick 时才强制跳时间）
+	if picking and shot_path != "" and hold_pick:
 		elapsed = shot_at
 	if shot_path == "" or shot_at < 0.0:
 		return
 	# 死了之后 elapsed 不再推进，如果还在等 shotat 就会永久挂住 —— 死亡即立刻拍
 	if not dead:
 		if elapsed < shot_at:
-			shot_guard += delta
-			if shot_guard > 90.0:
+			if ff <= 0.0:
+				shot_guard += delta
+			if shot_guard > 600.0:
 				print("shot guard timeout")
 				get_tree().quit()
 			return
 	shot_at = -1.0
 	Engine.time_scale = 1.0
-	# 拍图的一帧里物理还没跑，选卡弹窗不会自己关，先替 bot 选掉
-	if picking and (shot_bot or playtest or pick_delay > 0.0):
+	if picking and not hold_pick and (shot_bot or playtest or shot_chest or shot_pick or pick_delay > 0.0):
 		_take_card(0)
-	if shot_chest and not picking:
+	if shot_chest and not pick_pre and ff == 0.0:
+		pick_pre = true
+		if picking:
+			_close_pick()  # 截图工具：让开箱面板优先，直接丢掉当前那张升级卡
 		grant_chest(true)
 	if shot_pick and not picking:
 		_roll_offer()
@@ -2265,7 +2269,7 @@ func _paint_offer() -> void:
 	var title := _label(pick_root, Vector2(x0, 118), 28, Color(0.95, 0.93, 0.86))
 	title.text = "升级！点卡片 或 按 1–4 选择"
 	var sub := _label(pick_root, Vector2(x0, 158), 17, Color(0.72, 0.78, 0.88))
-	sub.text = ("配方卡可以按 T 换成第 4 张 buff" % level) if not reroll_used else "配方卡已经换过了"
+	sub.text = "配方卡可以按 T 换成第 4 张 buff" if not reroll_used else "配方卡已经换过了"
 	for i in offer.size():
 		var card: Dictionary = offer[i]
 		var col := Color(0.55, 0.58, 0.66)
