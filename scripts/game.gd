@@ -4,17 +4,17 @@ extends Node2D
 ## 模块表。tier 1 基础 / 2 加法 / 3 增幅（与加法同级，靠合成时间区分）/ 4 共振
 ## 增幅自身不出力（rate 0），每次开火把 boost 加到相邻模块的最终输出上
 const TIERS := {
-	1: {"rate": 1.0, "uses": 20.0, "name": "基础", "color": Color(0.56, 0.70, 1.0)},
-	2: {"rate": 3.0, "uses": 24.0, "name": "加法", "color": Color(0.49, 0.94, 0.66)},
-	3: {"rate": 0.0, "uses": 60.0, "name": "增幅", "color": Color(0.36, 0.88, 0.82), "boost": 5.0},
-	4: {"rate": 27.0, "uses": 34.0, "name": "共振", "color": Color(1.0, 0.56, 0.64)},
+	1: {"rate": 1.0, "uses": 45.0, "name": "基础", "color": Color(0.56, 0.70, 1.0)},
+	2: {"rate": 3.0, "uses": 60.0, "name": "加法", "color": Color(0.49, 0.94, 0.66)},
+	3: {"rate": 0.0, "uses": 120.0, "name": "增幅", "color": Color(0.36, 0.88, 0.82), "boost": 5.0},
+	4: {"rate": 27.0, "uses": 100.0, "name": "共振", "color": Color(1.0, 0.56, 0.64)},
 }
 
 ## 配方：产物阶 → 原料阶 + 耗时。加法与增幅吃一样的 2 个基础，只用时间区分（6s vs 20s）
 const RECIPES := {
-	2: {"from": 1, "time": 6.0},
-	3: {"from": 1, "time": 20.0},
-	4: {"from": 3, "time": 34.0},
+	2: {"from": 1, "time": 3.0},
+	3: {"from": 1, "time": 8.0},
+	4: {"from": 3, "time": 14.0},
 }
 const CRAFT_UNLOCK := {2: 4, 3: 8, 4: 16}
 
@@ -39,7 +39,7 @@ const QUALITY_SCHEDULE := {12: 4, 20: 5}
 ## 武器自带基础伤害：不吃模块次数，模块烧光时留一条底（否则 DPS 直接归零 = 必死）
 const QUALITY_BASE := {1: 0.5, 2: 0.8, 3: 1.0, 4: 1.5, 5: 2.0}
 const WAVE_SEC := 40.0
-const DROP_CHANCE := 0.65
+const DROP_CHANCE := 0.40
 const HP_BASE := 4.0
 const HP_GROWTH := 1.115
 const SPAWN_BASE := 2.0
@@ -53,6 +53,24 @@ const DAMAGE_PER_MODULE := 8.0
 const CROWD_CAP := 6
 const FIRE_RANGE := 260.0
 const PULSE_DUR := 0.30
+
+## 敌人种类：hp_mult = (100 / 速度)^1.5 —— 速度越快血越少。
+## 以后加新怪直接套这个公式，不用一张张手调。
+const ENEMY_KINDS := {
+	"flood": {"speed": 100.0, "hp_mult": 1.00, "radius": 13.0, "color": Color(0.92, 0.30, 0.34)},
+	"runner": {"speed": 205.0, "hp_mult": 0.34, "radius": 9.0, "color": Color(1.00, 0.70, 0.26)},
+	"rock": {"speed": 52.0, "hp_mult": 2.67, "radius": 19.0, "color": Color(0.56, 0.46, 0.86)},
+}
+
+## 波次编成：coeff = 总血量预算系数（1.0 = 涌潮基准），kinds = 相对权重。
+## 每 5 波循环一次，所以玩家能从「这波怪变多了/变硬了」读出编成变化。
+const WAVE_PLANS := [
+	{"name": "涌潮", "coeff": 1.00, "kinds": {"flood": 1.0}},
+	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 5.0, "runner": 3.0}},
+	{"name": "疾行", "coeff": 1.40, "kinds": {"runner": 1.0}},
+	{"name": "磐石", "coeff": 0.60, "kinds": {"rock": 1.0}},
+	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 4.0, "rock": 2.0, "runner": 2.0}},
+]
 
 var weapon := {"interval": 1.0, "mul": 1.0, "quality": 3, "base": 1.0, "layout": [], "slots": []}
 var inventory := {1: 0, 2: 0, 3: 0, 4: 0}
@@ -85,6 +103,8 @@ var pulse_t := 0.0
 # --- 合成：每台装置一个并行位，装置可反复买（材料堆积就多做几台） ---
 var devices: Array = []  # [{"kind": int, "left": float, "total": float}]，kind=0 表示空闲
 var craft_seq := 0
+## 各阶实际合出来的数量（平衡观察用，也进 playtest 日志）
+var crafted := {1: 0, 2: 0, 3: 0, 4: 0}
 
 # --- 无头自动对战（平衡验证用）：godot --headless -- playtest bot pt=1200 ---
 var playtest := false
@@ -153,8 +173,10 @@ func _ready() -> void:
 	_refresh_hud()
 
 
+## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
 func _new_module(tier: int) -> Dictionary:
-	return {"tier": tier, "left": float(TIERS[tier].uses)}
+	var u := float(TIERS[tier].uses) * rng.randf_range(0.85, 1.15)
+	return {"tier": tier, "left": u, "max": u}
 
 
 func _new_device() -> Dictionary:
@@ -403,14 +425,16 @@ func _bot_step(delta: float) -> void:
 
 
 func _pt_log() -> void:
-	var need: float = _spawn_rate() * _wave_hp()
+	# 需求 DPS = 每秒进来的总血量 = 刷怪速度 × 单个基础血 × 本波平均血量倍率
+	var need: float = _spawn_rate() * _wave_hp() * _plan_avg_mult()
 	var comp := ""
 	for m in weapon.slots:
 		comp += "." if m == null else str(int(m.tier))
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] kills=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] c=%d/%d/%d/%d kills=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(),
-		_busy_devices(), devices.size(), comp, kills_total,
+		_busy_devices(), devices.size(), comp,
+		crafted[1], crafted[2], crafted[3], crafted[4], kills_total,
 	])
 
 
@@ -430,8 +454,40 @@ func _wave_hp() -> float:
 	return HP_BASE * pow(HP_GROWTH, wave - 1)
 
 
+## 当前波次的编成模板（每 5 波循环一次）
+func _plan() -> Dictionary:
+	return WAVE_PLANS[(wave - 1) % WAVE_PLANS.size()]
+
+
+## 本波敌人的平均血量倍率（用来把「总血量预算」换算成刷怪速度）
+func _plan_avg_mult() -> float:
+	var plan := _plan()
+	var wsum := 0.0
+	var msum := 0.0
+	for k in plan["kinds"]:
+		var w: float = float(plan["kinds"][k])
+		wsum += w
+		msum += w * float(ENEMY_KINDS[k]["hp_mult"])
+	return msum / maxf(wsum, 0.001)
+
+
+## 刷怪速度：先按预算系数缩放，再按平均血量倍率反比缩放
+## → 每波「总血量/秒」大致相同，但密度与单个强度差别很大（这就是玩法的差别）
 func _spawn_rate() -> float:
-	return SPAWN_BASE + wave * SPAWN_GROWTH
+	return (SPAWN_BASE + wave * SPAWN_GROWTH) * float(_plan()["coeff"]) / maxf(_plan_avg_mult(), 0.05)
+
+
+func _pick_kind() -> String:
+	var plan := _plan()
+	var total := 0.0
+	for k in plan["kinds"]:
+		total += float(plan["kinds"][k])
+	var r := rng.randf() * total
+	for k in plan["kinds"]:
+		r -= float(plan["kinds"][k])
+		if r <= 0.0:
+			return k
+	return "flood"
 
 
 func _set_quality(q: int) -> void:
@@ -542,6 +598,7 @@ func _craft_tick(delta: float) -> void:
 		var k: int = int(d["kind"])
 		d["kind"] = 0
 		d["left"] = 0.0
+		crafted[k] += 1
 		_install(k)
 
 
@@ -555,14 +612,19 @@ func _spawn(delta: float) -> void:
 
 
 func _spawn_enemy() -> void:
+	var kind := _pick_kind()
+	var kd: Dictionary = ENEMY_KINDS[kind]
 	var e = Node2D.new()
 	e.set_script(load("res://scripts/enemy.gd"))
 	e.add_to_group("enemy")
 	var ang: float = rng.randf() * TAU
 	e.position = player.position + Vector2(cos(ang), sin(ang)) * rng.randf_range(520.0, 660.0)
-	e.max_hp = _wave_hp()
+	e.kind = kind
+	e.radius = float(kd["radius"])
+	e.body_color = kd["color"]
+	e.max_hp = _wave_hp() * float(kd["hp_mult"])
 	e.hp = e.max_hp
-	e.speed = rng.randf_range(80.0, 105.0) + wave * 1.2
+	e.speed = float(kd["speed"]) * (1.0 + wave * 0.01)
 	add_child(e)
 
 
@@ -581,6 +643,7 @@ func _fire(delta: float) -> void:
 		m.left = float(m.left) - 1.0
 		if m.left <= 0.0:
 			weapon.slots[i] = null
+			_refill(i)
 	if dmg <= 0.0:
 		return
 	# 开火脉冲：射程内全部敌人吃满这次伤害（单目标 1 发/秒 追不上海量刷怪）
@@ -764,23 +827,42 @@ func _board_total() -> float:
 	return s
 
 
+## 模块烧光后立刻用库存里「补上去出力最高」的那一阶补上同一格（保拓扑），没有就空着
+## ——不能简单地「取最高阶」：增幅在没有载体相邻时出力是 0，会把格子填成空槽
+func _refill(i: int) -> void:
+	var best_t := 0
+	var best_v := -0.001
+	for t in [4, 3, 2, 1]:
+		if inventory[t] <= 0:
+			continue
+		weapon.slots[i] = _new_module(t)
+		var v := _board_total()
+		weapon.slots[i] = null
+		if v > best_v:
+			best_v = v
+			best_t = t
+	if best_t > 0:
+		inventory[best_t] -= 1
+		weapon.slots[i] = _new_module(best_t)
+
+
 ## 把一个模块装进电路板。
 ## 规则：空槽优先；满了就试每一格「换上去之后整板出力最高」的那一格，
 ## 而且必须**严格高于当前出力**才换，否则留在库存等槽位空出来。
 ## 旧规则是「替换最低阶」，结果会把喂加法的 T1 全换掉，最后板上全是互相吃不到的加法。
 func _install(t: int) -> void:
 	var n: int = weapon.slots.size()
-	for i in n:
-		if weapon.slots[i] == null:
-			weapon.slots[i] = _new_module(t)
-			return
+	# 增幅是「支撑件」：板上一旦有载体（共振）且支撑已经 2 个，就攒在库存里当共振的料
+	if t == 3 and _installed_count(4) >= 1 and _installed_count(3) >= 2:
+		inventory[3] += 1
+		return
+	# 空槽也算候选：统一按「装完后整板出力最高」挑位子。
+	# 所以增幅在没有载体相邻时出力是 0（等于不涨），会自己留在库存里。
 	var now := _board_total()
 	var best := -1
 	var best_v := now + 0.001
 	for i in n:
 		var m = weapon.slots[i]
-		if m == null:
-			continue
 		weapon.slots[i] = _new_module(t)
 		var v := _board_total()
 		weapon.slots[i] = m
@@ -842,15 +924,29 @@ func try_craft(kind: int = 0) -> bool:
 
 
 func _auto_recipe() -> int:
-	if level >= int(CRAFT_UNLOCK[4]) and inventory[3] >= 2:
-		return 4
+	# 共振是唯一的「载体」（有 27 的基量），增幅单独在场是 0 出力 —— 所以
+	# 攒够 2 个增幅就必须优先合共振，别让增幅把板子占满。
+	var sup := _installed_count(3)
+	if level >= int(CRAFT_UNLOCK[4]):
+		if inventory[3] >= 2:
+			return 4
+		if inventory[3] == 1 and sup >= 1:
+			return 3
 	if level < int(CRAFT_UNLOCK[2]) or inventory[1] < 2:
 		return 0
-	if level >= int(CRAFT_UNLOCK[3]) and inventory[1] >= 3:
+	if level >= int(CRAFT_UNLOCK[3]) and inventory[1] >= 3 and sup < 2:
 		craft_seq += 1
 		if craft_seq % 3 == 0:
 			return 3
 	return 2
+
+
+func _installed_count(t: int) -> int:
+	var n := 0
+	for m in weapon.slots:
+		if m != null and int(m.tier) == t:
+			n += 1
+	return n
 
 
 func add_module(tier: int) -> void:
@@ -884,8 +980,8 @@ func cur_drop() -> float:
 func _refresh_hud() -> void:
 	if hud_status == null:
 		return
-	hud_status.text = "HP %d/%d    波次 %d    时间 %s    等级 %d" % [
-		int(maxf(hp, 0.0)), int(max_hp), wave, _fmt_time(elapsed), level
+	hud_status.text = "HP %d/%d    波次 %d · %s    时间 %s    等级 %d" % [
+		int(maxf(hp, 0.0)), int(max_hp), wave, _plan()["name"], _fmt_time(elapsed), level
 	]
 	var net := cur_drop() - cur_burn()
 	var sign_s := "+" if net >= 0.0 else ""
@@ -1051,5 +1147,5 @@ func _rebuild_board() -> void:
 		use_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		use_l.add_theme_font_size_override("font_size", 13)
 		use_l.add_theme_color_override("font_color", Color(0.55, 0.62, 0.72))
-		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(TIERS[int(m.tier)].uses)]
+		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(m.max)]
 		panel.add_child(use_l)
