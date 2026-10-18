@@ -1,22 +1,47 @@
 extends Node2D
 ## 主控制器：刷怪、开火、掉落、构筑、HUD。
 
-## 模块表。tier 1 基础 / 2 加法 / 3 增幅（与加法同级，靠合成时间区分）/ 4 共振
-## 增幅自身不出力（rate 0），每次开火把 boost 加到相邻模块的最终输出上
-const TIERS := {
-	1: {"rate": 1.0, "uses": 45.0, "name": "基础", "color": Color(0.56, 0.70, 1.0)},
-	2: {"rate": 3.0, "uses": 60.0, "name": "加法", "color": Color(0.49, 0.94, 0.66)},
-	3: {"rate": 0.0, "uses": 120.0, "name": "增幅", "color": Color(0.36, 0.88, 0.82), "boost": 5.0},
-	4: {"rate": 27.0, "uses": 100.0, "name": "共振", "color": Color(1.0, 0.56, 0.64)},
+## 模块目录（方案 v2.6 §1）。cls 决定网络里怎么结算：
+##   flat  = 老实给 rate（默认）
+##   mirror= 加法：把相邻「比自己低阶」的模块读数再镜像一份
+##   boost = 增幅：自身 0 出力，把 boost 加到相邻非 boost 模块的最终输出上
+##   reson = 共振：相邻同 cls 的模块基础值 +50%
+## bind 非空 = 武器专属模块：只在该武器板上生效，否则只剩 rate（方案 §1.3）
+const MODULES := {
+	"base":   {"name": "基础",   "tier": 1, "rate": 1.0,  "uses": 45.0,  "cls": "flat",   "color": Color(0.56, 0.70, 1.0)},
+	"add":    {"name": "加法",   "tier": 2, "rate": 3.0,  "uses": 60.0,  "cls": "mirror", "color": Color(0.49, 0.94, 0.66)},
+	"amp":    {"name": "增幅",   "tier": 3, "rate": 0.0,  "uses": 120.0, "cls": "boost",  "color": Color(0.36, 0.88, 0.82), "boost": 5.0},
+	"reson":  {"name": "共振",   "tier": 4, "rate": 27.0, "uses": 100.0, "cls": "reson",  "color": Color(1.0, 0.56, 0.64)},
+	# --- 通用配方（10 个）：一点点、不喧宾夺主的增益 ---
+	"edge":   {"name": "锋锐刃", "tier": 2, "rate": 2.0,  "uses": 40.0,  "cls": "flat",   "color": Color(0.86, 0.90, 0.98), "note": "单发倍率 +8%"},
+	"temper": {"name": "淬火块", "tier": 2, "rate": 4.5,  "uses": 30.0,  "cls": "flat",   "color": Color(0.98, 0.72, 0.48), "note": "纯数值，烧得快"},
+	"light":  {"name": "轻量片", "tier": 2, "rate": 1.5,  "uses": 90.0,  "cls": "flat",   "color": Color(0.72, 0.92, 0.86), "note": "每次只烧 0.5 次使用次数"},
+	"extend": {"name": "增程器", "tier": 2, "rate": 1.0,  "uses": 50.0,  "cls": "flat",   "color": Color(0.60, 0.82, 1.0),  "note": "射程 +25"},
+	"calib":  {"name": "校准镜", "tier": 3, "rate": 1.0,  "uses": 45.0,  "cls": "flat",   "color": Color(0.78, 0.86, 0.98), "note": "开火间隔 ×0.95"},
+	"pierce": {"name": "贯穿弹", "tier": 3, "rate": 6.0,  "uses": 60.0,  "cls": "flat",   "color": Color(1.0, 0.86, 0.60),  "note": "穿透 +1（身后 120px 再吃 60%）"},
+	"breaker":{"name": "破甲锥", "tier": 3, "rate": 5.0,  "uses": 50.0,  "cls": "flat",   "color": Color(0.90, 0.62, 0.42), "note": "对精英/磐石 +20%"},
+	"coolant":{"name": "冷却片", "tier": 3, "rate": 3.0,  "uses": 70.0,  "cls": "flat",   "color": Color(0.56, 0.86, 0.94), "note": "开火间隔 ×0.92"},
+	"recycle":{"name": "回收片", "tier": 3, "rate": 2.0,  "uses": 80.0,  "cls": "flat",   "color": Color(0.66, 0.90, 0.62), "note": "20% 概率给相邻 +3 次寿命"},
+	"overload":{"name":"过载核", "tier": 4, "rate": 18.0, "uses": 70.0,  "cls": "flat",   "color": Color(1.0, 0.52, 0.42),  "note": "单发倍率 ×1.15"},
+	"tempo":  {"name": "时序核", "tier": 4, "rate": 15.0, "uses": 90.0,  "cls": "flat",   "color": Color(0.86, 0.74, 1.0),  "note": "连击 +4%/发，上限 +40%"},
+	# --- 武器特化配方（6 个）：只绑一把枪，换的是「玩法」不是数字 ---
+	"multi":  {"name": "多膛组", "tier": 3, "rate": 6.0,  "uses": 55.0,  "cls": "flat",   "color": Color(0.90, 0.78, 1.0),  "note": "狙击枪目标数 +1", "bind": "sniper"},
+	"belt":   {"name": "轻质弹链","tier": 3, "rate": 2.0, "uses": 100.0, "cls": "flat",   "color": Color(0.98, 0.84, 0.50), "note": "冲锋枪每次只烧 0.35 次", "bind": "smg"},
+	"spread": {"name": "扩散器", "tier": 3, "rate": 5.0,  "uses": 50.0,  "cls": "flat",   "color": Color(1.0, 0.70, 0.54),  "note": "霰弹枪目标数 +2", "bind": "shotgun"},
+	"focus":  {"name": "聚焦环", "tier": 4, "rate": 14.0, "uses": 80.0,  "cls": "flat",   "color": Color(0.70, 0.94, 1.0),  "note": "镭射倍率上限 +180%", "bind": "laser"},
+	"charge": {"name": "集束装药","tier": 3, "rate": 5.5, "uses": 45.0,  "cls": "flat",   "color": Color(1.0, 0.60, 0.36),  "note": "榴弹爆炸半径 +40", "bind": "grenade"},
+	"blade":  {"name": "长刃",   "tier": 3, "rate": 5.0,  "uses": 70.0,  "cls": "flat",   "color": Color(0.92, 0.86, 0.70), "note": "环绕刃半径 +25、倍率 +20%", "bind": "blade"},
 }
-
-## 配方：产物阶 → 原料阶 + 耗时。加法与增幅吃一样的 2 个基础，只用时间区分（6s vs 20s）
-const RECIPES := {
-	2: {"from": 1, "time": 3.0},
-	3: {"from": 1, "time": 8.0},
-	4: {"from": 3, "time": 14.0},
-}
-const CRAFT_UNLOCK := {2: 4, 3: 8, 4: 16}
+## 配方 = 2 个「低一阶」的任意模块（T2 吃 3 个基础）。时间按阶区分，特化件更慢。
+const CRAFT_COST := {2: 3, 3: 2, 4: 2}
+const CRAFT_TIME := {2: 5.0, 3: 10.0, 4: 18.0}
+const CRAFT_UNLOCK := {"add": 4, "amp": 8, "reson": 16, "edge": 5, "temper": 5, "light": 6, "extend": 7,
+	"calib": 9, "pierce": 11, "breaker": 12, "coolant": 13, "recycle": 14, "overload": 17, "tempo": 18,
+	"multi": 12, "belt": 12, "spread": 13, "focus": 20, "charge": 15, "blade": 15}
+## UI / 自动合成都按这个顺序遍历
+const MOD_ORDER := ["add", "amp", "reson", "edge", "temper", "light", "extend", "calib", "pierce",
+	"breaker", "coolant", "recycle", "overload", "tempo", "multi", "belt", "spread", "focus", "charge", "blade"]
+const CORE_ORDER := ["base", "add", "amp", "reson"]
 
 ## 合成装置：每台 = 1 个并行合成位。可反复制造，材料堆积就多做几台（变相缩短合成时间）。
 ## 开局免费 1 台，第 n 台的价钱 = 12 × 1.7^(n-2) 个基础模块，上限 8 台。
@@ -101,7 +126,9 @@ var backpack_cap := 6
 var weapons: Array = []
 var weapon: Dictionary = {}
 var sel := 0
-var inventory := {1: 0, 2: 0, 3: 0, 4: 0}
+## 构筑屏里当前选中的配方（MOD_ORDER 下标），[Q]/[E] 切换
+var recipe_sel := 0
+var inventory := {}
 var level := 1
 var hp := 100.0
 var max_hp := 100.0
@@ -141,7 +168,7 @@ var shots: Array = []
 var devices: Array = []  # [{"kind": int, "left": float, "total": float}]，kind=0 表示空闲
 var craft_seq := 0
 ## 各阶实际合出来的数量（平衡观察用，也进 playtest 日志）
-var crafted := {1: 0, 2: 0, 3: 0, 4: 0}
+var crafted := {}
 
 # --- 无头自动对战（平衡验证用）：godot --headless -- playtest bot pt=1200 ---
 var playtest := false
@@ -208,8 +235,8 @@ func _ready() -> void:
 	weapons.append(_make_weapon(start_id, 3))
 	_use_weapon(0)
 	for i in weapon.slots.size():
-		weapon.slots[i] = _new_module(1)
-	inventory[1] = 2
+		weapon.slots[i] = _new_module("base")
+	_add_inv("base", 2)
 	devices.append(_new_device())
 	_make_player()
 	_make_hud()
@@ -217,13 +244,14 @@ func _ready() -> void:
 
 
 ## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
-func _new_module(tier: int) -> Dictionary:
-	var u := float(TIERS[tier].uses) * rng.randf_range(0.85, 1.15)
-	return {"tier": tier, "left": u, "max": u}
+func _new_module(mid: String) -> Dictionary:
+	var d: Dictionary = MODULES[mid]
+	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15)
+	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u}
 
 
 func _new_device() -> Dictionary:
-	return {"kind": 0, "left": 0.0, "total": 0.0}
+	return {"kind": "", "left": 0.0, "total": 0.0}
 
 
 ## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
@@ -233,7 +261,7 @@ func device_cost() -> int:
 
 func _idle_device() -> int:
 	for i in devices.size():
-		if int(devices[i]["kind"]) == 0:
+		if String(devices[i]["kind"]) == "":
 			return i
 	return -1
 
@@ -241,7 +269,7 @@ func _idle_device() -> int:
 func _busy_devices() -> int:
 	var n := 0
 	for d in devices:
-		if int(d["kind"]) != 0:
+		if String(d["kind"]) != "":
 			n += 1
 	return n
 
@@ -253,9 +281,9 @@ func buy_device() -> bool:
 	if _backpack_used() >= backpack_cap:
 		return false
 	var cost := device_cost()
-	if inventory[1] < cost:
+	if _inv("base") < cost:
 		return false
-	inventory[1] -= cost
+	_take_inv("base", cost)
 	devices.append(_new_device())
 	return true
 
@@ -339,14 +367,18 @@ func _input(event: InputEvent) -> void:
 		if try_level():
 			_pass()
 	elif k == KEY_C:
-		try_craft(2)
+		try_craft(String(MOD_ORDER[recipe_sel]))
 		_pass()
 	elif k == KEY_V:
-		try_craft(3)
+		try_craft("amp")
 		_pass()
 	elif k == KEY_B:
-		try_craft(4)
+		try_craft("reson")
 		_pass()
+	elif k == KEY_Q:
+		_cycle_recipe(-1)
+	elif k == KEY_E:
+		_cycle_recipe(1)
 	elif k == KEY_X:
 		if buy_device():
 			_pass()
@@ -446,13 +478,14 @@ func _boardtest(delta: float) -> void:
 	if not bt_set:
 		bt_set = true
 		_set_quality(5)
+		weapon["mul"] = 1.0  # 把武器倍率钉成 1.0，否则随机开局的霰弹枪 1.11 会让自检数字飘
 		weapon.interval = 1.0 if demo_board else 999.0  # 自检时不开火，排除弹药消耗的干扰
-		weapon.slots[0] = _new_module(4)  # 共振（邻 1 共振、3 基础）
-		weapon.slots[1] = _new_module(4)  # 共振（邻 0 共振、2 增幅、4 加法）
-		weapon.slots[2] = _new_module(3)  # 增幅（邻 1、5）
-		weapon.slots[3] = _new_module(1)  # 基础（邻 0、4）
-		weapon.slots[4] = _new_module(2)  # 加法（邻 1、3、5）
-		weapon.slots[5] = _new_module(1)  # 基础（邻 2、4）
+		weapon.slots[0] = _new_module("reson")  # 共振（邻 1 共振、3 基础）
+		weapon.slots[1] = _new_module("reson")  # 共振（邻 0 共振、2 增幅、4 加法）
+		weapon.slots[2] = _new_module("amp")  # 增幅（邻 1、5）
+		weapon.slots[3] = _new_module("base")  # 基础（邻 0、4）
+		weapon.slots[4] = _new_module("add")  # 加法（邻 1、3、5）
+		weapon.slots[5] = _new_module("base")  # 基础（邻 2、4）
 		print("BOARD set  out=", _slot_out(), " power=", _shot_power())
 	bt_print += delta
 	if bt_print >= 0.5:
@@ -481,15 +514,16 @@ func _bot_step(delta: float) -> void:
 		return
 	bot_t = 0.0
 	bot_ticks += 1
-	if bot_ticks % 3 == 0:
+	# 升级与合成抢同一批材料：只在材料明显富余时升级，否则板子会被饿空
+	if bot_ticks % 3 == 0 and _inv_total() >= level_cost() * 2:
 		try_level()
 	var guard := 0
 	while guard < 4 and try_craft():
 		guard += 1
-	if _busy_devices() >= devices.size() and devices.size() < DEVICE_MAX:
-		if inventory[1] >= device_cost():
-			buy_device()
-	if bot_ticks % 3 != 0:
+	# 装置越多越好（每台 = 一个并行合成位），别等全忙了才想起来造
+	if devices.size() < DEVICE_MAX and _inv("base") >= device_cost():
+		buy_device()
+	if _inv_total() >= level_cost() * 3:
 		try_level()
 
 
@@ -554,11 +588,11 @@ func _pt_log() -> void:
 	var comp := ""
 	for m in weapon.slots:
 		comp += "." if m == null else str(int(m.tier))
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
-		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(),
-		_busy_devices(), devices.size(), comp,
-		crafted[1], crafted[2], crafted[3], crafted[4], kills_total,
+		cur_drop(), cur_burn(), level, _count_filled(), _board_weapon()["slots"].size(),
+		_busy_devices(), devices.size(), comp, _inv_str(),
+		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
 		get_tree().get_nodes_in_group("enemy").size(),
 	])
@@ -681,14 +715,18 @@ func _backpack_used() -> int:
 ## 一把武器此刻的 DPS（按板面实装模块算；多目标按分摊公式算总伤）
 ## 这是「理论 DPS」：假设目标一直够、弹药一直有
 func _weapon_dps(w: Dictionary) -> float:
+	var mo := _weapon_mods(w)
 	var t := int(w["targets"])
+	if t > 0:
+		t += int(mo["targets"])
+	var rng_d := float(w["range"]) + float(mo["range"])
 	var hits: float = 1.0
 	if t < 0:
-		hits = float(maxi(1, _count_in_range(float(w["range"]))))
+		hits = float(maxi(1, _count_in_range(rng_d)))
 	elif t > 1:
-		hits = float(mini(t, maxi(1, _count_in_range(float(w["range"])))))
+		hits = float(mini(t, maxi(1, _count_in_range(rng_d))))
 	var per := _shot_power_of(w) * (1.0 + 0.1 * (hits - 1.0)) / hits
-	return per * hits / float(w["interval"])
+	return per * hits / (float(w["interval"]) * float(mo["iv"]))
 
 
 ## 理论 DPS 与 _weapon_dps 同义（v2.6 起不再假设空槽填满：那是「未来」不是「现在」）
@@ -767,7 +805,7 @@ func _within(i: int, r: int) -> Array:
 
 ## 每个槽位这次的「出力」。
 ## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
-## slots 显式传入时用它（理论 DPS 会传一份「填满的假板子」）
+## cls 决定行为；绑定武器的特化件在这个层面就是普通 flat（效果在 _weapon_mods 里生效）
 func _slot_out(slots = null, w = null) -> Array:
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = (ww["slots"] as Array) if slots == null else slots
@@ -775,15 +813,15 @@ func _slot_out(slots = null, w = null) -> Array:
 	base.resize(sl.size())
 	for i in sl.size():
 		var m = sl[i]
-		base[i] = 0.0 if m == null else float(TIERS[int(m.tier)].rate)
+		base[i] = 0.0 if m == null else float(MODULES[String(m["id"])]["rate"])
 	var eff := base.duplicate()
-	# 共振：相邻同阶（T4）模块 +50% 基础值
+	# 共振：相邻同 cls 的模块 +50% 基础值
 	for i in sl.size():
 		var m = sl[i]
-		if m == null or int(m.tier) != 4:
+		if m == null or _cls(m) != "reson":
 			continue
 		for j in _neighbors(i, ww):
-			if sl[j] != null and int(sl[j].tier) == 4:
+			if sl[j] != null and _cls(sl[j]) == "reson":
 				eff[j] = float(eff[j]) + float(base[j]) * 0.5
 	var out: Array = []
 	out.resize(sl.size())
@@ -793,29 +831,73 @@ func _slot_out(slots = null, w = null) -> Array:
 			out[i] = 0.0
 			continue
 		var v: float = eff[i]
-		var t := int(m.tier)
-		if t == 2:  # 加法：镜像相邻的低阶（基础）模块
+		if _cls(m) == "mirror":  # 加法：镜像相邻的低阶模块
+			var t := int(m["tier"])
 			for j in _neighbors(i, ww):
-				if sl[j] != null and int(sl[j].tier) < t:
+				if sl[j] != null and int(sl[j]["tier"]) < t:
 					v += float(eff[j])
 		out[i] = v
-	# 增幅：自身 0 出力，每次开火把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
+	# 增幅：自身 0 出力，把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
 	for i in sl.size():
 		var m = sl[i]
-		if m == null or int(m.tier) != 3:
+		if m == null or _cls(m) != "boost":
 			continue
-		var b := float(TIERS[3].boost)
+		var b := float(MODULES[String(m["id"])]["boost"])
 		for j in _neighbors(i, ww):
-			if sl[j] != null and int(sl[j].tier) != 3:
+			if sl[j] != null and _cls(sl[j]) != "boost":
 				out[j] = float(out[j]) + b
 	return out
 
 
+func _cls(m: Dictionary) -> String:
+	return String(MODULES[String(m["id"])]["cls"])
+
+
+## 武器级效果汇总：扫一遍板面，把带效果的模块折算成「这把枪的修正值」
+## bind 非空的模块只在对应武器上生效（否则它只剩 rate，见方案 §1.3）
+func _weapon_mods(w: Dictionary) -> Dictionary:
+	var mo := {"mul": 1.0, "mul_add": 0.0, "iv": 1.0, "range": 0.0, "targets": 0,
+		"pierce": 0, "elite": 0.0, "burn": 1.0, "recycle": 0.0, "combo": 0.0,
+		"ramp_cap": 0.0, "blast": 0.0, "blade": 0.0}
+	var wid := String(w["id"])
+	for m in w["slots"]:
+		if m == null:
+			continue
+		var mid := String(m["id"])
+		var d: Dictionary = MODULES[mid]
+		var b := String(d.get("bind", ""))
+		if b != "" and b != wid:
+			continue
+		match mid:
+			"edge": mo["mul_add"] = float(mo["mul_add"]) + 0.08
+			"light": mo["burn"] = float(mo["burn"]) * 0.5
+			"extend": mo["range"] = float(mo["range"]) + 25.0
+			"calib": mo["iv"] = float(mo["iv"]) * 0.95
+			"pierce": mo["pierce"] = int(mo["pierce"]) + 1
+			"breaker": mo["elite"] = float(mo["elite"]) + 0.20
+			"coolant": mo["iv"] = float(mo["iv"]) * 0.92
+			"recycle": mo["recycle"] = float(mo["recycle"]) + 0.20
+			"overload": mo["mul"] = float(mo["mul"]) * 1.15
+			"tempo": mo["combo"] = float(mo["combo"]) + 0.04
+			"multi", "spread": mo["targets"] = int(mo["targets"]) + 1
+			"belt": mo["burn"] = float(mo["burn"]) * 0.35
+			"focus": mo["ramp_cap"] = float(mo["ramp_cap"]) + 1.80
+			"charge": mo["blast"] = float(mo["blast"]) + 40.0
+			"blade": mo["blade"] = float(mo["blade"]) + 25.0
+	# 「扩散器」对霰弹枪是 +2（不是 +1）
+	if wid == "shotgun":
+		for m in w["slots"]:
+			if m != null and String(m["id"]) == "spread":
+				mo["targets"] = int(mo["targets"]) + 1
+	return mo
+
+
 func _shot_power_of(w: Dictionary) -> float:
+	var mo := _weapon_mods(w)
 	var total := float(w["base"])
 	for v in _slot_out(null, w):
 		total += float(v)
-	return total * float(w["mul"])
+	return total * float(w["mul"]) * float(mo["mul"]) * (1.0 + float(mo["mul_add"]))
 
 
 func _shot_power() -> float:
@@ -826,15 +908,15 @@ func _shot_power() -> float:
 ## （满了会按整板出力决定换不换，换不动就进库存）
 func _craft_tick(delta: float) -> void:
 	for d in devices:
-		if int(d["kind"]) == 0:
+		if String(d["kind"]) == "":
 			continue
 		d["left"] = float(d["left"]) - delta
 		if float(d["left"]) > 0.0:
 			continue
-		var k: int = int(d["kind"])
-		d["kind"] = 0
+		var k := String(d["kind"])
+		d["kind"] = ""
 		d["left"] = 0.0
-		crafted[k] += 1
+		crafted[k] = int(crafted.get(k, 0)) + 1
 		_install(k)
 
 
@@ -893,23 +975,36 @@ func _fire(delta: float) -> void:
 	for w in weapons:
 		if not bool(w["enabled"]):
 			continue
-		var iv := float(w["interval"])
+		var mo := _weapon_mods(w)
+		var iv := float(w["interval"]) * float(mo["iv"])
 		w["fire_t"] = float(w["fire_t"]) + delta
 		if float(w["fire_t"]) < iv:
 			continue
-		var targets := _targets_in_range(float(w["range"]), int(w["targets"]))
+		var rng_d := float(w["range"]) + float(mo["range"])
+		var tg := int(w["targets"])
+		if tg > 0:
+			tg += int(mo["targets"])
+		var targets := _targets_in_range(rng_d, tg)
 		if targets.is_empty():
 			w["fire_t"] = minf(float(w["fire_t"]), iv)
 			continue
 		w["fire_t"] = float(w["fire_t"]) - iv
 		var dmg := _shot_power_of(w)
+		# 时序核：每发连击 +4%，断连（超过 1.2 秒没开火）或换目标就重置
+		if float(mo["combo"]) > 0.0:
+			if float(w.get("combo_t", -99.0)) + 1.2 < elapsed:
+				w["combo"] = 0
+			w["combo"] = mini(int(w.get("combo", 0)) + 1, 10)
+			w["combo_t"] = elapsed
+			dmg *= 1.0 + float(mo["combo"]) * float(int(w["combo"]))
 		# 消耗次数：每次开火每个模块 -1（与目标数无关 → 高射速 = 高消耗）
+		var burn := float(mo["burn"])
 		var sl: Array = w["slots"]
 		for i in sl.size():
 			var m = sl[i]
 			if m == null:
 				continue
-			m["left"] = float(m["left"]) - 1.0
+			m["left"] = float(m["left"]) - burn
 			if float(m["left"]) <= 0.0:
 				sl[i] = null
 				_refill(i, w)
@@ -919,14 +1014,51 @@ func _fire(delta: float) -> void:
 		for e in targets:
 			if not is_instance_valid(e):
 				continue
+			var d: float = per
+			if float(mo["elite"]) > 0.0 and String(e.kind) in ["charger", "rock"]:
+				d *= 1.0 + float(mo["elite"])
 			# 实际打掉的血量（不超过剩余血量），否则溢出伤害会把实测 DPS 撑高
-			dealt += minf(per, maxf(float(e.hp), 0.0))
-			e.hp = float(e.hp) - per
+			dealt += minf(d, maxf(float(e.hp), 0.0))
+			e.hp = float(e.hp) - d
 			e.hit = 0.18
 			if e.hp <= 0.0:
 				_kill(e)
+		# 贯穿：主目标身后 120px 内最近的敌人再吃 60%（贯穿弹每层多穿一个）
+		var pierce := int(mo["pierce"])
+		if pierce > 0:
+			var dir := player.position.direction_to(targets[0].position)
+			var from: Vector2 = targets[0].position
+			var extra := _pierce_targets(from, dir, pierce, targets)
+			for e in extra:
+				if not is_instance_valid(e):
+					continue
+				var d2: float = per * 0.6
+				dealt += minf(d2, maxf(float(e.hp), 0.0))
+				e.hp = float(e.hp) - d2
+				e.hit = 0.18
+				if e.hp <= 0.0:
+					_kill(e)
 		_log_damage(w, dealt)
 		_add_shot(targets, w)
+
+
+## 贯穿的追加目标：从中弹点沿弹道方向再往前 120px 内的最近敌人
+func _pierce_targets(from: Vector2, dir: Vector2, n: int, already: Array) -> Array:
+	var cand: Array = []
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e) or e in already:
+			continue
+		var rel: Vector2 = e.position - from
+		if rel.length() > 120.0:
+			continue
+		if rel.dot(dir) <= 0.0:  # 只穿「前方」，不往回打
+			continue
+		cand.append({"e": e, "d": rel.length()})
+	cand.sort_custom(func(a, b): return float(a["d"]) < float(b["d"]))
+	var out: Array = []
+	for i in mini(n, cand.size()):
+		out.append(cand[i]["e"])
+	return out
 
 
 ## 搜寻目标：最近优先；targets < 0 表示范围内全部
@@ -985,7 +1117,7 @@ func _kill(e: Node2D) -> void:
 	kills_total += 1
 	kill_times.append(elapsed)
 	if rng.randf() < DROP_CHANCE:
-		_spawn_pickup(e.position, 1)
+		_spawn_pickup(e.position, "base")
 	if e.kind == "charger" and rng.randf() < 0.5:
 		_spawn_chest(e.position)
 	e.queue_free()
@@ -1051,12 +1183,22 @@ func _chest_quality() -> int:
 	return 1
 
 
+func _chest_to_modules() -> void:
+	var t := "add" if wave >= 12 else "base"
+	for k in 2:
+		_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(30.0, 50.0), t)
+
+
 ## 开箱：优先给新武器；背包满了就给一包模块
 func grant_chest(from_chest: bool = false) -> void:
 	if from_chest:
 		last_chest_t = elapsed
+	# 测平衡时最多留 3 把枪：背包是武器与装置共享的，枪占满了就再也造不出装置（合成直接停摆）
+	if bot and weapons.size() >= 3:
+		_chest_to_modules()
+		return
 	if backpack_cap >= 0 and _backpack_used() >= backpack_cap:
-		var t := 2 if wave >= 12 else 1
+		var t := "add" if wave >= 12 else "base"
 		for k in 2:
 			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(30.0, 50.0), t)
 		return
@@ -1068,18 +1210,19 @@ func grant_chest(from_chest: bool = false) -> void:
 	var id: String = pool[rng.randi() % pool.size()]
 	var q := _chest_quality()
 	var w := _make_weapon(id, q)
-	w["slots"][0] = _new_module(1)
+	w["slots"][0] = _new_module("base")
 	weapons.append(w)
-	_use_weapon(weapons.size() - 1)
+	# 不自动切到新武器：切过去会把「合成目标」和「当前编辑」拆成两把枪，两边都喂不饱
 	_refresh_hud()
 
 
-func _spawn_pickup(pos: Vector2, tier: int) -> void:
+func _spawn_pickup(pos: Vector2, mid: String) -> void:
 	var p = Node2D.new()
 	p.set_script(load("res://scripts/pickup.gd"))
 	p.add_to_group("pickup")
 	p.position = pos
-	p.tier = tier
+	p.mid = mid
+	p.tier = int(MODULES[mid]["tier"])
 	add_child(p)
 
 
@@ -1123,7 +1266,7 @@ func _reward_damage(dmg: float) -> void:
 	while damage_credit >= DAMAGE_PER_MODULE:
 		damage_credit -= DAMAGE_PER_MODULE
 		modules_from_damage += 1
-		var t := _damage_reward_tier()
+		var t := _damage_reward_id()
 		# 掉在玩家脚边，能看见它被吸走，反馈比直接进背包好
 		var n := _damage_reward_count()
 		for k in n:
@@ -1131,10 +1274,10 @@ func _reward_damage(dmg: float) -> void:
 
 
 ## 补偿只给「能产出的」模块：增幅自身 0 出力，当补偿发等于发了个空槽
-func _damage_reward_tier() -> int:
+func _damage_reward_id() -> String:
 	if wave >= 12:
-		return 2
-	return 1
+		return "add"
+	return "base"
 
 
 func _damage_reward_count() -> int:
@@ -1175,30 +1318,73 @@ func _fmt_time(t: float) -> String:
 	return "%02d:%02d" % [int(t) / 60, int(t) % 60]
 
 
+## 全部模块 id（含 base；MOD_ORDER 是「可合成」的配方顺序，不含 base）
+func _ids_all() -> Array:
+	return ["base"] + MOD_ORDER
+
+
+func _inv_str() -> String:
+	var parts: Array = []
+	for k in _ids_all():
+		if _inv(k) > 0:
+			parts.append(String(MODULES[k]["name"]) + str(_inv(k)))
+	return " ".join(parts)
+
+
+## ---- 库存：按模块 id 计数（同阶不同配方是不同的东西，不能再按 tier 合并）----
+func _inv(mid: String) -> int:
+	return int(inventory.get(mid, 0))
+
+
+func _add_inv(mid: String, n: int) -> void:
+	inventory[mid] = maxi(0, _inv(mid) + n)
+
+
+func _take_inv(mid: String, n: int) -> void:
+	inventory[mid] = maxi(0, _inv(mid) - n)
+
+
+func _cycle_recipe(d: int) -> void:
+	recipe_sel = posmod(recipe_sel + d, MOD_ORDER.size())
+	_refresh_build()
+
+
 func _inv_total() -> int:
-	return inventory[1] + inventory[2] + inventory[3] + inventory[4]
+	var n := 0
+	for k in inventory:
+		n += int(inventory[k])
+	return n
 
 
 func _all_total() -> int:
 	return _inv_total() + _count_filled()
 
 
+func _inv_tier(t: int) -> int:
+	var n := 0
+	for k in inventory:
+		if int(MODULES[k]["tier"]) == t:
+			n += int(inventory[k])
+	return n
+
+
+## 某阶在「库存 + 板面」里的总量（配方按阶吃料：特化件也算同阶任意模块）
 func _count_tier(t: int) -> int:
-	var n: int = inventory[t]
+	var n := _inv_tier(t)
 	for m in weapon.slots:
-		if m != null and int(m.tier) == t:
+		if m != null and int(m["tier"]) == t:
 			n += 1
 	return n
 
 
-## 从槽位里取该阶中寿命最少的模块（也顺手把快报废的先花掉）
+## 从槽位里取该阶中寿命最少的模块（顺手把快报废的先花掉）
 func _take_from_slots(t: int) -> bool:
 	var idx := -1
 	var best := 2.0
 	for i in weapon.slots.size():
 		var m = weapon.slots[i]
-		if m != null and int(m.tier) == t:
-			var f: float = float(m.left) / float(TIERS[t].uses)
+		if m != null and int(m["tier"]) == t:
+			var f: float = float(m["left"]) / float(MODULES[String(m["id"])]["uses"])
 			if f < best:
 				best = f
 				idx = i
@@ -1208,17 +1394,26 @@ func _take_from_slots(t: int) -> bool:
 	return true
 
 
+## 按阶扣料：优先扣库存里数量最多的那种，扣完再动板面
 func _take_tier(t: int, n: int, prefer_slots: bool = false) -> void:
 	var left := n
 	if prefer_slots:
 		while left > 0 and _take_from_slots(t):
 			left -= 1
-	while left > 0 and inventory[t] > 0:
-		inventory[t] -= 1
-		left -= 1
 	while left > 0:
-		if not _take_from_slots(t):
-			return
+		var best := ""
+		var best_n := 0
+		for k in _ids_all():
+			if int(MODULES[k]["tier"]) != t:
+				continue
+			if _inv(k) > best_n:
+				best_n = _inv(k)
+				best = k
+		if best == "":
+			break
+		_add_inv(best, -1)
+		left -= 1
+	while left > 0 and _take_from_slots(t):
 		left -= 1
 
 
@@ -1230,54 +1425,71 @@ func _board_total(w = null) -> float:
 	return s
 
 
-## 模块烧光后立刻用库存里「补上去出力最高」的那一阶补上同一格（保拓扑），没有就空着
-## ——不能简单地「取最高阶」：增幅在没有载体相邻时出力是 0，会把格子填成空槽
+## 库存里还有货的 id
+func _stocked_ids() -> Array:
+	var out: Array = []
+	for k in _ids_all():
+		if _inv(k) > 0:
+			out.append(k)
+	return out
+
+
+## DEBUG
 func _refill(i: int, w = null) -> void:
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = ww["slots"]
-	var best_t := 0
-	var best_v := -0.001
-	for t in [4, 3, 2, 1]:
-		if inventory[t] <= 0:
-			continue
-		sl[i] = _new_module(t)
+	var best_id := ""
+	# 起点是 0：出力为 0 的模块（增幅单独放着）不许占格子，否则板上会周期性地被增幅填满又烧空
+	var best_v := 0.0
+	for k in _stocked_ids():
+		sl[i] = _new_module(k)
 		var v := _board_total(ww)
 		sl[i] = null
 		if v > best_v:
 			best_v = v
-			best_t = t
-	if best_t > 0:
-		inventory[best_t] -= 1
-		sl[i] = _new_module(best_t)
+			best_id = k
+	if best_id != "":
+		_add_inv(best_id, -1)
+		sl[i] = _new_module(best_id)
 
 
 ## 把一个模块装进电路板。
-## 规则：空槽优先；满了就试每一格「换上去之后整板出力最高」的那一格，
-## 而且必须**严格高于当前出力**才换，否则留在库存等槽位空出来。
-## 旧规则是「替换最低阶」，结果会把喂加法的 T1 全换掉，最后板上全是互相吃不到的加法。
-func _install(t: int) -> void:
-	var n: int = weapon.slots.size()
+## 规则：统一按「装完后整板出力最高」挑位子，而且必须**严格高于当前**才装，
+## 否则留在库存（旧规则「替换最低阶」会把喂加法的 T1 全换掉，最后板上全是互相吃不到的加法）
+## 合成产物往「槽位最多的那把武器」上装：否则宝箱一给白武器（2 格），
+## 后续所有产物都会挤进小板上（实测会把总 DPS 从 1500 压到 150）
+func _board_weapon() -> Dictionary:
+	var best: Dictionary = weapon
+	for w in weapons:
+		if (w["slots"] as Array).size() > (best["slots"] as Array).size():
+			best = w
+	return best
+
+
+func _install(mid: String) -> void:
+	var w := _board_weapon()
+	var sl: Array = w["slots"]
 	# 增幅是「支撑件」：板上一旦有载体（共振）且支撑已经 2 个，就攒在库存里当共振的料
-	if t == 3 and _installed_count(4) >= 1 and _installed_count(3) >= 2:
-		inventory[3] += 1
+	if mid == "amp" and _installed_count(4) >= 1 and _installed_id("amp") >= 2:
+		_add_inv(mid, 1)
 		return
-	# 空槽也算候选：统一按「装完后整板出力最高」挑位子。
-	# 所以增幅在没有载体相邻时出力是 0（等于不涨），会自己留在库存里。
-	var now := _board_total()
+	var now := _board_total(w)
 	var best := -1
 	var best_v := now + 0.001
-	for i in n:
-		var m = weapon.slots[i]
-		weapon.slots[i] = _new_module(t)
-		var v := _board_total()
-		weapon.slots[i] = m
+	for i in sl.size():
+		var m = sl[i]
+		sl[i] = _new_module(mid)
+		var v := _board_total(w)
+		sl[i] = m
 		if v > best_v:
 			best_v = v
 			best = i
 	if best >= 0:
-		weapon.slots[best] = _new_module(t)
+		sl[best] = _new_module(mid)
+
+		pass
 		return
-	inventory[t] += 1
+	_add_inv(mid, 1)
 
 
 func level_cost() -> int:
@@ -1290,74 +1502,113 @@ func try_level() -> bool:
 	if _inv_total() < cost:
 		return false
 	var left := cost
-	for t in [1, 2, 3, 4]:
-		var take: int = mini(left, inventory[t])
-		inventory[t] -= take
-		left -= take
+	for k in _ids_all():
 		if left <= 0:
 			break
+		var take: int = mini(left, _inv(k))
+		if take > 0:
+			_add_inv(k, -take)
+			left -= take
 	if left > 0:
 		return false
 	level += 1
 	return true
 
 
+## 该配方当前能不能开：绑定武器、解锁等级、材料
+func recipe_state(mid: String) -> Dictionary:
+	var d: Dictionary = MODULES[mid]
+	var t := int(d["tier"])
+	var need_lv := int(CRAFT_UNLOCK.get(mid, 99))
+	var bind := String(d.get("bind", ""))
+	var has_bind := bind == ""
+	if bind != "":
+		for w in weapons:
+			if String(w["id"]) == bind:
+				has_bind = true
+	var cost := int(CRAFT_COST[t])
+	var have := _inv_tier(t - 1)
+	var st := "可合成"
+	var ok := true
+	if not has_bind:
+		ok = false
+		st = "需要%s" % String(WEAPONS[bind]["name"])
+	elif level < need_lv:
+		ok = false
+		st = "解锁于 Lv%d" % need_lv
+	elif have < cost:
+		ok = false
+		st = "需 %d 个 %d 阶料" % [cost, t - 1]
+	return {"ok": ok, "state": st, "cost": cost, "tier": t, "level": need_lv}
+
+
 ## 合成吃「库存」（槽位是工作区，绝不能被合成顺手拆掉）。
 ## 有空闲装置才能开工，产物在 _craft_tick 到点后进板子。
-## kind = 0 表示自动选：先共振（最值钱），再加法（便宜），攒够余量才做增幅。
-func try_craft(kind: int = 0) -> bool:
-	var slot := _idle_device()
-	if slot < 0:
+## mid = "" 表示自动选配方。
+func try_craft(mid: String = "") -> bool:
+	var idx := _idle_device()
+	if idx < 0:
 		return false
-	if kind == 0:
-		kind = _auto_recipe()
-	if kind == 0:
+	if mid == "":
+		mid = _auto_recipe()
+	if mid == "" or not MODULES.has(mid):
 		return false
-	if not RECIPES.has(kind):
+	var st := recipe_state(mid)
+	if not bool(st["ok"]):
 		return false
-	if level < int(CRAFT_UNLOCK[kind]):
-		return false
-	var src := int(RECIPES[kind]["from"])
-	if inventory[src] < 2:
-		return false
-	inventory[src] -= 2
-	var t := float(RECIPES[kind]["time"])
-	devices[slot]["kind"] = kind
-	devices[slot]["total"] = t
-	devices[slot]["left"] = t
+	var t := int(st["tier"])
+	_take_tier(t - 1, int(st["cost"]))
+	var dur := float(CRAFT_TIME[t])
+	devices[idx]["kind"] = mid
+	devices[idx]["total"] = dur
+	devices[idx]["left"] = dur
 	return true
 
 
-func _auto_recipe() -> int:
-	# 板子没满 → 先拿加法把格子垫起来（加法是唯一的「即插即用」底料）
-	# 板子满了 → 攒增幅，够 2 个立刻换共振（共振是唯一的载体，27 的基量）
-	if _count_filled() < weapon.slots.size():
-		if level >= int(CRAFT_UNLOCK[2]) and inventory[1] >= 2:
-			return 2
-		return 0
-	if level >= int(CRAFT_UNLOCK[4]) and inventory[3] >= 2:
-		return 4
-	if level >= int(CRAFT_UNLOCK[3]) and inventory[1] >= 2:
-		return 3
-	if level >= int(CRAFT_UNLOCK[2]) and inventory[1] >= 2:
-		return 2
-	return 0
+func _auto_recipe() -> String:
+	# 板子没满 → 先拿加法把格子垫起来；满了 → 先攒增幅，够 2 个立刻换共振
+	var empty := 0
+	var sl: Array = _board_weapon()["slots"]
+	for i in sl.size():
+		if sl[i] == null:
+			empty += 1
+	if empty > 0 and bool(recipe_state("add")["ok"]):
+		return "add"
+	if bool(recipe_state("reson")["ok"]):
+		return "reson"
+	if bool(recipe_state("amp")["ok"]):
+		return "amp"
+	# 剩下的余料：从高阶往低阶找一件能做的
+	for mid in ["tempo", "overload", "coolant", "breaker", "calib", "pierce", "recycle",
+			"temper", "edge", "light", "extend", "add"]:
+		if bool(recipe_state(mid)["ok"]):
+			return mid
+	return ""
 
 
 func _installed_count(t: int) -> int:
 	var n := 0
-	for m in weapon.slots:
-		if m != null and int(m.tier) == t:
+	for m in _board_weapon()["slots"]:
+		if m != null and int(m["tier"]) == t:
 			n += 1
 	return n
 
 
-func add_module(tier: int) -> void:
-	for i in weapon.slots.size():
-		if weapon.slots[i] == null:
-			weapon.slots[i] = _new_module(tier)
+func _installed_id(mid: String) -> int:
+	var n := 0
+	for m in _board_weapon()["slots"]:
+		if m != null and String(m["id"]) == mid:
+			n += 1
+	return n
+
+
+func add_module(mid: String) -> void:
+	var sl: Array = _board_weapon()["slots"]
+	for i in sl.size():
+		if sl[i] == null:
+			sl[i] = _new_module(mid)
 			return
-	inventory[tier] += 1
+	_add_inv(mid, 1)
 
 
 ## 总理论 DPS：所有启用武器之和（按板面实装模块算）
@@ -1384,10 +1635,12 @@ func cur_burn() -> float:
 	for w in weapons:
 		if not bool(w["enabled"]):
 			continue
-		var iv := float(w["interval"])
+		var mo := _weapon_mods(w)
+		var iv := float(w["interval"]) * float(mo["iv"])
+		var burn := float(mo["burn"])
 		for m in w["slots"]:
 			if m != null:
-				b += 1.0 / (float(TIERS[m.tier].uses) * iv)
+				b += burn / (float(MODULES[String(m["id"])]["uses"]) * iv)
 	return b
 
 
@@ -1477,45 +1730,41 @@ func _refresh_build() -> void:
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []
-	info.append("库存    基础 %d    加法 %d    增幅 %d    共振 %d" % [
-		inventory[1], inventory[2], inventory[3], inventory[4]
-	])
+	var inv_parts: Array = []
+	for k in _ids_all():
+		if _inv(k) > 0:
+			inv_parts.append("%s %d" % [String(MODULES[k]["name"]), _inv(k)])
+	if inv_parts.is_empty():
+		inv_parts.append("空")
+	info.append("库存    " + "    ".join(inv_parts))
 	info.append("受击补偿    +%d 个模块（每 %d HP 补 1 个）" % [
 		modules_from_damage, int(DAMAGE_PER_MODULE)
 	])
-	info.append("")
 	info.append("等级 %d  →  %d     需要 %d 个模块     [U]" % [
 		level, level + 1, level_cost()
 	])
-	var keys := {2: "C", 3: "V", 4: "B"}
-	var idle := _idle_device()
-	for t in [2, 3, 4]:
-		var src := int(RECIPES[t]["from"])
-		var state := "解锁于 Lv%d" % int(CRAFT_UNLOCK[t])
-		if level >= int(CRAFT_UNLOCK[t]):
-			var mine := 0
-			for d in devices:
-				if int(d["kind"]) == t:
-					mine += 1
-			if inventory[src] < 2:
-				state = "需 2 个%s" % TIERS[src].name
-			elif idle < 0:
-				state = "装置全忙"
-			elif mine > 0:
-				state = "可再开一台"
-			else:
-				state = "可合成"
-		info.append("    [%s] 2×%s → 1×%s    %2ds    %s" % [
-			keys[t], TIERS[src].name, TIERS[t].name, int(RECIPES[t]["time"]), state
+	info.append("配方   [Q]/[E] 切换    [C] 合成选中    装置 %d 台（空闲 %d）" % [
+		devices.size(), devices.size() - _busy_devices()
+	])
+	# 只显示 8 行窗口：配方有 20 个，全列会顶出屏幕
+	var first := maxi(0, mini(recipe_sel - 3, MOD_ORDER.size() - 8))
+	for i in range(first, mini(MOD_ORDER.size(), first + 8)):
+		var mid: String = MOD_ORDER[i]
+		var st := recipe_state(mid)
+		var t := int(st["tier"])
+		var mark := "▸" if i == recipe_sel else " "
+		info.append("  %s %-6s %d×%d阶  %4.0fs  %s" % [
+			mark, String(MODULES[mid]["name"]), int(st["cost"]), t - 1,
+			float(CRAFT_TIME[t]), String(st["state"])
 		])
 	if devices.size() < DEVICE_MAX:
-		info.append("    [X] 造装置（当前 %d 台，空闲 %d）  需要 %d 个基础" % [
-			devices.size(), devices.size() - _busy_devices(), device_cost()
-		])
+		info.append("    [X] 造装置  需要 %d 个基础模块" % device_cost())
 	else:
 		info.append("    [X] 装置已满（%d 台）" % devices.size())
 	info.append("")
-	info.append("净弹药 %+.2f/s     DPS %.1f" % [cur_drop() - cur_burn(), cur_dps()])
+	info.append("净弹药 %+.2f/s     实测 DPS %.1f     理论 DPS %.1f" % [
+		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
+	])
 	build_info.text = "\n".join(info)
 
 
@@ -1561,7 +1810,7 @@ func _rebuild_board() -> void:
 		sb.bg_color = Color(0.09, 0.11, 0.16)
 		sb.border_color = Color(0.28, 0.33, 0.44)
 		if m != null:
-			var col: Color = TIERS[int(m.tier)].color
+			var col: Color = MODULES[String(m["id"])]["color"]
 			sb.border_color = col
 			sb.bg_color = Color(col.r, col.g, col.b, 0.10)
 		panel.add_theme_stylebox_override("panel", sb)
@@ -1576,8 +1825,8 @@ func _rebuild_board() -> void:
 			name_l.text = "%d 空" % (i + 1)
 			name_l.add_theme_color_override("font_color", Color(0.42, 0.46, 0.56))
 		else:
-			name_l.text = TIERS[int(m.tier)].name
-			name_l.add_theme_color_override("font_color", TIERS[int(m.tier)].color)
+			name_l.text = String(MODULES[String(m["id"])]["name"])
+			name_l.add_theme_color_override("font_color", MODULES[String(m["id"])]["color"])
 		panel.add_child(name_l)
 
 		var out_l := Label.new()
@@ -1588,14 +1837,14 @@ func _rebuild_board() -> void:
 		out_l.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
 		if m == null:
 			out_l.text = "—"
-		elif int(m.tier) == 3:
+		elif _cls(m) == "boost":
 			# 增幅不产出，显示「每次给每个邻居加多少 × 给几个邻居」
 			var fed := 0
 			for j in _neighbors(i):
 				var nb = weapon.slots[j]
-				if nb != null and int(nb.tier) != 3:
+				if nb != null and _cls(nb) != "boost":
 					fed += 1
-			out_l.text = "→%.0f×%d" % [float(TIERS[3].boost), fed]
+			out_l.text = "→%.0f×%d" % [float(MODULES[String(m["id"])]["boost"]), fed]
 		else:
 			out_l.text = "%.1f" % float(out[i])
 		panel.add_child(out_l)

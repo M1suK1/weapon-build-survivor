@@ -1,6 +1,7 @@
 extends Node2D
 ## 掉落模块：先小幅弹开，再吸附向玩家。
 
+var mid := "base"
 var tier := 1
 var age := 0.0
 var velocity := Vector2.ZERO
@@ -27,11 +28,17 @@ func _physics_process(delta: float) -> void:
 		collected = true
 		var g = get_tree().get_first_node_in_group("game")
 		if g != null:
-			g.add_module(tier)
+			g.add_module(String(mid))
 		queue_free()
 
 
 func _draw() -> void:
-	draw_circle(Vector2.ZERO, 7.0 + sin(age * 8.0) * 0.8, Color(0.56, 0.70, 1.0, 0.35))
-	draw_circle(Vector2.ZERO, 5.0, Color(0.56, 0.70, 1.0))
+	var c := Color(0.56, 0.70, 1.0)
+	match String(mid):
+		"add": c = Color(0.49, 0.94, 0.66)
+		"amp": c = Color(0.36, 0.88, 0.82)
+		"reson": c = Color(1.0, 0.56, 0.64)
+		_: c = Color(0.56, 0.70, 1.0)
+	draw_circle(Vector2.ZERO, 7.0 + sin(age * 8.0) * 0.8, Color(c.r, c.g, c.b, 0.35))
+	draw_circle(Vector2.ZERO, 5.0, c)
 	draw_circle(Vector2.ZERO, 2.2, Color(1, 1, 1, 0.92))
