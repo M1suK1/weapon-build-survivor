@@ -217,6 +217,12 @@ var shot_path := ""
 var shot_at := -1.0
 var shot_guard := 0.0
 var shot_pick := false
+var shot_chest := false
+var hold_pick := false
+var chest_test := false
+var ct_t := 0.0
+var ct_opened := false
+var ct_taken := false
 var pick_delay := 0.0
 var pick_wait := 0.0
 var start_force := ""
@@ -228,6 +234,10 @@ var seed_used := 0
 var vis_enemy := 0
 var dbg_acc := 0.0
 var _pick_from_build := false
+var pick_mode := "level"
+var chest_offer: Array = []
+var pending_weapon: Dictionary = {}
+var pending_chest := 0
 var frame_ms := 0.0
 var frame_ms_max := 0.0
 var enemy_ms := 0.0
@@ -284,6 +294,12 @@ func _ready() -> void:
 			roll_test = true
 		elif a == "swarmtest":
 			swarm_test = true
+		elif a == "chesttest":
+			chest_test = true
+		elif a == "holdpick":
+			hold_pick = true
+		elif a == "shotchest":
+			shot_chest = true
 		elif a == "shotpick":
 			shot_pick = true
 		elif a == "shotbot":
@@ -291,6 +307,10 @@ func _ready() -> void:
 			bot = true
 		elif a.begins_with("ff="):
 			ff = float(a.substr(3))
+	# 任何自测/截图模式都自动选卡（默认 0.5 秒后选第一张），免得机器人卡在选卡界面上；
+	# holdpick 可以强制保留界面（拍图用），pickdelay=<秒> 可以改等待时间
+	if (playtest or bot or shot_bot or shot_pick or shot_chest) and pick_delay <= 0.0:
+		pick_delay = 0.5
 	if playtest:
 		# 无头模拟按实时速度跑太慢，放大时间步（步长变粗，数值平衡够用）
 		Engine.time_scale = 8.0
@@ -373,6 +393,8 @@ func _make_player() -> void:
 	player.set_script(load("res://scripts/player.gd"))
 	player.name = "Player"
 	player.add_to_group("player")
+	# 世界里的东西都要能被 get_tree().paused 停住（Game 自己是 ALWAYS，子节点默认会继承）
+	player.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(player)
 	var cam := Camera2D.new()
 	# 不开平滑：Godot 4.7 里 Camera2D 的 position smoothing 会和 zoom 打架，
@@ -388,6 +410,8 @@ func _make_player() -> void:
 func _label(parent: Node, pos: Vector2, size: int, col: Color) -> Label:
 	var l := Label.new()
 	l.position = pos
+	# 卡片上的文字必须让点击穿透到 Button，否则点标题附近没反应
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	l.add_theme_font_size_override("font_size", size)
 	l.add_theme_color_override("font_color", col)
 	parent.add_child(l)
@@ -484,7 +508,9 @@ func _input(event: InputEvent) -> void:
 	if picking:
 		if k >= KEY_1 and k <= KEY_4:
 			_take_card(k - KEY_1)
-		elif k == KEY_T:
+		elif k == KEY_SPACE or k == KEY_ENTER or k == KEY_KP_ENTER:
+			_take_card(0)
+		elif k == KEY_T and pick_mode == "level":
 			_reroll_recipe()
 		return
 	if k == KEY_TAB and not dead:
@@ -543,6 +569,13 @@ func _pass() -> void:
 
 
 func _process(delta: float) -> void:
+	# 选卡界面会把整棵树暂停，elapsed 不再推进 —— 快进和截图都必须先跳出这个状态，
+	# 否则会永远停在「等 elapsed 到 ff / shotat」上（表现为界面卡死）
+	if picking:
+		ff = 0.0
+		Engine.time_scale = 1.0
+		if shot_path != "":
+			elapsed = shot_at
 	# 快进：先按 8 倍速把局面推到 ff 秒，再恢复正常速度拍图
 	# 死亡时 elapsed 会停住，必须跳出快进分支，否则会一直等下去
 	if ff > 0.0 and not dead:
@@ -572,6 +605,8 @@ func _process(delta: float) -> void:
 	# 拍图的一帧里物理还没跑，选卡弹窗不会自己关，先替 bot 选掉
 	if picking and (shot_bot or playtest or pick_delay > 0.0):
 		_take_card(0)
+	if shot_chest and not picking:
+		grant_chest(true)
 	if shot_pick and not picking:
 		_roll_offer()
 		_open_pick()
@@ -592,13 +627,28 @@ func _physics_process(delta: float) -> void:
 			var gx := (i % 12) - 6
 			var gy := int(i / 12) - 5
 			_spawn_enemy_at(player.position + Vector2(gx * 52.0, gy * 46.0))
-	if dead or get_tree().paused:
-		return
-	# 升级选卡时冻结战斗（但 bot 会自动选，免得无头测试卡住）
+	# 开箱链路自检：开 → 选第 2 张 → 验证进背包
+	if chest_test:
+		ct_t += delta
+		if ct_t > 0.5 and not ct_opened:
+			ct_opened = true
+			grant_chest(true)
+			print("CHESTTEST opened mode=%s cards=%d" % [pick_mode, chest_offer.size()])
+		elif ct_opened and picking and ct_t > 1.0 and not ct_taken:
+			ct_taken = true
+			_take_weapon_card(1)
+			print("CHESTTEST taken weapons=%d backpack=%d/%d picking=%s" % [
+				weapons.size(), _backpack_used(), backpack_cap, str(picking)])
+		if ct_t > 1.6:
+			print("CHESTTEST done weapons=%d picking=%s" % [weapons.size(), str(picking)])
+			get_tree().quit()
+	# 选卡时整棵树已 paused，但 Game 自己是 ALWAYS，所以要在这里单独推进倒计时
 	if picking:
 		pick_wait += delta
-		if ((playtest or shot_bot) and not shot_pick) or (pick_delay > 0.0 and pick_wait > pick_delay):
+		if pick_delay > 0.0 and pick_wait > pick_delay and not hold_pick:
 			_take_card(0)
+		return
+	if dead or get_tree().paused:
 		return
 	elapsed += delta
 	var prev_wave := wave
@@ -1431,6 +1481,7 @@ func _spawn_enemy_at(pos: Vector2, forced: String = "") -> void:
 	var e = Node2D.new()
 	e.set_script(load("res://scripts/enemy.gd"))
 	e.add_to_group("enemy")
+	e.process_mode = Node.PROCESS_MODE_PAUSABLE
 	e.position = pos
 	e.kind = kind
 	e.hp_mult = float(kd["hp_mult"])
@@ -1702,6 +1753,7 @@ func _spawn_chest(pos: Vector2) -> void:
 	var c = Node2D.new()
 	c.set_script(load("res://scripts/chest.gd"))
 	c.add_to_group("chest")
+	c.process_mode = Node.PROCESS_MODE_PAUSABLE
 	c.position = pos
 	add_child(c)
 
@@ -1745,18 +1797,7 @@ func _chest_to_modules() -> void:
 
 
 ## 开箱：优先给新武器；背包满了就给一包模块
-func grant_chest(from_chest: bool = false) -> void:
-	if from_chest:
-		last_chest_t = elapsed
-	# 测平衡时最多留 3 把枪：背包是武器与装置共享的，枪占满了就再也造不出装置（合成直接停摆）
-	if bot and weapons.size() >= 3:
-		_chest_to_modules()
-		return
-	if backpack_cap >= 0 and _backpack_used() >= backpack_cap:
-		var t := "add" if wave >= 12 else "base"
-		for k in 2:
-			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(30.0, 50.0), t)
-		return
+func _chest_pool() -> Array:
 	var pool: Array = START_POOL.duplicate()
 	# 狙击枪不适合当开局武器（单发/低射速，一个人清不动），只从宝箱里出
 	pool.append("sniper")
@@ -1768,22 +1809,74 @@ func grant_chest(from_chest: bool = false) -> void:
 		pool.append("blade")
 	if wave >= 8:
 		pool.append("laser")
-	var id: String = pool[rng.randi() % pool.size()]
-	var q := _chest_quality()
-	var w := _make_weapon(id, q)
+	return pool
+
+
+## 开箱：不再直接塞一把，而是给 4 个候选（各自独立滚品质/数值/网络），让玩家挑
+func grant_chest(from_chest: bool = false) -> void:
+	if from_chest:
+		last_chest_t = elapsed
+	# 测平衡时最多留 3 把枪：背包是武器与装置共享的，枪占满了就再也造不出装置（合成直接停摆）
+	if bot and weapons.size() >= 3:
+		_chest_to_modules()
+		return
+	if picking:
+		pending_chest += 1
+		return
+	chest_offer.clear()
+	var pool := _chest_pool()
+	var used := {}
+	var guard := 0
+	while chest_offer.size() < 4 and guard < 80:
+		guard += 1
+		var id: String = String(pool[rng.randi() % pool.size()])
+		if used.has(id) and pool.size() > 4:
+			continue
+		used[id] = true
+		chest_offer.append(_make_weapon(id, _chest_quality()))
+	pick_mode = "chest"
+	_open_pick()
+
+
+## 把选中的宝箱武器入包（背包满时先走「选一把替换」）
+func _take_weapon_card(i: int) -> void:
+	if i < 0 or i >= chest_offer.size():
+		return
+	pending_weapon = chest_offer[i]
+	chest_offer.clear()
+	if backpack_cap >= 0 and _backpack_used() >= backpack_cap:
+		pick_mode = "replace"
+		_paint_offer()
+		return
+	_adopt_weapon(pending_weapon)
+
+
+func _adopt_weapon(w: Dictionary) -> void:
 	# 新武器自带几块料，否则「宝箱给的新枪」永远只有 1 个基础模块，等于废铁
 	var seeded := 1 + int(wave / 8)
 	for i in mini(seeded, (w["slots"] as Array).size()):
 		w["slots"][i] = _new_module("base" if i == 0 else ("add" if wave >= 10 else "base"))
 	weapons.append(w)
-	# 不自动切到新武器：切过去会把「合成目标」和「当前编辑」拆成两把枪，两边都喂不饱
+	_use_weapon(weapons.size() - 1)
+	pending_weapon = {}
+	_close_pick()
 	_refresh_hud()
+
+
+func _replace_weapon(i: int) -> void:
+	if i < 0 or i >= weapons.size() or pending_weapon.is_empty():
+		return
+	weapons.remove_at(i)
+	if sel >= weapons.size():
+		sel = maxi(0, weapons.size() - 1)
+	_adopt_weapon(pending_weapon)
 
 
 func _spawn_pickup(pos: Vector2, mid: String) -> void:
 	var p = Node2D.new()
 	p.set_script(load("res://scripts/pickup.gd"))
 	p.add_to_group("pickup")
+	p.process_mode = Node.PROCESS_MODE_PAUSABLE
 	p.position = pos
 	p.mid = mid
 	p.tier = int(MODULES[mid]["tier"])
@@ -2089,6 +2182,8 @@ func _bl(id: String) -> int:
 
 ## 抽 4 张卡：3 张 buff（攻击/经济/生存各 1）+ 1 张配方卡
 func _roll_offer() -> void:
+	if pick_mode != "chest" and pick_mode != "replace":
+		pick_mode = "level"
 	offer.clear()
 	reroll_used = false
 	var cats := ["atk", "eco", "sur"]
@@ -2133,6 +2228,8 @@ func _roll_recipe_card() -> Dictionary:
 
 
 func _open_pick() -> void:
+	# 选卡时真的暂停整棵场景树：只靠 _physics_process 早退挡不住敌人自己的物理帧
+	get_tree().paused = true
 	# 两个全屏覆盖层不能同时开着：开选卡时先收起构筑屏，选完再放回来
 	var was_build: bool = build_root != null and build_root.visible
 	if was_build:
@@ -2141,6 +2238,8 @@ func _open_pick() -> void:
 	picking = true
 	pick_wait = 0.0
 	_paint_offer()
+	if playtest or shot_bot or bot:
+		print("[pick] mode=%s pause=%s" % [pick_mode, str(get_tree().paused)])
 
 
 func _paint_offer() -> void:
@@ -2148,6 +2247,12 @@ func _paint_offer() -> void:
 		return
 	for c in pick_root.get_children():
 		c.queue_free()
+	if pick_mode == "chest":
+		_paint_chest()
+		return
+	if pick_mode == "replace":
+		_paint_replace()
+		return
 	var bg := ColorRect.new()
 	bg.color = Color(0.03, 0.04, 0.07, 0.88)
 	bg.position = Vector2.ZERO
@@ -2206,6 +2311,11 @@ func _paint_offer() -> void:
 
 func _close_pick() -> void:
 	picking = false
+	get_tree().paused = false
+	pick_mode = "level"
+	if pending_chest > 0 and not dead:
+		pending_chest -= 1
+		call_deferred("grant_chest")
 	# 选卡前如果正在构筑，选完回到构筑屏（材料变了，正好让玩家继续操作）
 	if not dead and build_root != null and not build_root.visible and _pick_from_build:
 		_toggle_build()
@@ -2632,3 +2742,174 @@ func _run_rolltest(n: int = 300) -> void:
 				"倒挂" if bad == 1 else "-"])
 		print("")
 	print("总倒挂次数 %d（必须为 0）" % total_bad)
+
+## 品质色（宝箱卡与迷你电路板用）
+func _qcol(q: int) -> Color:
+	match q:
+		1: return Color(0.85, 0.87, 0.92)
+		2: return Color(0.55, 0.90, 0.60)
+		3: return Color(0.45, 0.75, 1.00)
+		4: return Color(0.76, 0.55, 1.00)
+		_: return Color(1.00, 0.82, 0.35)
+
+
+## 迷你电路板：和战斗里用同一个 layout，只是格子小
+func _mini_board(layout: Array, col: Color, cell: float, gap: float) -> Control:
+	var root := Control.new()
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var minx := 0
+	var miny := 0
+	var maxx := 0
+	var maxy := 0
+	for p in layout:
+		minx = mini(minx, int(p.x))
+		miny = mini(miny, int(p.y))
+		maxx = maxi(maxx, int(p.x))
+		maxy = maxi(maxy, int(p.y))
+	var step := cell + gap
+	root.size = Vector2((maxx - minx + 1) * step, (maxy - miny + 1) * step)
+	for i in layout.size():
+		for j in range(i + 1, layout.size()):
+			var a: Vector2i = layout[i]
+			var b: Vector2i = layout[j]
+			if absi(a.x - b.x) + absi(a.y - b.y) != 1:
+				continue
+			var pa := Vector2((a.x - minx) * step + cell * 0.5, (a.y - miny) * step + cell * 0.5)
+			var pb := Vector2((b.x - minx) * step + cell * 0.5, (b.y - miny) * step + cell * 0.5)
+			var lk := ColorRect.new()
+			lk.color = Color(col.r, col.g, col.b, 0.55)
+			lk.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			if absf(pa.x - pb.x) > 0.1:
+				lk.size = Vector2(gap + 2.0, 3.0)
+			else:
+				lk.size = Vector2(3.0, gap + 2.0)
+			lk.position = (pa + pb) * 0.5 - lk.size * 0.5
+			root.add_child(lk)
+	for p in layout:
+		var panel := Panel.new()
+		panel.position = Vector2((p.x - minx) * step, (p.y - miny) * step)
+		panel.size = Vector2(cell, cell)
+		panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sb := StyleBoxFlat.new()
+		sb.set_corner_radius_all(4)
+		sb.set_border_width_all(2)
+		sb.bg_color = Color(col.r, col.g, col.b, 0.12)
+		sb.border_color = col
+		panel.add_theme_stylebox_override("panel", sb)
+		root.add_child(panel)
+	return root
+
+
+func _paint_chest() -> void:
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.07, 0.90)
+	bg.size = Vector2(1280, 720)
+	pick_root.add_child(bg)
+	var w_card := 290.0
+	var gap := 16.0
+	var total := 4.0 * w_card + 3.0 * gap
+	var x0 := (1280.0 - total) * 0.5
+	var title := _label(pick_root, Vector2(x0, 86), 28, Color(0.98, 0.88, 0.55))
+	title.text = "开箱！点卡片 或 按 1–4 选择武器"
+	var sub := _label(pick_root, Vector2(x0, 126), 16, Color(0.72, 0.78, 0.88))
+	sub.text = "每把的形状（射程/间隔/目标/网络）都不一样；分数只在同类型内比较"
+	for i in chest_offer.size():
+		var w: Dictionary = chest_offer[i]
+		var q := int(w["quality"])
+		var qc := _qcol(q)
+		var btn := Button.new()
+		btn.position = Vector2(x0 + float(i) * (w_card + gap), 152)
+		btn.size = Vector2(w_card, 430)
+		btn.text = ""
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
+		sb.border_color = qc
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(10)
+		btn.add_theme_stylebox_override("normal", sb)
+		var sh := sb.duplicate() as StyleBoxFlat
+		sh.bg_color = Color(0.17, 0.19, 0.25, 0.99)
+		sh.border_color = Color(1, 1, 1)
+		btn.add_theme_stylebox_override("hover", sh)
+		btn.add_theme_stylebox_override("pressed", sh)
+		btn.add_theme_stylebox_override("focus", sh)
+		btn.pressed.connect(_take_card.bind(i))
+		pick_root.add_child(btn)
+
+		var head := _label(btn, Vector2(14, 10), 19, qc)
+		head.text = "%d   %s   %s" % [i + 1, QUALITY_NAME[q], String(WEAPONS[w["id"]]["name"])]
+		var sl := _label(btn, Vector2(14, 40), 15, Color(0.75, 0.80, 0.88))
+		sl.text = "%d 槽   %.2f / %.2f  (蓝档基准)" % [
+			(w["slots"] as Array).size(), float(w["score"]), float(w["p0"]) * float(QM[3])]
+
+		var mini := _mini_board(w["layout"], qc, 20.0, 8.0)
+		mini.position = Vector2(14, 70)
+		btn.add_child(mini)
+
+		var dr: Dictionary = w["dr"]
+		var lines: Array = []
+		lines.append("射程   %d  (%+.0f%%)" % [int(w["range"]), 100.0 * float(dr.get("range", 0.0))])
+		lines.append("间隔   %.2fs  (%+.0f%%)" % [float(w["interval"]), 100.0 * float(dr.get("interval", 0.0))])
+		var tg := int(w["targets"])
+		if dr.has("targets"):
+			lines.append("目标   %s  (+1)" % ("全部" if tg < 0 else str(tg)))
+		else:
+			lines.append("目标   %s" % ("全部" if tg < 0 else str(tg)))
+		lines.append("基础   %.2f  (%+.0f%%)" % [float(w["base"]), 100.0 * float(dr.get("base", 0.0))])
+		lines.append("倍率   %.2f" % float(w["mul"]))
+		if dr.has("blast"):
+			lines.append("爆炸   %d  (%+.0f%%)" % [int(w["blast"]), 100.0 * float(dr["blast"])])
+		if dr.has("ramp_max"):
+			lines.append("连击上限  %.0f%%  (%+.0f%%)" % [
+				100.0 * float(w["ramp_max"]), 100.0 * float(dr["ramp_max"])])
+		var nl := _label(btn, Vector2(14, 210), 15, Color(0.86, 0.90, 0.96))
+		nl.text = "\n".join(lines)
+		var fl := _label(btn, Vector2(14, 388), 14, Color(0.62, 0.68, 0.78))
+		fl.text = "背包 %d/%d" % [_backpack_used(), backpack_cap]
+
+
+func _paint_replace() -> void:
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.07, 0.92)
+	bg.size = Vector2(1280, 720)
+	pick_root.add_child(bg)
+	var w := pending_weapon
+	var qc := _qcol(int(w.get("quality", 3)))
+	var title := _label(pick_root, Vector2(90, 60), 26, Color(0.98, 0.88, 0.55))
+	title.text = "背包已满，选择要替换的武器"
+	var sub := _label(pick_root, Vector2(90, 100), 16, Color(0.72, 0.78, 0.88))
+	sub.text = "新武器：%s %s  %.2f / %.2f" % [
+		QUALITY_NAME[int(w.get("quality", 3))], String(WEAPONS[w["id"]]["name"]),
+		float(w.get("score", 0.0)), float(w.get("p0", 0.0)) * float(QM[3])]
+	for i in weapons.size():
+		var ow: Dictionary = weapons[i]
+		var oq := int(ow["quality"])
+		var col := _qcol(oq)
+		var btn := Button.new()
+		btn.position = Vector2(90, 150 + float(i) * 78)
+		btn.size = Vector2(560, 64)
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.text = "  %d   %s %s   %d 槽   实测 %.1f / 理论 %.1f   %.2f/%.2f" % [
+			i + 1, QUALITY_NAME[oq], String(WEAPONS[ow["id"]]["name"]),
+			(ow["slots"] as Array).size(), _actual_dps(ow), _theory_dps(ow),
+			float(ow["score"]), float(ow["p0"]) * float(QM[3])]
+		btn.add_theme_font_size_override("font_size", 17)
+		btn.add_theme_color_override("font_color", col)
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
+		sb.border_color = col
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(8)
+		sb.content_margin_left = 12
+		btn.add_theme_stylebox_override("normal", sb)
+		var sh := sb.duplicate() as StyleBoxFlat
+		sh.bg_color = Color(0.18, 0.20, 0.26, 0.99)
+		sh.border_color = Color(1, 1, 1)
+		btn.add_theme_stylebox_override("hover", sh)
+		btn.add_theme_stylebox_override("pressed", sh)
+		btn.add_theme_stylebox_override("focus", sh)
+		btn.pressed.connect(_replace_weapon.bind(i))
+		pick_root.add_child(btn)
+	var mini := _mini_board(w["layout"], qc, 22.0, 9.0)
+	mini.position = Vector2(760, 160)
+	pick_root.add_child(mini)

@@ -131,6 +131,7 @@ func _fire_bullet() -> void:
 		return
 	var b = Node2D.new()
 	b.set_script(load("res://scripts/bullet.gd"))
+	b.process_mode = Node.PROCESS_MODE_PAUSABLE
 	b.position = position + facing * (radius + 6.0)
 	b.dir = facing
 	b.add_to_group("bullet")
