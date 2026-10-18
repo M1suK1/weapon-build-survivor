@@ -60,17 +60,26 @@ const ENEMY_KINDS := {
 	"flood": {"speed": 100.0, "hp_mult": 1.00, "radius": 13.0, "color": Color(0.92, 0.30, 0.34)},
 	"runner": {"speed": 205.0, "hp_mult": 0.34, "radius": 9.0, "color": Color(1.00, 0.70, 0.26)},
 	"rock": {"speed": 52.0, "hp_mult": 2.67, "radius": 19.0, "color": Color(0.56, 0.46, 0.86)},
+	"shooter": {"speed": 70.0, "hp_mult": 1.71, "radius": 12.0, "color": Color(0.62, 0.86, 1.00)},
+	# 精英血量是手设的 9.0（不套公式：它靠冲刺而非堆血量制造威胁）
+	"charger": {"speed": 78.0, "hp_mult": 9.00, "radius": 20.0, "color": Color(1.00, 0.36, 0.42)},
 }
 
 ## 波次编成：coeff = 总血量预算系数（1.0 = 涌潮基准），kinds = 相对权重。
 ## 每 5 波循环一次，所以玩家能从「这波怪变多了/变硬了」读出编成变化。
 const WAVE_PLANS := [
 	{"name": "涌潮", "coeff": 1.00, "kinds": {"flood": 1.0}},
-	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 5.0, "runner": 3.0}},
+	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 5.0, "runner": 3.0, "shooter": 2.0}},
 	{"name": "疾行", "coeff": 1.40, "kinds": {"runner": 1.0}},
 	{"name": "磐石", "coeff": 0.60, "kinds": {"rock": 1.0}},
-	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 4.0, "rock": 2.0, "runner": 2.0}},
+	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 4.0, "rock": 2.0, "runner": 2.0, "shooter": 1.0}},
 ]
+
+## 精英：wave 4 首只，之后每 6 波保证一只；同屏上限 3
+const ELITE_FIRST_WAVE := 4
+const ELITE_EVERY := 6
+const ELITE_MAX := 3
+const SHOOTER_MAX := 10
 
 var weapon := {"interval": 1.0, "mul": 1.0, "quality": 3, "base": 1.0, "layout": [], "slots": []}
 var inventory := {1: 0, 2: 0, 3: 0, 4: 0}
@@ -84,6 +93,12 @@ var spawn_acc := 0.0
 var dead := false
 var kill_times: Array = []
 var kills_total := 0
+## 掉血来源统计（调平衡用：分不清是杂兵磨死还是子弹打死就只能靠猜）
+var dmg_src := {"contact": 0.0, "bullet": 0.0, "dash": 0.0}
+## 最后一次挨打的时间：脱战 4s 后开始缓慢回血，否则子弹的零碎伤害会把人磨死
+var last_hit_t := -99.0
+const REGEN_DELAY := 4.0
+const REGEN_RATE := 1.2
 var damage_credit := 0.0
 var modules_from_damage := 0
 var rng := RandomNumberGenerator.new()
@@ -355,9 +370,13 @@ func _physics_process(delta: float) -> void:
 	if dead or get_tree().paused:
 		return
 	elapsed += delta
+	var prev_wave := wave
 	wave = int(elapsed / WAVE_SEC) + 1
+	if wave != prev_wave:
+		_on_wave_start()
 	if not boardtest:
 		_ensure_weapon()
+	_bot_move(delta)
 	_spawn(delta)
 	_craft_tick(delta)
 	_fire(delta)
@@ -418,10 +437,44 @@ func _bot_step(delta: float) -> void:
 	while guard < 4 and try_craft():
 		guard += 1
 	if _busy_devices() >= devices.size() and devices.size() < DEVICE_MAX:
-		if inventory[1] >= device_cost() * 2:
+		if inventory[1] >= device_cost():
 			buy_device()
 	if bot_ticks % 3 != 0:
 		try_level()
+
+
+## 机器人走位：只躲「能秒人的东西」（子弹、冲刺精英的蓄力线），不躲杂兵。
+## 原因：脉冲式武器最怕把怪拉成一长串尾巴——只有扎进怪堆里，一次开火才清得动。
+func _bot_move(delta: float) -> void:
+	if not (playtest and bot) or player == null or dead:
+		return
+	var push := Vector2.ZERO
+	for b in get_tree().get_nodes_in_group("bullet"):
+		if not is_instance_valid(b):
+			continue
+		var to_p: Vector2 = player.position - b.position
+		var d := to_p.length()
+		if d < 190.0 and d > 1.0:
+			var side: float = signf(to_p.cross(b.dir))
+			if side == 0.0:
+				side = 1.0
+			push += b.dir.rotated(side * PI * 0.5) * (1.0 - d / 190.0) * 2.6
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e) or e.kind != "charger":
+			continue
+		if e.windup <= 0.0:
+			continue
+		var to_c: Vector2 = player.position - e.position
+		var dc := to_c.length()
+		if dc < 460.0 and dc > 1.0:
+			var side2: float = signf(to_c.cross(e.facing))
+			if side2 == 0.0:
+				side2 = 1.0
+			push += e.facing.rotated(side2 * PI * 0.5) * 2.4
+	if push.length() > 0.05:
+		player.position += push.normalized() * float(player.SPEED) * delta
+		if player.position.length() > 1100.0:
+			player.position = player.position.normalized() * 1100.0
 
 
 func _pt_log() -> void:
@@ -430,16 +483,20 @@ func _pt_log() -> void:
 	var comp := ""
 	for m in weapon.slots:
 		comp += "." if m == null else str(int(m.tier))
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] c=%d/%d/%d/%d kills=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(),
 		_busy_devices(), devices.size(), comp,
 		crafted[1], crafted[2], crafted[3], crafted[4], kills_total,
+		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
+		get_tree().get_nodes_in_group("enemy").size(),
 	])
 
 
 func _hud_tick(delta: float) -> void:
 	flash_t = maxf(0.0, flash_t - delta)
+	if elapsed - last_hit_t > REGEN_DELAY:
+		hp = minf(max_hp, hp + REGEN_RATE * delta)
 	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
 	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else flash_t * 0.9)
 	if pulse_t > 0.0:
@@ -473,12 +530,20 @@ func _plan_avg_mult() -> float:
 
 ## 刷怪速度：先按预算系数缩放，再按平均血量倍率反比缩放
 ## → 每波「总血量/秒」大致相同，但密度与单个强度差别很大（这就是玩法的差别）
+## 上限 1.7× 是同血量预算的补充：速度快的怪本来就多，不给上限疾行波会变成 9 只/秒的墙
 func _spawn_rate() -> float:
-	return (SPAWN_BASE + wave * SPAWN_GROWTH) * float(_plan()["coeff"]) / maxf(_plan_avg_mult(), 0.05)
+	var base: float = SPAWN_BASE + wave * SPAWN_GROWTH
+	var raw: float = base * float(_plan()["coeff"]) / maxf(_plan_avg_mult(), 0.05)
+	return minf(raw, base * 1.7)
 
 
 func _pick_kind() -> String:
 	var plan := _plan()
+	# 射手要占住「射程外打你」的位置，数量一多就没法玩了：同屏上限 10
+	if _count_kind("shooter") >= SHOOTER_MAX:
+		for k in plan["kinds"]:
+			if k != "shooter":
+				return k
 	var total := 0.0
 	for k in plan["kinds"]:
 		total += float(plan["kinds"][k])
@@ -488,6 +553,14 @@ func _pick_kind() -> String:
 		if r <= 0.0:
 			return k
 	return "flood"
+
+
+func _count_kind(k: String) -> int:
+	var n := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(e) and e.kind == k:
+			n += 1
+	return n
 
 
 func _set_quality(q: int) -> void:
@@ -602,6 +675,23 @@ func _craft_tick(delta: float) -> void:
 		_install(k)
 
 
+## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
+func _on_wave_start() -> void:
+	if wave < ELITE_FIRST_WAVE:
+		return
+	if (wave - ELITE_FIRST_WAVE) % ELITE_EVERY != 0:
+		return
+	if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+		return
+	var alive := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(e) and e.kind == "charger":
+			alive += 1
+	if alive >= ELITE_MAX:
+		return
+	_spawn_enemy("charger")
+
+
 func _spawn(delta: float) -> void:
 	spawn_acc += delta * _spawn_rate()
 	while spawn_acc >= 1.0:
@@ -611,8 +701,8 @@ func _spawn(delta: float) -> void:
 		_spawn_enemy()
 
 
-func _spawn_enemy() -> void:
-	var kind := _pick_kind()
+func _spawn_enemy(forced: String = "") -> void:
+	var kind := forced if forced != "" else _pick_kind()
 	var kd: Dictionary = ENEMY_KINDS[kind]
 	var e = Node2D.new()
 	e.set_script(load("res://scripts/enemy.gd"))
@@ -696,6 +786,21 @@ func _spawn_pickup(pos: Vector2, tier: int) -> void:
 	add_child(p)
 
 
+## 单次伤害入口（子弹 / 精英冲撞）。接触伤害仍走 _contact 的持续扣血。
+func hurt_player(dmg: float, push: Vector2, src: String = "bullet") -> void:
+	if dead:
+		return
+	last_hit_t = elapsed
+	dmg_src[src] = float(dmg_src[src]) + dmg
+	hp -= dmg
+	flash_t = 0.35
+	_reward_damage(dmg)
+	if player != null and player.has_method("add_knock"):
+		player.add_knock(push)
+	if hp <= 0.0:
+		_die()
+
+
 func _contact(delta: float) -> void:
 	var touching := 0
 	for e in get_tree().get_nodes_in_group("enemy"):
@@ -707,12 +812,13 @@ func _contact(delta: float) -> void:
 				break
 	if touching > 0:
 		var dmg: float = CONTACT_DPS * touching * delta
+		dmg_src["contact"] = float(dmg_src["contact"]) + dmg
+		last_hit_t = elapsed
 		hp -= dmg
 		flash_t = 0.35
 		_reward_damage(dmg)
 	if hp <= 0.0:
 		_die()
-
 
 ## 挨打换模块：弹药会耗尽，所以掉血要反哺构筑（越挨打越有料补）
 func _reward_damage(dmg: float) -> void:
@@ -924,21 +1030,19 @@ func try_craft(kind: int = 0) -> bool:
 
 
 func _auto_recipe() -> int:
-	# 共振是唯一的「载体」（有 27 的基量），增幅单独在场是 0 出力 —— 所以
-	# 攒够 2 个增幅就必须优先合共振，别让增幅把板子占满。
-	var sup := _installed_count(3)
-	if level >= int(CRAFT_UNLOCK[4]):
-		if inventory[3] >= 2:
-			return 4
-		if inventory[3] == 1 and sup >= 1:
-			return 3
-	if level < int(CRAFT_UNLOCK[2]) or inventory[1] < 2:
+	# 板子没满 → 先拿加法把格子垫起来（加法是唯一的「即插即用」底料）
+	# 板子满了 → 攒增幅，够 2 个立刻换共振（共振是唯一的载体，27 的基量）
+	if _count_filled() < weapon.slots.size():
+		if level >= int(CRAFT_UNLOCK[2]) and inventory[1] >= 2:
+			return 2
 		return 0
-	if level >= int(CRAFT_UNLOCK[3]) and inventory[1] >= 3 and sup < 2:
-		craft_seq += 1
-		if craft_seq % 3 == 0:
-			return 3
-	return 2
+	if level >= int(CRAFT_UNLOCK[4]) and inventory[3] >= 2:
+		return 4
+	if level >= int(CRAFT_UNLOCK[3]) and inventory[1] >= 2:
+		return 3
+	if level >= int(CRAFT_UNLOCK[2]) and inventory[1] >= 2:
+		return 2
+	return 0
 
 
 func _installed_count(t: int) -> int:
