@@ -1,18 +1,28 @@
 extends Node2D
 ## 主控制器：刷怪、开火、掉落、构筑、HUD。
 
+## 模块表。tier 1 基础 / 2 加法 / 3 增幅（与加法同级，靠合成时间区分）/ 4 共振
+## 增幅自身不出力（rate 0），每次开火把 boost 加到相邻模块的最终输出上
 const TIERS := {
 	1: {"rate": 1.0, "uses": 20.0, "name": "基础", "color": Color(0.56, 0.70, 1.0)},
 	2: {"rate": 3.0, "uses": 24.0, "name": "加法", "color": Color(0.49, 0.94, 0.66)},
-	3: {"rate": 9.0, "uses": 28.0, "name": "脉冲", "color": Color(0.36, 0.88, 0.82)},
+	3: {"rate": 0.0, "uses": 60.0, "name": "增幅", "color": Color(0.36, 0.88, 0.82), "boost": 5.0},
 	4: {"rate": 27.0, "uses": 34.0, "name": "共振", "color": Color(1.0, 0.56, 0.64)},
 }
 
-## 脉冲：自身不产出，每 PULSE_SEC 把「自身基础值」加到相邻的主动模块上（叠加，见 PULSE_STACK_MAX）
-const PULSE_SEC := 3.0
-const PULSE_STACK_MAX := 9.0
+## 配方：产物阶 → 原料阶 + 耗时。加法与增幅吃一样的 2 个基础，只用时间区分（6s vs 20s）
+const RECIPES := {
+	2: {"from": 1, "time": 6.0},
+	3: {"from": 1, "time": 20.0},
+	4: {"from": 3, "time": 34.0},
+}
+const CRAFT_UNLOCK := {2: 4, 3: 8, 4: 16}
 
-const CRAFT_UNLOCK := {2: 4, 3: 10, 4: 18}
+## 合成装置：每台 = 1 个并行合成位。可反复制造，材料堆积就多做几台（变相缩短合成时间）。
+## 开局免费 1 台，第 n 台的价钱 = 12 × 1.7^(n-2) 个基础模块，上限 8 台。
+const DEVICE_COST_BASE := 12
+const DEVICE_COST_GROWTH := 1.7
+const DEVICE_MAX := 8
 
 ## 武器品质 = 电路板布局（槽位数量 + 连接方式）。
 ## 相邻 = 网格曼哈顿距离 1，所以直线是链、T/十字/双排会在中间形成枢纽。
@@ -71,6 +81,10 @@ var build_info: Label
 var flash: ColorRect
 var flash_t := 0.0
 var pulse_t := 0.0
+
+# --- 合成：每台装置一个并行位，装置可反复买（材料堆积就多做几台） ---
+var devices: Array = []  # [{"kind": int, "left": float, "total": float}]，kind=0 表示空闲
+var craft_seq := 0
 
 # --- 无头自动对战（平衡验证用）：godot --headless -- playtest bot pt=1200 ---
 var playtest := false
@@ -133,13 +147,50 @@ func _ready() -> void:
 	for i in weapon.slots.size():
 		weapon.slots[i] = _new_module(1)
 	inventory[1] = 2
+	devices.append(_new_device())
 	_make_player()
 	_make_hud()
 	_refresh_hud()
 
 
 func _new_module(tier: int) -> Dictionary:
-	return {"tier": tier, "left": float(TIERS[tier].uses), "bonus": 0.0, "tick": 0.0}
+	return {"tier": tier, "left": float(TIERS[tier].uses)}
+
+
+func _new_device() -> Dictionary:
+	return {"kind": 0, "left": 0.0, "total": 0.0}
+
+
+## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
+func device_cost() -> int:
+	return int(round(DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))))
+
+
+func _idle_device() -> int:
+	for i in devices.size():
+		if int(devices[i]["kind"]) == 0:
+			return i
+	return -1
+
+
+func _busy_devices() -> int:
+	var n := 0
+	for d in devices:
+		if int(d["kind"]) != 0:
+			n += 1
+	return n
+
+
+## 用基础模块造一台新装置（材料堆积时的唯一出口）
+func buy_device() -> bool:
+	if devices.size() >= DEVICE_MAX:
+		return false
+	var cost := device_cost()
+	if inventory[1] < cost:
+		return false
+	inventory[1] -= cost
+	devices.append(_new_device())
+	return true
 
 
 func _make_player() -> void:
@@ -173,7 +224,7 @@ func _make_hud() -> void:
 	hud_status = _label(layer, Vector2(18, 14), 20, Color(0.95, 0.96, 1.0))
 	hud_ammo = _label(layer, Vector2(18, 44), 20, Color(0.7, 0.95, 0.85))
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
-	hud_tip.text = "WASD 移动    TAB 构筑（暂停）    U 升级    C 合成    R 重开"
+	hud_tip.text = "WASD 移动    TAB 构筑（暂停）    U 升级    C 加法    V 增幅    B 共振    X 造装置    R 重开"
 
 	build_root = Control.new()
 	build_root.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -219,8 +270,17 @@ func _input(event: InputEvent) -> void:
 		if try_level():
 			_pass()
 	elif k == KEY_C:
-		try_craft()
+		try_craft(2)
 		_pass()
+	elif k == KEY_V:
+		try_craft(3)
+		_pass()
+	elif k == KEY_B:
+		try_craft(4)
+		_pass()
+	elif k == KEY_X:
+		if buy_device():
+			_pass()
 	elif k == KEY_R:
 		get_tree().paused = false
 		get_tree().reload_current_scene()
@@ -274,9 +334,10 @@ func _physics_process(delta: float) -> void:
 		return
 	elapsed += delta
 	wave = int(elapsed / WAVE_SEC) + 1
-	_ensure_weapon()
+	if not boardtest:
+		_ensure_weapon()
 	_spawn(delta)
-	_pulse_tick(delta)
+	_craft_tick(delta)
 	_fire(delta)
 	_contact(delta)
 	_hud_tick(delta)
@@ -288,26 +349,24 @@ func _physics_process(delta: float) -> void:
 		_boardtest(delta)
 
 
-## 电路板规则自检：固定摆一块已知的板，验证脉冲是否真的把基础值加给邻居
+## 电路板规则自检：金 6 槽 2×3 密堆，摆下共振×2 / 增幅 / 加法 / 基础×2
+## 期望：out = [40.5, 45.5, 0, 1, 5, 6]  power = 100.0
 func _boardtest(delta: float) -> void:
 	if not bt_set:
 		bt_set = true
+		_set_quality(5)
 		weapon.interval = 1.0 if demo_board else 999.0  # 自检时不开火，排除弹药消耗的干扰
-		weapon.base = 1.0
-		weapon.slots[0] = _new_module(2)  # 加法
-		weapon.slots[1] = _new_module(3)  # 脉冲（与加法相邻）
-		weapon.slots[2] = _new_module(1)  # 基础（与脉冲相邻）
-		weapon.slots[3] = _new_module(1)  # 基础（只与加法相邻）
+		weapon.slots[0] = _new_module(4)  # 共振（邻 1 共振、3 基础）
+		weapon.slots[1] = _new_module(4)  # 共振（邻 0 共振、2 增幅、4 加法）
+		weapon.slots[2] = _new_module(3)  # 增幅（邻 1、5）
+		weapon.slots[3] = _new_module(1)  # 基础（邻 0、4）
+		weapon.slots[4] = _new_module(2)  # 加法（邻 1、3、5）
+		weapon.slots[5] = _new_module(1)  # 基础（邻 2、4）
 		print("BOARD set  out=", _slot_out(), " power=", _shot_power())
 	bt_print += delta
 	if bt_print >= 0.5:
 		bt_print = 0.0
-		var out := _slot_out()
-		print("t=%4.1f  out=%s  power=%5.1f  bonus=[%.1f, %.1f, %.1f, %.1f]" % [
-			elapsed, str(out), _shot_power(),
-			float(weapon.slots[0].bonus), float(weapon.slots[1].bonus),
-			float(weapon.slots[2].bonus), float(weapon.slots[3].bonus),
-		])
+		print("t=%4.1f  out=%s  power=%5.1f" % [elapsed, str(_slot_out()), _shot_power()])
 	if elapsed > 10.0 and shot_path == "":
 		get_tree().quit()
 
@@ -323,18 +382,24 @@ func _playtest_step(delta: float) -> void:
 		get_tree().quit()
 
 
-## 简化版「玩家」：每 3 次决策里有一次优先升级（解锁配方），其余优先合成（直接提升出力）
+## 简化版「玩家」：优先把空闲装置填满（合成是唯一把材料变成出力的手段），
+## 装置全忙且基础模块堆积时再造一台（变相缩短合成时间），每 3 次决策升一次级。
 func _bot_step(delta: float) -> void:
 	bot_t += delta
 	if bot_t < 0.5:
 		return
 	bot_t = 0.0
 	bot_ticks += 1
-	if bot_ticks % 3 == 0 and try_level():
-		return
-	if try_craft():
-		return
-	try_level()
+	if bot_ticks % 3 == 0:
+		try_level()
+	var guard := 0
+	while guard < 4 and try_craft():
+		guard += 1
+	if _busy_devices() >= devices.size() and devices.size() < DEVICE_MAX:
+		if inventory[1] >= device_cost() * 2:
+			buy_device()
+	if bot_ticks % 3 != 0:
+		try_level()
 
 
 func _pt_log() -> void:
@@ -342,10 +407,10 @@ func _pt_log() -> void:
 	var comp := ""
 	for m in weapon.slots:
 		comp += "." if m == null else str(int(m.tier))
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d [%s] kills=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] kills=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
-		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(), comp,
-		kills_total,
+		cur_drop(), cur_burn(), level, _count_filled(), weapon.slots.size(),
+		_busy_devices(), devices.size(), comp, kills_total,
 	])
 
 
@@ -415,19 +480,16 @@ func _within(i: int, r: int) -> Array:
 	return out
 
 
-## 每个槽位这次的「出力」。镜像是对邻居读数再算一份，不做连锁传播（否则指数爆炸）。
+## 每个槽位这次的「出力」。
+## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
 func _slot_out() -> Array:
-	# 基础值 = 阶级固有值 + 脉冲累加进来的加成（bonus 视作该模块自身基础值的一部分）
 	var base: Array = []
 	base.resize(weapon.slots.size())
 	for i in weapon.slots.size():
 		var m = weapon.slots[i]
-		if m == null:
-			base[i] = 0.0
-		else:
-			base[i] = float(TIERS[int(m.tier)].rate) + float(m.get("bonus", 0.0))
+		base[i] = 0.0 if m == null else float(TIERS[int(m.tier)].rate)
 	var eff := base.duplicate()
-	# 共振：相邻同名（同阶）模块 +50%
+	# 共振：相邻同阶（T4）模块 +50% 基础值
 	for i in weapon.slots.size():
 		var m = weapon.slots[i]
 		if m == null or int(m.tier) != 4:
@@ -444,13 +506,20 @@ func _slot_out() -> Array:
 			continue
 		var v: float = eff[i]
 		var t := int(m.tier)
-		if t == 2:  # 加法：镜像相邻的低阶模块
+		if t == 2:  # 加法：镜像相邻的低阶（基础）模块
 			for j in _neighbors(i):
 				if weapon.slots[j] != null and int(weapon.slots[j].tier) < t:
 					v += float(eff[j])
-		elif t == 3:
-			v = 0.0  # 脉冲：自身不产出，值全部给相邻主动模块
 		out[i] = v
+	# 增幅：自身 0 出力，每次开火把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
+	for i in weapon.slots.size():
+		var m = weapon.slots[i]
+		if m == null or int(m.tier) != 3:
+			continue
+		var b := float(TIERS[3].boost)
+		for j in _neighbors(i):
+			if weapon.slots[j] != null and int(weapon.slots[j].tier) != 3:
+				out[j] = float(out[j]) + b
 	return out
 
 
@@ -461,22 +530,19 @@ func _shot_power() -> float:
 	return total * weapon.mul
 
 
-## 脉冲模块：每 PULSE_SEC 把自己的基础值加到相邻的「主动模块」上（叠加，封顶 PULSE_STACK_MAX 层）
-func _pulse_tick(delta: float) -> void:
-	var step := float(TIERS[3].rate)
-	for i in weapon.slots.size():
-		var m = weapon.slots[i]
-		if m == null or int(m.tier) != 3:
+## 合成计时：每台装置各自倒计时，到点后产物进电路板
+## （满了会按整板出力决定换不换，换不动就进库存）
+func _craft_tick(delta: float) -> void:
+	for d in devices:
+		if int(d["kind"]) == 0:
 			continue
-		m.tick = float(m.tick) + delta
-		while float(m.tick) >= PULSE_SEC:
-			m.tick = float(m.tick) - PULSE_SEC
-			for j in _neighbors(i):
-				var n = weapon.slots[j]
-				if n == null or int(n.tier) == 3:
-					continue
-				if float(n.bonus) + step <= step * PULSE_STACK_MAX + 0.001:
-					n.bonus = float(n.bonus) + step
+		d["left"] = float(d["left"]) - delta
+		if float(d["left"]) > 0.0:
+			continue
+		var k: int = int(d["kind"])
+		d["kind"] = 0
+		d["left"] = 0.0
+		_install(k)
 
 
 func _spawn(delta: float) -> void:
@@ -517,7 +583,7 @@ func _fire(delta: float) -> void:
 			weapon.slots[i] = null
 	if dmg <= 0.0:
 		return
-	# 脉冲：射程内全部敌人吃满这次伤害（单目标 1 发/秒 追不上海量刷怪）
+	# 开火脉冲：射程内全部敌人吃满这次伤害（单目标 1 发/秒 追不上海量刷怪）
 	for e in get_tree().get_nodes_in_group("enemy"):
 		if not is_instance_valid(e):
 			continue
@@ -598,7 +664,7 @@ func _reward_damage(dmg: float) -> void:
 			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
 
 
-## 补偿只给「能产出的」模块：脉冲自身 0 出力，当补偿发等于发了个空槽
+## 补偿只给「能产出的」模块：增幅自身 0 出力，当补偿发等于发了个空槽
 func _damage_reward_tier() -> int:
 	if wave >= 12:
 		return 2
@@ -690,15 +756,6 @@ func _take_tier(t: int, n: int, prefer_slots: bool = false) -> void:
 		left -= 1
 
 
-## 主动模块 = 自己会产出数值的模块（脉冲靠邻居吃饭，不算）
-func _count_active() -> int:
-	var n := 0
-	for m in weapon.slots:
-		if m != null and int(m.tier) != 3:
-			n += 1
-	return n
-
-
 ## 整板出力（不含武器基础值，只用于互相比较）
 func _board_total() -> float:
 	var s := 0.0
@@ -713,59 +770,25 @@ func _board_total() -> float:
 ## 旧规则是「替换最低阶」，结果会把喂加法的 T1 全换掉，最后板上全是互相吃不到的加法。
 func _install(t: int) -> void:
 	var n: int = weapon.slots.size()
-	if t != 3:
-		for i in n:
-			if weapon.slots[i] == null:
-				weapon.slots[i] = _new_module(t)
-				return
-	# 脉冲自身不产出 → 不占空槽，必须有 ≥2 个主动邻居，且不能把最后一个主动模块换掉
-	if t == 3:
-		if _count_active() < 2:
-			inventory[t] += 1
+	for i in n:
+		if weapon.slots[i] == null:
+			weapon.slots[i] = _new_module(t)
 			return
-		var out := _slot_out()
-		var best := -1
-		var best_fed := 1
-		var best_own := 1e18
-		for i in n:
-			var m = weapon.slots[i]
-			if m == null or int(m.tier) == 3:
-				continue
-			# 只换「本身就没什么产出」的格子（T1 或吃不到料的加法），
-			# 别把板上的主力换成 3 秒不产出的脉冲
-			if float(out[i]) > 4.0:
-				continue
-			var fed := 0
-			for j in _neighbors(i):
-				var nb = weapon.slots[j]
-				if nb != null and int(nb.tier) != 3:
-					fed += 1
-			if fed < 2:
-				continue
-			if fed > best_fed or (fed == best_fed and float(out[i]) < best_own):
-				best_fed = fed
-				best_own = float(out[i])
-				best = i
-		if best >= 0:
-			weapon.slots[best] = _new_module(3)
-			return
-		inventory[3] += 1
-		return
 	var now := _board_total()
-	var best2 := -1
+	var best := -1
 	var best_v := now + 0.001
 	for i in n:
 		var m = weapon.slots[i]
-		if m == null or _count_active() <= 1:
+		if m == null:
 			continue
 		weapon.slots[i] = _new_module(t)
 		var v := _board_total()
 		weapon.slots[i] = m
 		if v > best_v:
 			best_v = v
-			best2 = i
-	if best2 >= 0:
-		weapon.slots[best2] = _new_module(t)
+			best = i
+	if best >= 0:
+		weapon.slots[best] = _new_module(t)
 		return
 	inventory[t] += 1
 
@@ -792,21 +815,42 @@ func try_level() -> bool:
 	return true
 
 
-## 合成吃「库存」（槽位是工作区，绝不能被合成顺手拆掉）：
-## 2 个同阶库存模块 → 1 个高阶模块，直接换下电路板上最弱的那颗
-func try_craft() -> bool:
-	for t in [4, 3, 2]:
-		if level < int(CRAFT_UNLOCK[t]):
-			continue
-		if inventory[t - 1] >= 2:
-			inventory[t - 1] -= 2
-			if t == 3:
-				# 脉冲自身 0 出力：先存库存，凑够 2 个直接合成共振，别白占电路板的输出位
-				inventory[3] += 1
-			else:
-				_install(t)
-			return true
-	return false
+## 合成吃「库存」（槽位是工作区，绝不能被合成顺手拆掉）。
+## 有空闲装置才能开工，产物在 _craft_tick 到点后进板子。
+## kind = 0 表示自动选：先共振（最值钱），再加法（便宜），攒够余量才做增幅。
+func try_craft(kind: int = 0) -> bool:
+	var slot := _idle_device()
+	if slot < 0:
+		return false
+	if kind == 0:
+		kind = _auto_recipe()
+	if kind == 0:
+		return false
+	if not RECIPES.has(kind):
+		return false
+	if level < int(CRAFT_UNLOCK[kind]):
+		return false
+	var src := int(RECIPES[kind]["from"])
+	if inventory[src] < 2:
+		return false
+	inventory[src] -= 2
+	var t := float(RECIPES[kind]["time"])
+	devices[slot]["kind"] = kind
+	devices[slot]["total"] = t
+	devices[slot]["left"] = t
+	return true
+
+
+func _auto_recipe() -> int:
+	if level >= int(CRAFT_UNLOCK[4]) and inventory[3] >= 2:
+		return 4
+	if level < int(CRAFT_UNLOCK[2]) or inventory[1] < 2:
+		return 0
+	if level >= int(CRAFT_UNLOCK[3]) and inventory[1] >= 3:
+		craft_seq += 1
+		if craft_seq % 3 == 0:
+			return 3
+	return 2
 
 
 func add_module(tier: int) -> void:
@@ -851,6 +895,7 @@ func _refresh_hud() -> void:
 	]
 	if _count_filled() == 0:
 		hud_ammo.text += "    模块耗尽 · 仅基础 %.1f" % float(weapon.base)
+	hud_ammo.text += "    装置 %d/%d 台" % [_busy_devices(), devices.size()]
 	hud_ammo.add_theme_color_override("font_color",
 		Color(0.7, 0.95, 0.85) if net >= 0.0 else Color(1.0, 0.55, 0.5))
 
@@ -877,7 +922,7 @@ func _refresh_build() -> void:
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []
-	info.append("库存    基础 %d    加法 %d    脉冲 %d    共振 %d" % [
+	info.append("库存    基础 %d    加法 %d    增幅 %d    共振 %d" % [
 		inventory[1], inventory[2], inventory[3], inventory[4]
 	])
 	info.append("受击补偿    +%d 个模块（每 %d HP 补 1 个）" % [
@@ -887,11 +932,33 @@ func _refresh_build() -> void:
 	info.append("等级 %d  →  %d     需要 %d 个模块     [U]" % [
 		level, level + 1, level_cost()
 	])
+	var keys := {2: "C", 3: "V", 4: "B"}
+	var idle := _idle_device()
 	for t in [2, 3, 4]:
+		var src := int(RECIPES[t]["from"])
 		var state := "解锁于 Lv%d" % int(CRAFT_UNLOCK[t])
 		if level >= int(CRAFT_UNLOCK[t]):
-			state = "可合成" if inventory[t - 1] >= 2 else "需 2 个%s" % TIERS[t - 1].name
-		info.append("    2×%s → 1×%s     [C]    %s" % [TIERS[t - 1].name, TIERS[t].name, state])
+			var mine := 0
+			for d in devices:
+				if int(d["kind"]) == t:
+					mine += 1
+			if inventory[src] < 2:
+				state = "需 2 个%s" % TIERS[src].name
+			elif idle < 0:
+				state = "装置全忙"
+			elif mine > 0:
+				state = "可再开一台"
+			else:
+				state = "可合成"
+		info.append("    [%s] 2×%s → 1×%s    %2ds    %s" % [
+			keys[t], TIERS[src].name, TIERS[t].name, int(RECIPES[t]["time"]), state
+		])
+	if devices.size() < DEVICE_MAX:
+		info.append("    [X] 造装置（当前 %d 台，空闲 %d）  需要 %d 个基础" % [
+			devices.size(), devices.size() - _busy_devices(), device_cost()
+		])
+	else:
+		info.append("    [X] 装置已满（%d 台）" % devices.size())
 	info.append("")
 	info.append("净弹药 %+.2f/s     DPS %.1f" % [cur_drop() - cur_burn(), cur_dps()])
 	build_info.text = "\n".join(info)
@@ -967,16 +1034,13 @@ func _rebuild_board() -> void:
 		if m == null:
 			out_l.text = "—"
 		elif int(m.tier) == 3:
-			# 脉冲不产出，显示「每次加多少 × 给几个邻居」
+			# 增幅不产出，显示「每次给每个邻居加多少 × 给几个邻居」
 			var fed := 0
 			for j in _neighbors(i):
-				var n = weapon.slots[j]
-				if n != null and int(n.tier) != 3:
+				var nb = weapon.slots[j]
+				if nb != null and int(nb.tier) != 3:
 					fed += 1
-			out_l.text = "→%.0f×%d" % [float(TIERS[3].rate), fed]
-		elif float(m.bonus) > 0.5:
-			# 拆开显示：自身基础值 + 脉冲喂进来的加成
-			out_l.text = "%.0f+%.0f" % [float(out[i]) - float(m.bonus), float(m.bonus)]
+			out_l.text = "→%.0f×%d" % [float(TIERS[3].boost), fed]
 		else:
 			out_l.text = "%.1f" % float(out[i])
 		panel.add_child(out_l)
@@ -989,17 +1053,3 @@ func _rebuild_board() -> void:
 		use_l.add_theme_color_override("font_color", Color(0.55, 0.62, 0.72))
 		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(TIERS[int(m.tier)].uses)]
 		panel.add_child(use_l)
-
-		# 脉冲充能条：脉冲自己显示本次脉冲的倒计时，其它模块显示已累计的加成进度
-		if m != null:
-			var ratio := 0.0
-			if int(m.tier) == 3:
-				ratio = clampf(float(m.tick) / PULSE_SEC, 0.0, 1.0)
-			else:
-				ratio = clampf(float(m.bonus) / (float(TIERS[3].rate) * PULSE_STACK_MAX), 0.0, 1.0)
-			if ratio > 0.0:
-				var bar := ColorRect.new()
-				bar.color = Color(0.36, 0.88, 0.82, 0.9)
-				bar.position = Vector2(9, cell - 7)
-				bar.size = Vector2((cell - 18) * ratio, 3.0)
-				panel.add_child(bar)
