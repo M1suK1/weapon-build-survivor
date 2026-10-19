@@ -6,11 +6,19 @@ extends Node2D
 ##
 ## 本文件正按 docs/plan-refactor-v1.md 逐步拆分：
 ##   R1 数据表         → scripts/data/                 （已完成）
-##   R2 库存 + 电路板  → scripts/systems/              （下一步）
+##   R2 库存 + 电路板  → scripts/systems/              （已完成）
 ##   R3–R7 合成 / 战斗 / 敌人 / UI / 自测台
 ## 拆完之后这里只剩 ~350 行编排代码。
 ##
-## 阅读顺序：数据表引用 → 状态 → _physics_process 主循环 → 各功能块（每个块开头有 ==== 分隔）。
+## 目录（文件里用 16 条 ==== 横幅分隔，Ctrl+F 搜「# 7.」这种编号即可跳转）：
+##   0 生命周期与主循环   1 场景与 HUD 构建   2 输入
+##   3 战斗               4 武器              5 敌人与刷怪
+##   6 宝箱               7 电路板与模块      8 库存
+##   9 合成与装置        10 升级与 buff      11 HUD 刷新
+##  12 构筑屏            13 鼠标拖拽         14 选卡界面
+##  15 调试与自测台
+##
+## 读代码的建议顺序：_physics_process（主循环一行一步）→ 想深究哪一步就跳到对应编号。
 
 # ============================================================================
 # 数据表：改数值请去 scripts/data/，这里只是只读引用，
@@ -234,6 +242,9 @@ var bt_set := false
 var bt_print := 0.0
 
 
+# ============================================================================
+# 0. 生命周期与主循环
+# ============================================================================
 func _ready() -> void:
 	add_to_group("game")
 	# 允许暂停时仍接收输入（Tab 退出构筑界面）
@@ -363,242 +374,264 @@ func _ready() -> void:
 	_test_banner()
 
 
-
-# --- 作弊码（debug 用） ---------------------------------------------------------
-# CLI: -- "cheat=rich,god,level,wave=15"（逗号分隔，可叠加）
-# 快捷键（任何时候）：F5 无敌开/关　F6 +100 基础　F7 等级 +5　F8 时间 +40s　F9 全套武器
-func _apply_cheats(spec: String) -> void:
-	for raw in spec.split(",", false):
-		var item := raw.strip_edges()
-		if item == "":
-			continue
-		var kv := item.split("=", true, 1)
-		var key := kv[0]
-		var val := int(kv[1]) if kv.size() > 1 else 0
-		match key:
-			"rich":
-				_add_inv("base", 500)
-				print("[cheat] +500 基础模块")
-			"modules":
-				for k in MOD_ORDER:
-					_add_inv(String(k), 20)
-				_add_inv("base", 300)
-				print("[cheat] 每种模块 +20，基础 +300")
-			"god":
-				god = true
-				print("[cheat] 无敌开")
-			"level":
-				level = maxi(level, 25 if val <= 0 else val)
-				print("[cheat] 等级 = %d" % level)
-			"wave":
-				elapsed = maxf(0.0, float(val - 1) * WAVE_SEC)
-				wave = maxi(1, val)
-				print("[cheat] 跳到第 %d 波（elapsed=%.0f）" % [wave, elapsed])
-			"weapons":
-				_give_all_weapons()
-				print("[cheat] 发全套武器，背包 %d" % weapons.size())
-			"devices":
-				var n: int = maxi(1, val if val > 0 else 5)
-				for i in n:
-					devices.append(_new_device())
-				print("[cheat] 装置 +%d（共 %d 台）" % [n, devices.size()])
-			"hp":
-				max_hp = 9999.0
-				hp = max_hp
-				print("[cheat] HP 拉满")
-			_:
-				print("[cheat] 未知作弊码：%s" % key)
+func _pass() -> void:
+	if build_root.visible:
+		_refresh_build()
+	else:
+		_refresh_hud()
 
 
-func _give_all_weapons() -> void:
-	for id in ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]:
-		# 背包是武器+装置共享的：作弊也别把它撑爆，否则「造装置」永远点不动
-		if weapons.size() >= maxi(1, backpack_cap - 1):
-			break
-		var w := _make_weapon(String(id), 5)
-		weapons.append(w)
-	_refresh_hud()
+func _process(delta: float) -> void:
+	# 选卡界面会把整棵树暂停，elapsed 不再推进 —— 快进和截图都必须先跳出这个状态，
+	# 否则会永远停在「等 elapsed 到 ff / shotat」上（表现为界面卡死）
+	if picking:
+		ff = 0.0
+		Engine.time_scale = 1.0
+		if shot_path != "" and hold_pick:
+			elapsed = shot_at
+	# 快进：先按 8 倍速把局面推到 ff 秒，再恢复正常速度拍图
+	# 死亡时 elapsed 会停住，必须跳出快进分支，否则会一直等下去
+	if ff > 0.0 and not dead:
+		if elapsed < ff:
+			Engine.time_scale = 8.0
+			return
+		Engine.time_scale = 1.0
+		ff = 0.0
+	if ff > 0.0 and dead:
+		Engine.time_scale = 1.0
+		ff = 0.0
+	# 选卡界面会冻结 elapsed，截图逻辑若还在等 shotat 就会永久挂住（holdpick 时才强制跳时间）
+	if picking and shot_path != "" and hold_pick:
+		elapsed = shot_at
+	if shot_path == "" or shot_at < 0.0:
+		return
+	# 死了之后 elapsed 不再推进，如果还在等 shotat 就会永久挂住 —— 死亡即立刻拍
+	if not dead:
+		if elapsed < shot_at:
+			if ff <= 0.0:
+				shot_guard += delta
+			if shot_guard > 600.0:
+				print("shot guard timeout")
+				get_tree().quit()
+			return
+	shot_at = -1.0
+	Engine.time_scale = 1.0
+	if picking and not hold_pick and (shot_bot or playtest or shot_chest or shot_pick or pick_delay > 0.0):
+		_take_card(0)
+	if shot_chest and not pick_pre and ff == 0.0:
+		pick_pre = true
+		if picking:
+			_close_pick()  # 截图工具：让开箱面板优先，直接丢掉当前那张升级卡
+		grant_chest(true)
+	if shot_pick and not picking:
+		_roll_offer()
+		_open_pick()
+	if shot_build and not build_root.visible:
+		_toggle_build()
+	if drag_demo and not dt_step:
+		dt_step = 1
+		await get_tree().process_frame
+		await _dragdemo_pose()
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var img := get_viewport().get_texture().get_image()
+	img.save_png(shot_path)
+	print("shot saved: %s" % shot_path)
+	get_tree().quit()
 
 
-func _cheat_key(k: int) -> bool:
-	match k:
-		KEY_F5:
-			god = not god
-			print("[cheat] 无敌 %s" % ("开" if god else "关"))
-		KEY_F6:
-			_add_inv("base", 100)
-			print("[cheat] +100 基础模块（库存 %d）" % _inv("base"))
-		KEY_F7:
-			level += 5
-			print("[cheat] 等级 +5 → %d" % level)
-		KEY_F8:
-			elapsed += WAVE_SEC
-			print("[cheat] 时间 +40s（wave 自动推进）")
-		KEY_F9:
-			_give_all_weapons()
-			print("[cheat] 发全套武器，背包 %d" % weapons.size())
-		_:
-			return false
-	_pass()
-	return true
-
-
-# --- 测试日志 ---------------------------------------------------------------
-# 每次自测都在 stdout 打一对 [TEST] 行：start 说明这次测的是什么配置，end 说明结果。
-# 目的：跑完不用回头翻参数，日志本身就是「测试内容 + 效果」的记录（也会同步到 docs/testlog.md）。
-func _test_banner() -> void:
-	var mode := "normal"
+func _physics_process(delta: float) -> void:
+	if drag_test and dt_step == 0 and not playtest:
+		pass
+	if drag_test and dt_step == 0:
+		dt_step = 1
+		_run_dragtest()
+	# UI 底座自检：开构筑屏 → 打印坐标诊断 → 合成一次真实鼠标点击 → 看是否真点到 ×
+	if uitest and uitest_step == 0:
+		uitest_step = 1
+		_toggle_build()
+		print("UITEST " + UIKit.diag(self, build_root))
+		print("UITEST vp=%s slot0_local=%s slot0_global=%s inv0=%s slots=%d inv_rows=%d" % [
+			str(get_viewport().get_visible_rect().size),
+			str(slot_rects[0]) if slot_rects.size() > 0 else "none",
+			str((slot_panels[0] as Control).get_global_rect()) if slot_panels.size() > 0 else "none",
+			str(inv_rows[0]["rect"]) if inv_rows.size() > 0 else "none",
+			slot_rects.size(), inv_rows.size()])
+		if build_close_btn != null:
+			print("UITEST close_rect=%s visible_in_tree=%s" % [
+				str(build_close_btn.get_global_rect()), str(build_close_btn.is_visible_in_tree())])
+	elif uitest and uitest_step == 1:
+		uitest_step = 2
+		var c := Vector2(1140, 34)
+		if build_close_btn != null:
+			c = build_close_btn.get_global_rect().get_center()
+		var dn := InputEventMouseButton.new()
+		dn.button_index = MOUSE_BUTTON_LEFT
+		dn.pressed = true
+		dn.position = c
+		dn.global_position = c
+		get_viewport().push_input(dn)
+		var up := InputEventMouseButton.new()
+		up.button_index = MOUSE_BUTTON_LEFT
+		up.pressed = false
+		up.position = c
+		up.global_position = c
+		get_viewport().push_input(up)
+		print("UITEST click_at=%s after_click build_visible=%s" % [str(c), str(build_root.visible)])
+		get_tree().quit()
+	if swarm_test and elapsed > 1.0 and not ws_done:
+		ws_done = true
+		for i in 120:
+			var gx := (i % 12) - 6
+			var gy := int(i / 12) - 5
+			_spawn_enemy_at(player.position + Vector2(gx * 52.0, gy * 46.0))
+	# 点击自检：开箱 -> 1 秒后向视口塞一个真实鼠标点击 -> 看卡片是否被响应
+	if click_test:
+		ct2 += delta
+		if ct2 > 0.5 and not picking and not pick_pre:
+			pick_pre = true
+			grant_chest(true)
+			print("CLICKTEST opened mode=%s cards=%d" % [pick_mode, chest_offer.size()])
+		elif ct2 > 1.5 and picking and not click_done:
+			click_done = true
+			var ev := InputEventMouseButton.new()
+			ev.button_index = MOUSE_BUTTON_LEFT
+			ev.pressed = true
+			ev.position = Vector2(300, 360)
+			ev.global_position = ev.position
+			get_viewport().push_input(ev)
+			var up := InputEventMouseButton.new()
+			up.button_index = MOUSE_BUTTON_LEFT
+			up.pressed = false
+			up.position = ev.position
+			up.global_position = ev.position
+			get_viewport().push_input(up)
+			var mv := InputEventMouseMotion.new()
+			mv.position = ev.position
+			mv.global_position = ev.position
+			get_viewport().push_input(mv)
+			var hov := get_viewport().gui_get_hovered_control()
+			print("CLICKTEST hovered=%s pick_rect=%s" % [str(hov), str(pick_root.get_global_rect())])
+		elif ct2 > 2.2 and click_done:
+			print("CLICKTEST result picking=%s weapons=%d" % [str(picking), weapons.size()])
+			get_tree().quit()
+	# 开箱链路自检：开 → 选第 2 张 → 验证进背包
+	if chest_test:
+		ct_t += delta
+		if ct_t > 0.5 and not ct_opened:
+			ct_opened = true
+			grant_chest(true)
+			print("CHESTTEST opened mode=%s cards=%d" % [pick_mode, chest_offer.size()])
+		elif ct_opened and picking and ct_t > 1.0 and not ct_taken:
+			ct_taken = true
+			_take_weapon_card(1)
+			print("CHESTTEST taken weapons=%d backpack=%d/%d picking=%s" % [
+				weapons.size(), _backpack_used(), backpack_cap, str(picking)])
+		if ct_t > 1.6:
+			print("CHESTTEST done weapons=%d picking=%s" % [weapons.size(), str(picking)])
+			get_tree().quit()
+	# 选卡时整棵树已 paused，但 Game 自己是 ALWAYS，所以要在这里单独推进倒计时
+	if picking:
+		pick_wait += delta
+		if pick_delay > 0.0 and pick_wait > pick_delay and not hold_pick:
+			_take_card(0)
+		return
+	if dead or get_tree().paused:
+		return
+	elapsed += delta
+	var prev_wave := wave
+	wave = int(elapsed / WAVE_SEC) + 1
+	if wave != prev_wave:
+		_on_wave_start()
+	_bot_move(delta)
+	# 记录玩家真实移动方向：bulwark 要生成在「玩家正在走的方向」前面堵路
+	if player != null:
+		var dp := player.position - prev_ppos
+		if dp.length() > 0.5:
+			last_move_dir = dp.normalized()
+		prev_ppos = player.position
+	_spawn(delta)
+	_tick_bulwark(delta)
+	_craft_tick(delta)
+	if autoplan:
+		_auto_plan_all()
+		_auto_plan_fix(delta)
+	_fire(delta)
+	_contact(delta)
+	_hud_tick(delta)
 	if playtest:
-		mode = "playtest"
-	elif bot:
-		mode = "bot"
-	elif shot_path != "":
-		mode = "shot"
-	if mode == "normal" and cheat_arg == "":
+		_playtest_step(delta)
+	elif shot_bot:
+		_bot_step(delta)
+	elif boardtest:
+		_boardtest(delta)
+
+
+func _hud_tick(delta: float) -> void:
+	if _cam != null:
+		_cam_pos = _cam.get_screen_center_position()
+	flash_t = maxf(0.0, flash_t - delta)
+	if elapsed - last_hit_t > REGEN_DELAY:
+		hp = minf(max_hp, hp + (REGEN_RATE + 0.5 * float(_bl("regen"))) * delta)
+	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
+	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else minf(flash_t * 0.9, 0.26))
+	if pulse_t > 0.0:
+		pulse_t = maxf(0.0, pulse_t - delta)
+	for i in range(shots.size() - 1, -1, -1):
+		shots[i]["t"] = float(shots[i]["t"]) - delta
+		if float(shots[i]["t"]) <= 0.0:
+			shots.remove_at(i)
+	for i in range(blast_fx.size() - 1, -1, -1):
+		blast_fx[i]["t"] = float(blast_fx[i]["t"]) - delta
+		if float(blast_fx[i]["t"]) <= 0.0:
+			blast_fx.remove_at(i)
+	for w in weapons:
+		w["blade_ph"] = float(w.get("blade_ph", 0.0)) + delta * 2.2
+	queue_redraw()
+	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
+	if fmod(elapsed, 0.1) < delta:
+		_refresh_hud()
+	_update_debug(delta)
+
+
+func _die() -> void:
+	_test_end("dead")
+	if dead:
 		return
-	print("[TEST] start mode=%s seed=%d bot=%s autoplan=%s cheat=%s pt=%.0f pickdelay=%.2f start=%s tab=%d" % [
-		mode, absi(seed_used) % 1000000000, str(bot), str(autoplan),
-		("—" if cheat_arg == "" else cheat_arg), pt_limit, pick_delay, start_force, tab])
-
-
-func _test_end(reason: String) -> void:
-	if not (playtest or bot or shot_path != "" or cheat_arg != ""):
+	dead = true
+	hp = 0.0
+	flash_t = 0.0
+	flash.color = Color(1, 0.2, 0.25, 0.0)
+	if playtest:
+		print("DEAD t=%d w=%d lvl=%d kills=%d" % [int(pt_t), wave, level, kills_total])
+		get_tree().quit()
 		return
-	print("[TEST] end reason=%s t=%.0f wave=%d lvl=%d kills=%d dps=%.1f need=%.1f weapons=%d inv=%d dead=%s" % [
-		reason, elapsed, wave, level, kills_total, cur_actual_dps(),
-		_spawn_rate() * _wave_hp() * _plan_avg_mult(), weapons.size(), _inv_total(), str(dead)])
+	build_root.visible = true
+	board_root.visible = false
+	build_info.visible = false
+	hud_status.visible = false
+	hud_ammo.visible = false
+	hud_tip.visible = false
+	build_text.position = Vector2(80, 240)
+	build_text.add_theme_font_size_override("font_size", 26)
+	build_text.text = "你被淹没了\n\n%s\n\n按 R 重开" % _run_summary()
+
+
+func _run_summary() -> String:
+	return "存活 %s   ·   波次 %d   ·   等级 %d   ·   击杀 %d   ·   受击补偿 %d" % [
+		_fmt_time(elapsed), wave, level, kills_total, modules_from_damage
+	]
+
+
+func _fmt_time(t: float) -> String:
+	return "%02d:%02d" % [int(t) / 60, int(t) % 60]
 
 
 
-## 自动配置方案要对「所有武器」生效：bot 每 4 秒会换一把正在编辑的枪，
-## 只填当前选中那把的话，其余枪永远空着（面板上就是 slot=2/4）
-func _auto_plan_all() -> void:
-	var keep := sel
-	for i in weapons.size():
-		_use_weapon(i)
-		_auto_plan_fill()
-	_use_weapon(keep)
 
-## bot 专用：方案里写的模块补不上时（库存没有那个 id，或那个 id 只能靠合成），
-## 每 2 秒允许把缺料格子的方案改写成「当前库存里整板增益最大」的 id。
-## 玩家侧不开这个开关：玩家要的是「我摆的方案永远生效」，缺料就红着提示，绝不偷偷换。
-func _auto_plan_fix(delta: float) -> void:
-	plan_fix_t += delta
-	if plan_fix_t < 2.0:
-		return
-	plan_fix_t = 0.0
-	var keep := sel
-	for wi in weapons.size():
-		_use_weapon(wi)
-		for i in _missing_cells():
-			var want := String(weapon.plan[i])
-			if want != "" and _inv(want) > 0:
-				_refill(i)  # 有料就直接补，不改方案
-				continue
-			var best_id := ""
-			var best_v := _board_total(weapon)
-			# 只允许「不降阶」的改写：否则库存里只剩基础模块时，方案会被改写成基础，整板跟着退化
-			var floor_t := 1
-			if want != "" and MODULES.has(want):
-				floor_t = int(MODULES[want]["tier"])
-			for k in _stocked_ids():
-				if MODULES.has(k) and int(MODULES[k]["tier"]) < floor_t:
-					continue
-				weapon.slots[i] = _new_module(k)
-				var v := _board_total(weapon)
-				weapon.slots[i] = null
-				if v > best_v + 0.0001:
-					best_v = v
-					best_id = k
-			if best_id == "":
-				continue
-			weapon.plan[i] = best_id
-			_refill(i)
-		# 已装但快烧空的格子：只把方案改成「库存里更强」的 id，不立刻顶掉模块。
-		# 等这一格烧空时 _refill 会按新方案补货 —— 既满足「不自动替换已装模块」，
-		# 又不会让机器人永远停在基础模块上。
-		for i in (weapon["slots"] as Array).size():
-			var m = weapon.slots[i]
-			if m == null:
-				continue
-			var ratio := float(m["left"]) / maxf(float(m.get("max", 1.0)), 0.001)
-			if ratio > 0.25:
-				continue
-			var cur := String(m["id"])
-			var best2 := ""
-			var best_v2 := _board_total(weapon)
-			var cur_t: int = int(MODULES[cur]["tier"]) if MODULES.has(cur) else 1
-			for k in _stocked_ids():
-				if k == cur or _inv(k) <= 0:
-					continue
-				if MODULES.has(k) and int(MODULES[k]["tier"]) <= cur_t:
-					continue
-				weapon.slots[i] = _new_module(k)
-				var v2 := _board_total(weapon)
-				weapon.slots[i] = m
-				if v2 > best_v2 + 0.0001:
-					best_v2 = v2
-					best2 = k
-			if best2 != "":
-				weapon.plan[i] = best2
-	_use_weapon(keep)
-
-## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
-func _new_module(mid: String) -> Dictionary:
-	var d: Dictionary = MODULES[mid]
-	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15) * pow(1.08, float(_bl("uses")))
-	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u}
-
-
-func _new_device() -> Dictionary:
-	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": []}
-
-
-## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
-func device_cost() -> int:
-	var base := DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))
-	return int(round(base * pow(0.92, float(_bl("device")))))
-
-
-func _idle_device() -> int:
-	for i in devices.size():
-		if String(devices[i]["kind"]) == "":
-			return i
-	return -1
-
-
-func _busy_devices() -> int:
-	var n := 0
-	for d in devices:
-		# kind 是模块 id 字符串（"" = 空闲）。写成 int(kind) 会得到 0，把在干活的装置当成空闲。
-		if String(d["kind"]) != "":
-			n += 1
-	return n
-
-
-## 用基础模块造一台新装置（材料堆积时的唯一出口）
-func buy_device() -> bool:
-	if devices.size() >= DEVICE_MAX:
-		return false
-	if _backpack_used() >= backpack_cap:
-		return false
-	var cost := device_cost()
-	if _inv("base") < cost:
-		return false
-	_take_inv("base", cost)
-	var nd := _new_device()
-	# bot / playtest 里新装置默认开机自动，否则平衡测试会因为「装置没人管」而失真
-	nd["auto"] = (playtest or bot) and not no_auto_craft
-	devices.append(nd)
-	return true
-
-
-## 一键把自动开关同步到所有装置（bot 用）
-func _sync_device_auto(on: bool) -> void:
-	for d in devices:
-		d["auto"] = on
-
-
+# ============================================================================
+# 1. 场景与 HUD 构建
+# ============================================================================
 func _make_player() -> void:
 	player = Node2D.new()
 	player.set_script(load("res://scripts/player.gd"))
@@ -765,6 +798,11 @@ func _make_hud() -> void:
 	layer.add_child(flash)
 
 
+
+
+# ============================================================================
+# 2. 输入
+# ============================================================================
 func _input(event: InputEvent) -> void:
 	# 拖拽优先：构筑屏里的按住-拖动-松开由这里独占（见 docs/plan-v3.md §1）
 	if build_root != null and build_root.visible and not dead:
@@ -850,1119 +888,11 @@ func _toggle_build() -> void:
 		_refresh_build()
 
 
-func _pass() -> void:
-	if build_root.visible:
-		_refresh_build()
-	else:
-		_refresh_hud()
 
 
-func _process(delta: float) -> void:
-	# 选卡界面会把整棵树暂停，elapsed 不再推进 —— 快进和截图都必须先跳出这个状态，
-	# 否则会永远停在「等 elapsed 到 ff / shotat」上（表现为界面卡死）
-	if picking:
-		ff = 0.0
-		Engine.time_scale = 1.0
-		if shot_path != "" and hold_pick:
-			elapsed = shot_at
-	# 快进：先按 8 倍速把局面推到 ff 秒，再恢复正常速度拍图
-	# 死亡时 elapsed 会停住，必须跳出快进分支，否则会一直等下去
-	if ff > 0.0 and not dead:
-		if elapsed < ff:
-			Engine.time_scale = 8.0
-			return
-		Engine.time_scale = 1.0
-		ff = 0.0
-	if ff > 0.0 and dead:
-		Engine.time_scale = 1.0
-		ff = 0.0
-	# 选卡界面会冻结 elapsed，截图逻辑若还在等 shotat 就会永久挂住（holdpick 时才强制跳时间）
-	if picking and shot_path != "" and hold_pick:
-		elapsed = shot_at
-	if shot_path == "" or shot_at < 0.0:
-		return
-	# 死了之后 elapsed 不再推进，如果还在等 shotat 就会永久挂住 —— 死亡即立刻拍
-	if not dead:
-		if elapsed < shot_at:
-			if ff <= 0.0:
-				shot_guard += delta
-			if shot_guard > 600.0:
-				print("shot guard timeout")
-				get_tree().quit()
-			return
-	shot_at = -1.0
-	Engine.time_scale = 1.0
-	if picking and not hold_pick and (shot_bot or playtest or shot_chest or shot_pick or pick_delay > 0.0):
-		_take_card(0)
-	if shot_chest and not pick_pre and ff == 0.0:
-		pick_pre = true
-		if picking:
-			_close_pick()  # 截图工具：让开箱面板优先，直接丢掉当前那张升级卡
-		grant_chest(true)
-	if shot_pick and not picking:
-		_roll_offer()
-		_open_pick()
-	if shot_build and not build_root.visible:
-		_toggle_build()
-	if drag_demo and not dt_step:
-		dt_step = 1
-		await get_tree().process_frame
-		await _dragdemo_pose()
-	await get_tree().process_frame
-	await RenderingServer.frame_post_draw
-	var img := get_viewport().get_texture().get_image()
-	img.save_png(shot_path)
-	print("shot saved: %s" % shot_path)
-	get_tree().quit()
-
-
-func _push_btn(p: Vector2, pressed: bool) -> void:
-	var ev := InputEventMouseButton.new()
-	ev.button_index = MOUSE_BUTTON_LEFT
-	ev.pressed = pressed
-	ev.position = p
-	ev.global_position = p
-	get_viewport().push_input(ev)
-
-
-## 拖拽演示：按下并拖到第 2 格上方但不松手，留着给截图用（幽灵 + 落点预览）
-func _dragdemo_pose() -> void:
-	tab = 0
-	_refresh_build()
-	await get_tree().process_frame
-	if inv_rows.is_empty() or slot_rects.size() < 2:
-		print("DRAGDEMO skip")
-		return
-	var row: Dictionary = inv_rows[0]
-	for r in inv_rows:
-		if String(r["mid"]) != "base":
-			row = r
-			break
-	var from: Vector2 = (row["rect"] as Rect2).get_center()
-	var to: Vector2 = (slot_rects[1] as Rect2).get_center() + Vector2(30, 26)
-	_push_btn(from, true)
-	var mm := InputEventMouseMotion.new()
-	mm.position = to
-	mm.global_position = to
-	get_viewport().push_input(mm)
-	print("DRAGDEMO active=%s mid=%s preview_shown=%s" % [str(drag.get("active", false)), String(row["mid"]), str(drag_hl.visible)])
-
-
-## 拖拽自检：真鼠标事件把库存第一行拖到第 2 格，打印前后槽位内容
-func _run_dragtest() -> void:
-	_toggle_build()
-	tab = 0
-	_refresh_build()
-	await get_tree().process_frame
-	await get_tree().process_frame
-	if inv_rows.is_empty() or slot_rects.size() < 2:
-		print("DRAGTEST skip inv=%d slots=%d" % [inv_rows.size(), slot_rects.size()])
-		get_tree().quit()
-		return
-	# 优先挑一个和当前槽位不同的模块，才能看出「真的换了 id」
-	var row: Dictionary = inv_rows[0]
-	for r in inv_rows:
-		if String(r["mid"]) != String(weapon.slots[1]["id"]) if weapon.slots[1] != null else true:
-			row = r
-			break
-	var mid := String(row["mid"])
-	var from: Vector2 = (row["rect"] as Rect2).get_center()
-	var to: Vector2 = (slot_rects[1] as Rect2).get_center()
-	var before := str(weapon.slots[1])
-	var inv_before := _inv(mid)
-	_push_btn(from, true)
-	var mm := InputEventMouseMotion.new()
-	mm.position = to
-	mm.global_position = to
-	get_viewport().push_input(mm)
-	_push_btn(to, false)
-	print("DRAGTEST mid=%s inv %d->%d  slot1 %s -> %s  plan1=%s  active=%s" % [
-		mid, inv_before, _inv(mid), before, str(weapon.slots[1]), str(weapon.plan[1]), str(drag.get("active", false))])
-	get_tree().quit()
-
-
-func _physics_process(delta: float) -> void:
-	if drag_test and dt_step == 0 and not playtest:
-		pass
-	if drag_test and dt_step == 0:
-		dt_step = 1
-		_run_dragtest()
-	# UI 底座自检：开构筑屏 → 打印坐标诊断 → 合成一次真实鼠标点击 → 看是否真点到 ×
-	if uitest and uitest_step == 0:
-		uitest_step = 1
-		_toggle_build()
-		print("UITEST " + UIKit.diag(self, build_root))
-		print("UITEST vp=%s slot0_local=%s slot0_global=%s inv0=%s slots=%d inv_rows=%d" % [
-			str(get_viewport().get_visible_rect().size),
-			str(slot_rects[0]) if slot_rects.size() > 0 else "none",
-			str((slot_panels[0] as Control).get_global_rect()) if slot_panels.size() > 0 else "none",
-			str(inv_rows[0]["rect"]) if inv_rows.size() > 0 else "none",
-			slot_rects.size(), inv_rows.size()])
-		if build_close_btn != null:
-			print("UITEST close_rect=%s visible_in_tree=%s" % [
-				str(build_close_btn.get_global_rect()), str(build_close_btn.is_visible_in_tree())])
-	elif uitest and uitest_step == 1:
-		uitest_step = 2
-		var c := Vector2(1140, 34)
-		if build_close_btn != null:
-			c = build_close_btn.get_global_rect().get_center()
-		var dn := InputEventMouseButton.new()
-		dn.button_index = MOUSE_BUTTON_LEFT
-		dn.pressed = true
-		dn.position = c
-		dn.global_position = c
-		get_viewport().push_input(dn)
-		var up := InputEventMouseButton.new()
-		up.button_index = MOUSE_BUTTON_LEFT
-		up.pressed = false
-		up.position = c
-		up.global_position = c
-		get_viewport().push_input(up)
-		print("UITEST click_at=%s after_click build_visible=%s" % [str(c), str(build_root.visible)])
-		get_tree().quit()
-	if swarm_test and elapsed > 1.0 and not ws_done:
-		ws_done = true
-		for i in 120:
-			var gx := (i % 12) - 6
-			var gy := int(i / 12) - 5
-			_spawn_enemy_at(player.position + Vector2(gx * 52.0, gy * 46.0))
-	# 点击自检：开箱 -> 1 秒后向视口塞一个真实鼠标点击 -> 看卡片是否被响应
-	if click_test:
-		ct2 += delta
-		if ct2 > 0.5 and not picking and not pick_pre:
-			pick_pre = true
-			grant_chest(true)
-			print("CLICKTEST opened mode=%s cards=%d" % [pick_mode, chest_offer.size()])
-		elif ct2 > 1.5 and picking and not click_done:
-			click_done = true
-			var ev := InputEventMouseButton.new()
-			ev.button_index = MOUSE_BUTTON_LEFT
-			ev.pressed = true
-			ev.position = Vector2(300, 360)
-			ev.global_position = ev.position
-			get_viewport().push_input(ev)
-			var up := InputEventMouseButton.new()
-			up.button_index = MOUSE_BUTTON_LEFT
-			up.pressed = false
-			up.position = ev.position
-			up.global_position = ev.position
-			get_viewport().push_input(up)
-			var mv := InputEventMouseMotion.new()
-			mv.position = ev.position
-			mv.global_position = ev.position
-			get_viewport().push_input(mv)
-			var hov := get_viewport().gui_get_hovered_control()
-			print("CLICKTEST hovered=%s pick_rect=%s" % [str(hov), str(pick_root.get_global_rect())])
-		elif ct2 > 2.2 and click_done:
-			print("CLICKTEST result picking=%s weapons=%d" % [str(picking), weapons.size()])
-			get_tree().quit()
-	# 开箱链路自检：开 → 选第 2 张 → 验证进背包
-	if chest_test:
-		ct_t += delta
-		if ct_t > 0.5 and not ct_opened:
-			ct_opened = true
-			grant_chest(true)
-			print("CHESTTEST opened mode=%s cards=%d" % [pick_mode, chest_offer.size()])
-		elif ct_opened and picking and ct_t > 1.0 and not ct_taken:
-			ct_taken = true
-			_take_weapon_card(1)
-			print("CHESTTEST taken weapons=%d backpack=%d/%d picking=%s" % [
-				weapons.size(), _backpack_used(), backpack_cap, str(picking)])
-		if ct_t > 1.6:
-			print("CHESTTEST done weapons=%d picking=%s" % [weapons.size(), str(picking)])
-			get_tree().quit()
-	# 选卡时整棵树已 paused，但 Game 自己是 ALWAYS，所以要在这里单独推进倒计时
-	if picking:
-		pick_wait += delta
-		if pick_delay > 0.0 and pick_wait > pick_delay and not hold_pick:
-			_take_card(0)
-		return
-	if dead or get_tree().paused:
-		return
-	elapsed += delta
-	var prev_wave := wave
-	wave = int(elapsed / WAVE_SEC) + 1
-	if wave != prev_wave:
-		_on_wave_start()
-	_bot_move(delta)
-	# 记录玩家真实移动方向：bulwark 要生成在「玩家正在走的方向」前面堵路
-	if player != null:
-		var dp := player.position - prev_ppos
-		if dp.length() > 0.5:
-			last_move_dir = dp.normalized()
-		prev_ppos = player.position
-	_spawn(delta)
-	_tick_bulwark(delta)
-	_craft_tick(delta)
-	if autoplan:
-		_auto_plan_all()
-		_auto_plan_fix(delta)
-	_fire(delta)
-	_contact(delta)
-	_hud_tick(delta)
-	if playtest:
-		_playtest_step(delta)
-	elif shot_bot:
-		_bot_step(delta)
-	elif boardtest:
-		_boardtest(delta)
-
-
-## 电路板规则自检：金 6 槽 2×3 密堆，摆下共振×2 / 增幅 / 加法 / 基础×2
-## 期望：out = [40.5, 45.5, 0, 1, 5, 6]  power = 100.0
-func _boardtest(delta: float) -> void:
-	if not bt_set:
-		bt_set = true
-		_set_quality(5)
-		weapon["mul"] = 1.0  # 把武器倍率钉成 1.0，否则随机开局的霰弹枪 1.11 会让自检数字飘
-		# 布局改成随机的了，但自检要的是固定 2×3，否则期望值对不上
-		weapon["layout"] = (LAYOUTS[5] as Array).duplicate()
-		while (weapon["slots"] as Array).size() < 6:
-			weapon["slots"].append(null)
-		weapon.interval = 1.0 if demo_board else 999.0  # 自检时不开火，排除弹药消耗的干扰
-		weapon.slots[0] = _new_module("reson")  # 共振（邻 1 共振、3 基础）
-		weapon.slots[1] = _new_module("reson")  # 共振（邻 0 共振、2 增幅、4 加法）
-		weapon.slots[2] = _new_module("amp")  # 增幅（邻 1、5）
-		weapon.slots[3] = _new_module("base")  # 基础（邻 0、4）
-		weapon.slots[4] = _new_module("add")  # 加法（邻 1、3、5）
-		weapon.slots[5] = _new_module("base")  # 基础（邻 2、4）
-		print("BOARD set  out=", _slot_out(), " power=", _shot_power())
-	bt_print += delta
-	if bt_print >= 0.5:
-		bt_print = 0.0
-		print("t=%4.1f  out=%s  power=%5.1f" % [elapsed, str(_slot_out()), _shot_power()])
-	if elapsed > 10.0 and shot_path == "":
-		get_tree().quit()
-
-
-func _playtest_step(delta: float) -> void:
-	pt_t += delta
-	if bot:
-		_bot_step(delta)
-	if pt_t - pt_print >= 5.0:
-		pt_print = pt_t
-		_pt_log()
-	if pt_limit > 0.0 and pt_t >= pt_limit:
-		_test_end("limit")
-		get_tree().quit()
-
-
-## 简化版「玩家」：优先把空闲装置填满（合成是唯一把材料变成出力的手段），
-## 装置全忙且基础模块堆积时再造一台（变相缩短合成时间），每 3 次决策升一次级。
-func _bot_step(delta: float) -> void:
-	bot_t += delta
-	if bot_t < 0.5:
-		return
-	bot_t = 0.0
-	bot_ticks += 1
-	# 升级与合成抢同一批材料：只在材料明显富余时升级，否则板子会被饿空
-	if bot_ticks % 3 == 0 and _inv_total() >= level_cost() * 2:
-		try_level()
-	# 每 ~4 秒把编辑目标切到「最空的那把枪」，让材料摊到各把武器上（否则全堆在第一把）
-	if bot_ticks % 8 == 0:
-		var pick_i := sel
-		var best_n := 99
-		for i in weapons.size():
-			var n2 := 0
-			for m2 in weapons[i]["slots"]:
-				if m2 != null:
-					n2 += 1
-			if n2 < best_n:
-				best_n = n2
-				pick_i = i
-		_use_weapon(pick_i)
-	var guard := 0
-	while guard < 4 and try_craft():
-		guard += 1
-	# 装置越多越好（每台 = 一个并行合成位），别等全忙了才想起来造
-	if devices.size() < DEVICE_MAX and _inv("base") >= device_cost():
-		buy_device()
-	if _inv_total() >= level_cost() * 3:
-		try_level()
-
-
-## 机器人走位：只躲「能秒人的东西」（子弹、冲刺精英的蓄力线），不躲杂兵。
-## 原因：脉冲式武器最怕把怪拉成一长串尾巴——只有扎进怪堆里，一次开火才清得动。
-func _bot_move(delta: float) -> void:
-	# 注意：条件里不能加 playtest——截图模式（shotbot）也要让 bot 动，否则它站着不动、
-	# 捡不到宝箱，拍出来的图跟无头测试的结果完全对不上。
-	if not bot or player == null or dead:
-		return
-	var push := Vector2.ZERO
-	for b in get_tree().get_nodes_in_group("bullet"):
-		if not is_instance_valid(b):
-			continue
-		var to_p: Vector2 = player.position - b.position
-		var d := to_p.length()
-		if d < 190.0 and d > 1.0:
-			var side: float = signf(to_p.cross(b.dir))
-			if side == 0.0:
-				side = 1.0
-			push += b.dir.rotated(side * PI * 0.5) * (1.0 - d / 190.0) * 2.6
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if not is_instance_valid(e):
-			continue
-		var to_e: Vector2 = player.position - e.position
-		var de := to_e.length()
-		# 贴脸才退（不是风筝）——站着打才清得动，但也不能让怪白贴
-		if de < 70.0 and de > 1.0:
-			push += to_e / de * (1.0 - de / 70.0) * 0.6
-		if e.kind != "charger":
-			continue
-		if e.windup <= 0.0:
-			continue
-		var to_c: Vector2 = player.position - e.position
-		var dc := to_c.length()
-		if dc < 460.0 and dc > 1.0:
-			var side2: float = signf(to_c.cross(e.facing))
-			if side2 == 0.0:
-				side2 = 1.0
-			push += e.facing.rotated(side2 * PI * 0.5) * 2.4
-	# 宝箱是主要成长来源，有箱子就顺路去捡（躲子弹仍优先，因为权重更大）
-	var best: Node2D = null
-	var best_d := 760.0
-	for c in get_tree().get_nodes_in_group("chest"):
-		if not is_instance_valid(c):
-			continue
-		var dd: float = player.position.distance_to(c.position)
-		if dd < best_d:
-			best_d = dd
-			best = c
-	if best != null and best_d > 26.0:
-		push += player.position.direction_to(best.position) * 4.0
-	if push.length() > 0.05:
-		player.position += push.normalized() * float(player.SPEED) * delta
-		if player.position.length() > 1100.0:
-			player.position = player.position.normalized() * 1100.0
-
-
-func _pt_log() -> void:
-	# 需求 DPS = 每秒进来的总血量 = 刷怪速度 × 单个基础血 × 本波平均血量倍率
-	var need: float = _spawn_rate() * _wave_hp() * _plan_avg_mult()
-	var comp := ""
-	var bw: Dictionary = _board_weapon()
-	for m in bw["slots"]:
-		comp += "." if m == null else str(int(m.tier))
-	var bfill := 0
-	for m in bw["slots"]:
-		if m != null:
-			bfill += 1
-	var bmiss := 0
-	for i in (bw["plan"] as Array).size():
-		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
-			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f bw=%d" % [
-		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
-		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
-		_busy_devices(), devices.size(), comp, _inv_str(),
-		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
-		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		get_tree().get_nodes_in_group("enemy").size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_bulwark(),
-	])
-
-
-func _hud_tick(delta: float) -> void:
-	if _cam != null:
-		_cam_pos = _cam.get_screen_center_position()
-	flash_t = maxf(0.0, flash_t - delta)
-	if elapsed - last_hit_t > REGEN_DELAY:
-		hp = minf(max_hp, hp + (REGEN_RATE + 0.5 * float(_bl("regen"))) * delta)
-	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
-	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else minf(flash_t * 0.9, 0.26))
-	if pulse_t > 0.0:
-		pulse_t = maxf(0.0, pulse_t - delta)
-	for i in range(shots.size() - 1, -1, -1):
-		shots[i]["t"] = float(shots[i]["t"]) - delta
-		if float(shots[i]["t"]) <= 0.0:
-			shots.remove_at(i)
-	for i in range(blast_fx.size() - 1, -1, -1):
-		blast_fx[i]["t"] = float(blast_fx[i]["t"]) - delta
-		if float(blast_fx[i]["t"]) <= 0.0:
-			blast_fx.remove_at(i)
-	for w in weapons:
-		w["blade_ph"] = float(w.get("blade_ph", 0.0)) + delta * 2.2
-	queue_redraw()
-	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
-	if fmod(elapsed, 0.1) < delta:
-		_refresh_hud()
-	_update_debug(delta)
-
-
-## 调试统计：FPS / 敌人数 / 可见敌人数 / 帧耗时。
-## 关闭 F3 面板时仍然维护常驻的那一小段（可见数 O(n) 遍历只在 0.25s 一次）
-func _update_debug(delta: float) -> void:
-	frame_ms = delta * 1000.0
-	frame_ms_max = maxf(frame_ms_max * 0.97, frame_ms)
-	dbg_acc += delta
-	if dbg_acc < 0.25:
-		return
-	dbg_acc = 0.0
-	var enemies := get_tree().get_nodes_in_group("enemy")
-	var t0 := Time.get_ticks_usec()
-	var ct: Transform2D = get_viewport().get_canvas_transform()
-	var vis := 0
-	for e in enemies:
-		var p: Vector2 = ct * (e as Node2D).global_position
-		if p.x >= 0.0 and p.y >= 0.0 and p.x <= 1280.0 and p.y <= 720.0:
-			vis += 1
-	vis_enemy = vis
-	enemy_ms = float(Time.get_ticks_usec() - t0) / 1000.0
-	if hud_stat != null:
-		hud_stat.text = "FPS %d · 敌 %d(可见 %d)" % [
-			int(Engine.get_frames_per_second()), enemies.size(), vis]
-	_refresh_dbg_panel(enemies.size())
-
-
-func _refresh_dbg_panel(enemy_total: int) -> void:
-	if dbg_text == null or not dbg_on:
-		return
-	dbg_text.text = "\n".join([
-		"FPS %d   帧 %.1fms   峰 %.1fms" % [int(Engine.get_frames_per_second()), frame_ms, frame_ms_max],
-		"敌人 %d   可见 %d   上限 %d   刷怪 %.2f/s" % [enemy_total, vis_enemy, MAX_ENEMIES, _spawn_rate()],
-		"掉落 %d   子弹 %d   宝箱 %d" % [
-			get_tree().get_nodes_in_group("pickup").size(),
-			get_tree().get_nodes_in_group("bullet").size(),
-			get_tree().get_nodes_in_group("chest").size()],
-		"需求 %.1f   实测 %.1f   需求比 %s" % [
-			_spawn_rate() * _wave_hp() * _plan_avg_mult(), cur_actual_dps(),
-			"%.0f%%" % (100.0 * _spawn_rate() * _wave_hp() * _plan_avg_mult() / maxf(cur_actual_dps(), 1.0))],
-		"敌人统计耗时 %.2fms" % enemy_ms,
-		"波次 %d   时间 %s   种子 %d   击杀 %d" % [wave, _fmt_time(elapsed), absi(seed_used) % 1000000000, kills_total],
-	])
-
-
-## 波次血量：12 波之前走平缓曲线；之后额外乘 1.045/波 —— 这时玩家武器基本成型，
-## 难度不提就会被碾压（曲线要追着玩家的构筑跑，而不是线性增长）
-func _wave_hp() -> float:
-	var late := maxf(0.0, float(wave - HP_LATE_WAVE))
-	return HP_BASE * pow(HP_GROWTH, wave - 1) * pow(HP_LATE_GROWTH, late)
-
-
-## 当前波次的编成模板（每 5 波循环一次）
-func _plan() -> Dictionary:
-	return WAVE_PLANS[(wave - 1) % WAVE_PLANS.size()]
-
-
-## 本波敌人的平均血量倍率（用来把「总血量预算」换算成刷怪速度）
-func _plan_avg_mult() -> float:
-	var plan := _plan()
-	var wsum := 0.0
-	var msum := 0.0
-	for k in plan["kinds"]:
-		var w: float = float(plan["kinds"][k])
-		wsum += w
-		msum += w * float(ENEMY_KINDS[k]["hp_mult"])
-	return msum / maxf(wsum, 0.001)
-
-
-## 刷怪速度：先按预算系数缩放，再按平均血量倍率反比缩放
-## → 每波「总血量/秒」大致相同，但密度与单个强度差别很大（这就是玩法的差别）
-## 上限 1.7× 是同血量预算的补充：速度快的怪本来就多，不给上限疾行波会变成 9 只/秒的墙
-func _spawn_rate() -> float:
-	# 数量优先：指数刷怪（1.20 × 1.19^波），血量只温和地涨，压力主要来自「人多」
-	var base: float = SPAWN_BASE * pow(SPAWN_GROWTH, float(wave))
-	var raw: float = base * float(_plan()["coeff"])
-	return minf(raw, base * SPAWN_CAP_MULT)
-
-
-func _pick_kind() -> String:
-	var plan := _plan()
-	# 射手要占住「射程外打你」的位置，数量一多就没法玩了：同屏上限 10
-	if _count_kind("shooter") >= SHOOTER_MAX:
-		for k in plan["kinds"]:
-			if k != "shooter":
-				return k
-	var total := 0.0
-	for k in plan["kinds"]:
-		total += float(plan["kinds"][k])
-	var r := rng.randf() * total
-	for k in plan["kinds"]:
-		r -= float(plan["kinds"][k])
-		if r <= 0.0:
-			return k
-	return "flood"
-
-
-func _count_kind(k: String) -> int:
-	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if is_instance_valid(e) and e.kind == k:
-			n += 1
-	return n
-
-
-## 造一把武器：品质决定电路板布局，种类决定射程/间隔/目标数
-func _make_weapon(id: String, q: int) -> Dictionary:
-	var kd: Dictionary = WEAPONS[id]
-	var w := {
-		"id": id, "quality": clampi(q, 1, 5), "base": 0.0, "layout": [], "slots": [],
-		"range": float(kd["range"]), "interval": float(kd["interval"]),
-		"targets": int(kd["targets"]), "mul": float(kd["mul"]),
-		"enabled": true, "fire_t": 0.0, "dmg": {},
-		"blast": 90.0, "ramp_max": 1.20,
-		"score": 0.0, "p0": 0.0, "band": 1.0, "dr": {},
-		# 槽位方案：每格记住「这一格该放什么模块 id」。寿命耗尽后按它自动补料，
-		# 空字符串表示这一格没有方案（自动入槽才允许乱填）。
-		"plan": [],
-	}
-	_set_quality_of(w, q)
-	_roll_weapon(w)
-	return w
-
-
-
-func _eff_targets(w: Dictionary) -> float:
-	var id := String(w["id"])
-	var t := int(w["targets"])
-	if id == "grenade":
-		return 1.0 + 0.6 * float(w.get("blast", 90.0)) / 90.0
-	if id == "blade":
-		return 3.0 * float(w["range"]) / 105.0
-	if id == "laser":
-		return 3.0
-	if t < 0:
-		return 3.0
-	return float(mini(t, 5))
-
-
-func _range_w(r: float) -> float:
-	return 1.0 + clampf((r - 150.0) / 1500.0, 0.0, 0.5)
-
-
-func weapon_score(w: Dictionary) -> float:
-	var iv := maxf(float(w["interval"]), 0.05)
-	return (float(w["base"]) * float(w["mul"]) / iv) * _eff_targets(w) * _range_w(float(w["range"]))
-
-
-## 该类型的典型模板分（品质 3），代码现算，不写死表
-func p0_of(id: String) -> float:
-	var kd: Dictionary = WEAPONS[id]
-	var w := {
-		"id": id, "base": float(QUALITY_BASE[3]), "mul": float(kd["mul"]),
-		"interval": float(kd["interval"]), "range": float(kd["range"]),
-		"targets": int(kd["targets"]), "blast": 90.0,
-	}
-	return weapon_score(w)
-
-
-func _roll_weapon(w: Dictionary) -> void:
-	var id := String(w["id"])
-	var rp: Dictionary = ROLL_P.get(id, {"r": 0.10, "i": 0.10, "b": 0.15, "tg": 0.0})
-	var dr := {}
-	var r0 := float(w["range"])
-	var i0 := float(w["interval"])
-	var b0 := float(w["base"])
-	w["range"] = r0 * (1.0 + rng.randf_range(-float(rp["r"]), float(rp["r"])))
-	w["interval"] = i0 * (1.0 + rng.randf_range(-float(rp["i"]), float(rp["i"])))
-	w["base"] = b0 * (1.0 + rng.randf_range(-float(rp["b"]), float(rp["b"])))
-	dr["range"] = float(w["range"]) / maxf(r0, 0.0001) - 1.0
-	dr["interval"] = float(w["interval"]) / maxf(i0, 0.0001) - 1.0
-	dr["base"] = float(w["base"]) / maxf(b0, 0.0001) - 1.0
-	if float(rp.get("tg", 0.0)) > 0.0 and int(w["targets"]) > 0 and int(w["targets"]) < 6 \
-			and rng.randf() < float(rp["tg"]):
-		w["targets"] = int(w["targets"]) + 1
-		dr["targets"] = 1.0
-	if rp.has("x"):
-		var x := float(rp["x"])
-		if id == "grenade":
-			w["blast"] = 90.0 * (1.0 + rng.randf_range(-x, x))
-			dr["blast"] = float(w["blast"]) / 90.0 - 1.0
-		elif id == "beam":
-			w["ramp_max"] = 1.20 * (1.0 + rng.randf_range(-x, x))
-			dr["ramp_max"] = float(w["ramp_max"]) / 1.20 - 1.0
-		else:
-			w["range"] = float(w["range"]) * (1.0 + rng.randf_range(-x, x))
-			dr["range"] = float(w["range"]) / maxf(r0, 0.0001) - 1.0
-	# 归一化：先把 mul 归 1 算分数，再反解 mul 让总分正好落在 band 上。
-	# 归一化只能用 mul —— 它是唯一不改射程/射速/目标数的乘数，用别的会把武器性格抹平。
-	var q := int(w["quality"])
-	var p0 := p0_of(id)
-	w["p0"] = p0
-	w["band"] = p0 * float(QM[q]) * rng.randf_range(0.94, 1.06)
-	w["mul"] = 1.0
-	var sc := weapon_score(w)
-	w["mul"] = clampf(float(w["band"]) / maxf(sc, 0.0001), 0.05, 40.0)
-	w["score"] = weapon_score(w)
-	w["dr"] = dr
-
-
-## 布局生成：以基础网络（二连/折角/T/方形/十字）为积木，随机旋转镜像后拼到已有格子上。
-## 返回的格子永远连通（因为每块都贴着既有格子放），所以「插槽网络」不会出现孤岛。
-func _gen_layout(n: int) -> Array:
-	if n <= 2:
-		return [Vector2i(0, 0), Vector2i(1, 0)].slice(0, n)
-	var cells: Array = [Vector2i(0, 0)]
-	var compact := rng.randf() < 0.6  # 60% 密堆（枢纽集中），40% 留缝（多个小岛）
-	var guard := 0
-	while cells.size() < n and guard < 400:
-		guard += 1
-		var want := mini(n - cells.size(), rng.randi_range(2, 3))
-		var piece: Array = _roll_piece(want)
-		var placed := false
-		for attempt in 12:
-			# 选一个锚点格子，把积木贴到它的空邻居上
-			var anchor: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
-			var dirs: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
-			var off: Vector2i = dirs[rng.randi_range(0, 3)]
-			var ghost: Array = []
-			for c in piece:
-				ghost.append(anchor + off * (2 if not compact else 1) + c)
-			var ok := cells.size() + ghost.size() <= n
-			for g in ghost:
-				if not ok:
-					break
-				if g in cells:
-					ok = false
-				if compact and not ok:
-					break
-			if not ok:
-				continue
-			if compact:
-				# 密堆要求至少一个格子与已有格子相邻（保证连通且紧凑）
-				var touch := false
-				for g in ghost:
-					for c2 in cells:
-						if absi(g.x - c2.x) + absi(g.y - c2.y) == 1:
-							touch = true
-				if not touch:
-					continue
-			cells.append_array(ghost)
-			placed = true
-			break
-		if not placed:
-			# 兜底：往任意空格补一格
-			for attempt2 in 40:
-				var a2: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
-				var dirs2: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
-				var d2: Vector2i = dirs2[rng.randi_range(0, 3)]
-				var cand: Vector2i = a2 + d2
-				if not (cand in cells):
-					cells.append(cand)
-					break
-	# 平移到左上角从 (0,0) 开始，方便画
-	var minx := 999
-	var miny := 999
-	for c in cells:
-		minx = mini(minx, c.x)
-		miny = mini(miny, c.y)
-	var out: Array = []
-	for c in cells:
-		out.append(Vector2i(c.x - minx, c.y - miny))
-	out.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
-	return out
-
-
-## 从基础网络里抽一块（随机旋转 / 镜像）
-func _roll_piece(want: int) -> Array:
-	var base: Array
-	match want:
-		2: base = [Vector2i(0, 0), Vector2i(1, 0)]
-		_: base = [Vector2i(0, 0), Vector2i(1, 0), Vector2i(1, 1)]
-	var rot := rng.randi_range(0, 3)
-	var mir := rng.randi_range(0, 1)
-	var out: Array = []
-	for c in base:
-		var p := Vector2i(c.x, c.y)
-		if mir == 1:
-			p.x = -p.x
-		for r in rot:
-			p = Vector2i(-p.y, p.x)
-		out.append(p)
-	return out
-func _set_quality_of(w: Dictionary, q: int) -> void:
-	q = clampi(q, 1, 5)
-	w["quality"] = q
-	w["base"] = float(QUALITY_BASE[q])
-	w["layout"] = _gen_layout(int(LAYOUTS[q].size()))
-	var slots: Array = w["slots"]
-	var plan: Array = w["plan"]
-	while slots.size() < w["layout"].size():
-		slots.append(null)
-	while slots.size() > w["layout"].size():
-		slots.pop_back()
-	while plan.size() < slots.size():
-		plan.append("")
-	while plan.size() > slots.size():
-		plan.pop_back()
-
-
-func _set_quality(q: int) -> void:
-	_set_quality_of(weapon, q)
-
-
-## 切换「正在编辑/查看」的武器（电路板和合成都作用在它上面）
-func _use_weapon(i: int) -> void:
-	sel = clampi(i, 0, weapons.size() - 1)
-	weapon = weapons[sel]
-
-
-## 背包占用 = 武器数 + 装置数
-func _backpack_used() -> int:
-	return weapons.size() + devices.size()
-
-
-## 一把武器此刻的 DPS（按板面实装模块算；多目标按分摊公式算总伤）
-## 这是「理论 DPS」：假设目标一直够、弹药一直有
-func _weapon_dps(w: Dictionary) -> float:
-	var mo := _weapon_mods(w)
-	var t := int(w["targets"])
-	if t > 0:
-		t += int(mo["targets"])
-	var rng_d := float(w["range"]) + float(mo["range"])
-	var hits: float = 1.0
-	if t < 0:
-		hits = float(maxi(1, _count_in_range(rng_d)))
-	elif t > 1:
-		hits = float(mini(t, maxi(1, _count_in_range(rng_d))))
-	var per := _shot_power_of(w) * (1.0 + 0.1 * (hits - 1.0)) / hits
-	return per * hits / (float(w["interval"]) * float(mo["iv"]))
-
-
-## 理论 DPS 与 _weapon_dps 同义（v2.6 起不再假设空槽填满：那是「未来」不是「现在」）
-func _theory_dps(w: Dictionary) -> float:
-	return _weapon_dps(w)
-
-
-## 实测 DPS：最近 5 秒真正打出去的伤害 ÷ 5
-## 用 0.5 秒一个桶（10 个桶 = 5 秒），比存每条伤害省内存，也天然做成滚动窗口
-const DMG_BUCKET := 0.5
-const DMG_BUCKETS := 10
-
-
-func _log_damage(w: Dictionary, dmg: float) -> void:
-	if dmg <= 0.0:
-		return
-	var b := int(elapsed / DMG_BUCKET)
-	var hist: Dictionary = w["dmg"]
-	hist[b] = float(hist.get(b, 0.0)) + dmg
-	# 顺手剪掉窗口外的桶，避免字典无限长
-	for k in hist.keys():
-		if int(k) < b - DMG_BUCKETS:
-			hist.erase(k)
-
-
-func _actual_dps(w: Dictionary) -> float:
-	var b := int(elapsed / DMG_BUCKET)
-	var hist: Dictionary = w["dmg"]
-	var sum := 0.0
-	for k in hist.keys():
-		if int(k) > b - DMG_BUCKETS:
-			sum += float(hist[k])
-	return sum / (DMG_BUCKET * DMG_BUCKETS)
-
-
-func _count_in_range(r: float) -> int:
-	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if is_instance_valid(e) and e.position.distance_to(player.position) <= r:
-			n += 1
-	return n
-
-
-## v2.6 起品质只由「宝箱」决定：拿到即定死，不再跟着波次统一抬升
-## （否则抽到什么最后都是紫 5 槽，宝箱的赌性就没了）
-func _ensure_weapon() -> void:
-	pass
-
-
-## 相邻 = 网格曼哈顿距离 1
-func _neighbors(i: int, w = null) -> Array:
-	var ww: Dictionary = weapon if w == null else w
-	return Board.neighbors(ww["layout"], i)
-
-
-## 半径 r 内（曼哈顿距离 ≤ r）的所有槽位
-func _within(i: int, r: int) -> Array:
-	return Board.within(weapon["layout"], i, r)
-
-
-## 每个槽位这次的「出力」。
-## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
-## cls 决定行为；绑定武器的特化件在这个层面就是普通 flat（效果在 _weapon_mods 里生效）
-func _slot_out(slots = null, w = null) -> Array:
-	var ww: Dictionary = weapon if w == null else w
-	var sl: Array = (ww["slots"] as Array) if slots == null else slots
-	var base: Array = []
-	base.resize(sl.size())
-	for i in sl.size():
-		var m = sl[i]
-		base[i] = 0.0 if m == null else float(MODULES[String(m["id"])]["rate"])
-	var eff := base.duplicate()
-	# 共振：相邻同 cls 的模块 +50% 基础值
-	for i in sl.size():
-		var m = sl[i]
-		if m == null or _cls(m) != "reson":
-			continue
-		for j in _neighbors(i, ww):
-			if sl[j] != null and _cls(sl[j]) == "reson":
-				eff[j] = float(eff[j]) + float(base[j]) * 0.5
-	var out: Array = []
-	out.resize(sl.size())
-	for i in sl.size():
-		var m = sl[i]
-		if m == null:
-			out[i] = 0.0
-			continue
-		var v: float = eff[i]
-		if _cls(m) == "mirror":  # 加法：镜像相邻的低阶模块
-			var t := int(m["tier"])
-			for j in _neighbors(i, ww):
-				if sl[j] != null and int(sl[j]["tier"]) < t:
-					v += float(eff[j])
-		out[i] = v
-	# 增幅：自身 0 出力，把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
-	for i in sl.size():
-		var m = sl[i]
-		if m == null or _cls(m) != "boost":
-			continue
-		var b := float(MODULES[String(m["id"])]["boost"])
-		for j in _neighbors(i, ww):
-			if sl[j] != null and _cls(sl[j]) != "boost":
-				out[j] = float(out[j]) + b
-	return out
-
-
-func _cls(m: Dictionary) -> String:
-	return String(MODULES[String(m["id"])]["cls"])
-
-
-## 武器级效果汇总：扫一遍板面，把带效果的模块折算成「这把枪的修正值」
-## bind 非空的模块只在对应武器上生效（否则它只剩 rate，见方案 §1.3）
-func _weapon_mods(w: Dictionary) -> Dictionary:
-	var mo := {"mul": 1.0, "mul_add": 0.0, "iv": 1.0, "range": 0.0, "targets": 0,
-		"pierce": 0, "elite": 0.0, "burn": 1.0, "recycle": 0.0, "combo": 0.0,
-		"ramp_cap": 0.0, "blast": 0.0, "blade": 0.0}
-	var wid := String(w["id"])
-	for m in w["slots"]:
-		if m == null:
-			continue
-		var mid := String(m["id"])
-		var d: Dictionary = MODULES[mid]
-		var b := String(d.get("bind", ""))
-		if b != "" and b != wid:
-			continue
-		match mid:
-			"edge": mo["mul_add"] = float(mo["mul_add"]) + 0.08
-			"light": mo["burn"] = float(mo["burn"]) * 0.5
-			"extend": mo["range"] = float(mo["range"]) + 25.0
-			"calib": mo["iv"] = float(mo["iv"]) * 0.95
-			"pierce": mo["pierce"] = int(mo["pierce"]) + 1
-			"breaker": mo["elite"] = float(mo["elite"]) + 0.20
-			"coolant": mo["iv"] = float(mo["iv"]) * 0.92
-			"recycle": mo["recycle"] = float(mo["recycle"]) + 0.20
-			"overload": mo["mul"] = float(mo["mul"]) * 1.15
-			"tempo": mo["combo"] = float(mo["combo"]) + 0.04
-			"multi", "spread": mo["targets"] = int(mo["targets"]) + 1
-			"belt": mo["burn"] = float(mo["burn"]) * 0.35
-			"focus": mo["ramp_cap"] = float(mo["ramp_cap"]) + 1.80
-			"charge": mo["blast"] = float(mo["blast"]) + 40.0
-			"blade": mo["blade"] = float(mo["blade"]) + 25.0
-	# 「扩散器」对霰弹枪是 +2（不是 +1）
-	if wid == "shotgun":
-		for m in w["slots"]:
-			if m != null and String(m["id"]) == "spread":
-				mo["targets"] = int(mo["targets"]) + 1
-	# 升级 buff：全局修正
-	var bl := float(_bl("rate"))
-	if bl > 0.0:
-		mo["iv"] = float(mo["iv"]) * pow(0.92, bl)
-	var bpow := float(_bl("power"))
-	if bpow > 0.0:
-		mo["mul"] = float(mo["mul"]) * pow(1.10, bpow)
-	mo["range"] = float(mo["range"]) + 60.0 * float(_bl("range"))
-	mo["pierce"] = int(mo["pierce"]) + _bl("pierce")
-	mo["elite"] = float(mo["elite"]) + 0.25 * float(_bl("elite"))
-	if int(w["targets"]) > 0:
-		mo["targets"] = int(mo["targets"]) + _bl("target")
-	return mo
-
-
-func _shot_power_of(w: Dictionary) -> float:
-	var mo := _weapon_mods(w)
-	var total := float(w["base"])
-	for v in _slot_out(null, w):
-		total += float(v)
-	return total * float(w["mul"]) * float(mo["mul"]) * (1.0 + float(mo["mul_add"]))
-
-
-func _shot_power() -> float:
-	return _shot_power_of(weapon)
-
-
-## 合成计时：每台装置各自倒计时，到点后产物进电路板
-## （满了会按整板出力决定换不换，换不动就进库存）
-func _craft_tick(delta: float) -> void:
-	for d in devices:
-		if String(d["kind"]) == "":
-			continue
-		d["left"] = float(d["left"]) - delta
-		if float(d["left"]) > 0.0:
-			continue
-		var k := String(d["kind"])
-		d["kind"] = ""
-		d["left"] = 0.0
-		d["total"] = 0.0
-		d["paid"] = []
-		crafted[k] = int(crafted.get(k, 0)) + 1
-		_install(k)
-		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
-		if bool(d.get("auto", false)):
-			if not try_craft(k, devices.find(d)):
-				try_craft("", devices.find(d))
-
-
-## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
-## 同时在地图上随机扔一个宝箱，让玩家有理由离开中心区域。
-func _on_wave_start() -> void:
-	_spawn_chest_random()
-	if wave < ELITE_FIRST_WAVE:
-		return
-	if (wave - ELITE_FIRST_WAVE) % ELITE_EVERY != 0:
-		return
-	if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
-		return
-	var alive := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if is_instance_valid(e) and e.kind == "charger":
-			alive += 1
-	if alive >= ELITE_MAX:
-		return
-	_spawn_enemy("charger")
-
-
-func _spawn(delta: float) -> void:
-	# 90 秒保底一个宝箱，防止运气差到一把新武器都拿不到
-	var since := elapsed - last_chest_t
-	if since >= CHEST_GUARANTEE and get_tree().get_nodes_in_group("chest").is_empty():
-		_spawn_chest_random()
-	spawn_acc = minf(spawn_acc + delta * _spawn_rate(), 24.0)  # 卡顿后不要一口气吐出几百个
-	while spawn_acc >= 1.0:
-		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
-			spawn_acc = minf(spawn_acc, 6.0)
-			break
-		var pat: Dictionary = _pick_pattern()
-		var size := rng.randi_range(int(pat["min"]), int(pat["max"]))
-		# 预算不够就等下一帧，让「一团 / 一圈」完整地出现
-		if spawn_acc < float(size):
-			break
-		spawn_acc -= float(size)
-		_emit_pattern(String(pat["id"]), size)
-
-
-
-func _pick_pattern() -> Dictionary:
-	var pool: Array = []
-	var total := 0.0
-	for p in PATTERNS:
-		if wave < int(p["wave"]):
-			continue
-		pool.append(p)
-		total += float(p["w"])
-	var r := rng.randf() * total
-	for p in pool:
-		r -= float(p["w"])
-		if r <= 0.0:
-			return p
-	return pool[0]
-
-
-func _emit_pattern(id: String, n: int) -> void:
-	var base_ang: float = rng.randf() * TAU
-	var rad: float = rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
-	for i in n:
-		var pos: Vector2
-		match id:
-			"cluster":
-				# 一团：同方向挤在一起，像一波小潮水
-				var a := base_ang + rng.randf_range(-0.30, 0.30)
-				pos = player.position + Vector2.from_angle(a) * rad + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(0.0, 70.0)
-			"arc":
-				# 弧线：一条 50° 的弧压过来，横向铺开
-				var a2 := base_ang + (float(i) / maxf(1.0, float(n - 1)) - 0.5) * 0.9
-				pos = player.position + Vector2.from_angle(a2) * rad
-			"ring":
-				# 一圈：整圈合围，逼玩家选一个方向突出去
-				var a3 := base_ang + TAU * float(i) / float(n)
-				pos = player.position + Vector2.from_angle(a3) * rad
-			_:
-				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
-		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
-			return
-		_spawn_enemy_at(pos)
-
-
-func _spawn_enemy(forced: String = "") -> void:
-	var ang: float = rng.randf() * TAU
-	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX), forced)
-
-
-func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
-	var kind := forced if forced != "" else _pick_kind()
-	var kd: Dictionary = ENEMY_KINDS[kind]
-	var e = Node2D.new()
-	e.set_script(load("res://scripts/enemy.gd"))
-	e.add_to_group("enemy")
-	e.process_mode = Node.PROCESS_MODE_PAUSABLE
-	e.position = pos
-	e.kind = kind
-	e.hp_mult = float(kd["hp_mult"])
-	e.radius = float(kd["radius"])
-	e.body_color = kd["color"]
-	e.max_hp = _wave_hp() * float(kd["hp_mult"])
-	e.hp = e.max_hp
-	e.speed = float(kd["speed"]) * (1.0 + wave * 0.01)
-	add_child(e)
-	return e
-
-
-## 同屏 bulwark 数量
-func _count_bulwark() -> int:
-	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if String(e.kind) == "bulwark":
-			n += 1
-	return n
-
-
-## 每 16 秒在玩家「前进方向 ±50°」排一堵慢速高血量墙：往前走就会被撞上（docs/plan-v3.md §3.2）
-func _tick_bulwark(delta: float) -> void:
-	if wave >= 3:
-		bulwark_t -= delta
-		if bulwark_t <= 0.0:
-			bulwark_t = 16.0
-			_spawn_bulwark_arc()
-	_recycle_bulwark()
-
-
-func _spawn_bulwark_arc() -> void:
-	var cap := mini(14, 2 + int(wave / 4.0))
-	var n := mini(4, cap - _count_bulwark())
-	if n <= 0:
-		return
-	var dir := last_move_dir
-	if dir.length() < 0.1:
-		dir = Vector2.from_angle(rng.randf() * TAU)
-	var base_ang := dir.angle()
-	for i in n:
-		var a := base_ang + lerpf(-0.87, 0.87, (float(i) + 0.5) / float(n))
-		var pos := player.position + Vector2.from_angle(a) * rng.randf_range(380.0, 460.0)
-		var e := _spawn_enemy_at(pos, "bulwark")
-		if e != null:
-			# 依次浮现 0.9s / 1.5s / 2.1s …，像一堵墙慢慢立起来
-			e.telegraph = 0.9 + 0.6 * float(i)
-
-
-## 跑到玩家身后很远、又活得够久的 bulwark 直接回收，免得越积越多
-func _recycle_bulwark() -> void:
-	if int(elapsed * 2.0) % 4 != 0:
-		return
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if String(e.kind) != "bulwark":
-			continue
-		if float(e.age) > 6.0 and (e.position - player.position).dot(last_move_dir) < -1600.0:
-			e.queue_free()
-
-
+# ============================================================================
+# 3. 战斗：开火 / 目标选择 / 伤害结算
+# ============================================================================
 ## 开火：每把武器各自按自己的间隔寻找目标。
 ## 无目标不开火（不消耗次数，也不打空气）；多目标按分摊公式结算。
 func _fire(delta: float) -> void:
@@ -2199,6 +1129,580 @@ func _kill(e: Node2D) -> void:
 	e.queue_free()
 
 
+func _spawn_pickup(pos: Vector2, mid: String) -> void:
+	var p = Node2D.new()
+	p.set_script(load("res://scripts/pickup.gd"))
+	p.add_to_group("pickup")
+	p.process_mode = Node.PROCESS_MODE_PAUSABLE
+	p.position = pos
+	p.mid = mid
+	p.tier = int(MODULES[mid]["tier"])
+	add_child(p)
+
+
+## 单次伤害入口（子弹 / 精英冲撞）。接触伤害仍走 _contact 的持续扣血。
+func hurt_player(dmg: float, push: Vector2, src: String = "bullet") -> void:
+	if dead:
+		return
+	last_hit_t = elapsed
+	dmg_src[src] = float(dmg_src[src]) + dmg
+	hp -= dmg
+	flash_t = 0.35
+	_reward_damage(dmg)
+	if player != null and player.has_method("add_knock"):
+		player.add_knock(push)
+	if hp <= 0.0:
+		_die()
+
+
+func _contact(delta: float) -> void:
+	var touching := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e):
+			continue
+		if e.position.distance_to(player.position) < 26.0:
+			touching += 1
+			if touching >= CROWD_CAP:
+				break
+	if touching > 0:
+		var dmg: float = CONTACT_DPS * pow(0.92, float(_bl("contact"))) * touching * delta
+		dmg_src["contact"] = float(dmg_src["contact"]) + dmg
+		last_hit_t = elapsed
+		if not god:
+			hp -= dmg
+		flash_t = 0.35
+		_reward_damage(dmg)
+	if hp <= 0.0:
+		_die()
+
+
+## 挨打换模块：弹药会耗尽，所以掉血要反哺构筑（越挨打越有料补）
+func _reward_damage(dmg: float) -> void:
+	damage_credit += dmg
+	while damage_credit >= DAMAGE_PER_MODULE:
+		damage_credit -= DAMAGE_PER_MODULE
+		modules_from_damage += 1
+		var t := _damage_reward_id()
+		# 掉在玩家脚边，能看见它被吸走，反馈比直接进背包好
+		var n := _damage_reward_count()
+		for k in n:
+			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
+
+
+## 补偿只给「能产出的」模块：增幅自身 0 出力，当补偿发等于发了个空槽
+func _damage_reward_id() -> String:
+	if wave >= 12:
+		return "add"
+	return "base"
+
+
+func _damage_reward_count() -> int:
+	if wave >= 24:
+		return 2
+	return 1
+
+
+
+
+# ============================================================================
+# 4. 武器：生成 / 品质 / 布局 / 随机数值 / 输出统计
+# ============================================================================
+## 造一把武器：品质决定电路板布局，种类决定射程/间隔/目标数
+func _make_weapon(id: String, q: int) -> Dictionary:
+	var kd: Dictionary = WEAPONS[id]
+	var w := {
+		"id": id, "quality": clampi(q, 1, 5), "base": 0.0, "layout": [], "slots": [],
+		"range": float(kd["range"]), "interval": float(kd["interval"]),
+		"targets": int(kd["targets"]), "mul": float(kd["mul"]),
+		"enabled": true, "fire_t": 0.0, "dmg": {},
+		"blast": 90.0, "ramp_max": 1.20,
+		"score": 0.0, "p0": 0.0, "band": 1.0, "dr": {},
+		# 槽位方案：每格记住「这一格该放什么模块 id」。寿命耗尽后按它自动补料，
+		# 空字符串表示这一格没有方案（自动入槽才允许乱填）。
+		"plan": [],
+	}
+	_set_quality_of(w, q)
+	_roll_weapon(w)
+	return w
+
+
+func _eff_targets(w: Dictionary) -> float:
+	var id := String(w["id"])
+	var t := int(w["targets"])
+	if id == "grenade":
+		return 1.0 + 0.6 * float(w.get("blast", 90.0)) / 90.0
+	if id == "blade":
+		return 3.0 * float(w["range"]) / 105.0
+	if id == "laser":
+		return 3.0
+	if t < 0:
+		return 3.0
+	return float(mini(t, 5))
+
+
+func _range_w(r: float) -> float:
+	return 1.0 + clampf((r - 150.0) / 1500.0, 0.0, 0.5)
+
+
+func weapon_score(w: Dictionary) -> float:
+	var iv := maxf(float(w["interval"]), 0.05)
+	return (float(w["base"]) * float(w["mul"]) / iv) * _eff_targets(w) * _range_w(float(w["range"]))
+
+
+## 该类型的典型模板分（品质 3），代码现算，不写死表
+func p0_of(id: String) -> float:
+	var kd: Dictionary = WEAPONS[id]
+	var w := {
+		"id": id, "base": float(QUALITY_BASE[3]), "mul": float(kd["mul"]),
+		"interval": float(kd["interval"]), "range": float(kd["range"]),
+		"targets": int(kd["targets"]), "blast": 90.0,
+	}
+	return weapon_score(w)
+
+
+func _roll_weapon(w: Dictionary) -> void:
+	var id := String(w["id"])
+	var rp: Dictionary = ROLL_P.get(id, {"r": 0.10, "i": 0.10, "b": 0.15, "tg": 0.0})
+	var dr := {}
+	var r0 := float(w["range"])
+	var i0 := float(w["interval"])
+	var b0 := float(w["base"])
+	w["range"] = r0 * (1.0 + rng.randf_range(-float(rp["r"]), float(rp["r"])))
+	w["interval"] = i0 * (1.0 + rng.randf_range(-float(rp["i"]), float(rp["i"])))
+	w["base"] = b0 * (1.0 + rng.randf_range(-float(rp["b"]), float(rp["b"])))
+	dr["range"] = float(w["range"]) / maxf(r0, 0.0001) - 1.0
+	dr["interval"] = float(w["interval"]) / maxf(i0, 0.0001) - 1.0
+	dr["base"] = float(w["base"]) / maxf(b0, 0.0001) - 1.0
+	if float(rp.get("tg", 0.0)) > 0.0 and int(w["targets"]) > 0 and int(w["targets"]) < 6 \
+			and rng.randf() < float(rp["tg"]):
+		w["targets"] = int(w["targets"]) + 1
+		dr["targets"] = 1.0
+	if rp.has("x"):
+		var x := float(rp["x"])
+		if id == "grenade":
+			w["blast"] = 90.0 * (1.0 + rng.randf_range(-x, x))
+			dr["blast"] = float(w["blast"]) / 90.0 - 1.0
+		elif id == "beam":
+			w["ramp_max"] = 1.20 * (1.0 + rng.randf_range(-x, x))
+			dr["ramp_max"] = float(w["ramp_max"]) / 1.20 - 1.0
+		else:
+			w["range"] = float(w["range"]) * (1.0 + rng.randf_range(-x, x))
+			dr["range"] = float(w["range"]) / maxf(r0, 0.0001) - 1.0
+	# 归一化：先把 mul 归 1 算分数，再反解 mul 让总分正好落在 band 上。
+	# 归一化只能用 mul —— 它是唯一不改射程/射速/目标数的乘数，用别的会把武器性格抹平。
+	var q := int(w["quality"])
+	var p0 := p0_of(id)
+	w["p0"] = p0
+	w["band"] = p0 * float(QM[q]) * rng.randf_range(0.94, 1.06)
+	w["mul"] = 1.0
+	var sc := weapon_score(w)
+	w["mul"] = clampf(float(w["band"]) / maxf(sc, 0.0001), 0.05, 40.0)
+	w["score"] = weapon_score(w)
+	w["dr"] = dr
+
+
+## 布局生成：以基础网络（二连/折角/T/方形/十字）为积木，随机旋转镜像后拼到已有格子上。
+## 返回的格子永远连通（因为每块都贴着既有格子放），所以「插槽网络」不会出现孤岛。
+func _gen_layout(n: int) -> Array:
+	if n <= 2:
+		return [Vector2i(0, 0), Vector2i(1, 0)].slice(0, n)
+	var cells: Array = [Vector2i(0, 0)]
+	var compact := rng.randf() < 0.6  # 60% 密堆（枢纽集中），40% 留缝（多个小岛）
+	var guard := 0
+	while cells.size() < n and guard < 400:
+		guard += 1
+		var want := mini(n - cells.size(), rng.randi_range(2, 3))
+		var piece: Array = _roll_piece(want)
+		var placed := false
+		for attempt in 12:
+			# 选一个锚点格子，把积木贴到它的空邻居上
+			var anchor: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
+			var dirs: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+			var off: Vector2i = dirs[rng.randi_range(0, 3)]
+			var ghost: Array = []
+			for c in piece:
+				ghost.append(anchor + off * (2 if not compact else 1) + c)
+			var ok := cells.size() + ghost.size() <= n
+			for g in ghost:
+				if not ok:
+					break
+				if g in cells:
+					ok = false
+				if compact and not ok:
+					break
+			if not ok:
+				continue
+			if compact:
+				# 密堆要求至少一个格子与已有格子相邻（保证连通且紧凑）
+				var touch := false
+				for g in ghost:
+					for c2 in cells:
+						if absi(g.x - c2.x) + absi(g.y - c2.y) == 1:
+							touch = true
+				if not touch:
+					continue
+			cells.append_array(ghost)
+			placed = true
+			break
+		if not placed:
+			# 兜底：往任意空格补一格
+			for attempt2 in 40:
+				var a2: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
+				var dirs2: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+				var d2: Vector2i = dirs2[rng.randi_range(0, 3)]
+				var cand: Vector2i = a2 + d2
+				if not (cand in cells):
+					cells.append(cand)
+					break
+	# 平移到左上角从 (0,0) 开始，方便画
+	var minx := 999
+	var miny := 999
+	for c in cells:
+		minx = mini(minx, c.x)
+		miny = mini(miny, c.y)
+	var out: Array = []
+	for c in cells:
+		out.append(Vector2i(c.x - minx, c.y - miny))
+	out.sort_custom(func(a, b): return a.y * 100 + a.x < b.y * 100 + b.x)
+	return out
+
+
+## 从基础网络里抽一块（随机旋转 / 镜像）
+func _roll_piece(want: int) -> Array:
+	var base: Array
+	match want:
+		2: base = [Vector2i(0, 0), Vector2i(1, 0)]
+		_: base = [Vector2i(0, 0), Vector2i(1, 0), Vector2i(1, 1)]
+	var rot := rng.randi_range(0, 3)
+	var mir := rng.randi_range(0, 1)
+	var out: Array = []
+	for c in base:
+		var p := Vector2i(c.x, c.y)
+		if mir == 1:
+			p.x = -p.x
+		for r in rot:
+			p = Vector2i(-p.y, p.x)
+		out.append(p)
+	return out
+
+
+func _set_quality_of(w: Dictionary, q: int) -> void:
+	q = clampi(q, 1, 5)
+	w["quality"] = q
+	w["base"] = float(QUALITY_BASE[q])
+	w["layout"] = _gen_layout(int(LAYOUTS[q].size()))
+	var slots: Array = w["slots"]
+	var plan: Array = w["plan"]
+	while slots.size() < w["layout"].size():
+		slots.append(null)
+	while slots.size() > w["layout"].size():
+		slots.pop_back()
+	while plan.size() < slots.size():
+		plan.append("")
+	while plan.size() > slots.size():
+		plan.pop_back()
+
+
+func _set_quality(q: int) -> void:
+	_set_quality_of(weapon, q)
+
+
+## 切换「正在编辑/查看」的武器（电路板和合成都作用在它上面）
+func _use_weapon(i: int) -> void:
+	sel = clampi(i, 0, weapons.size() - 1)
+	weapon = weapons[sel]
+
+
+## 背包占用 = 武器数 + 装置数
+func _backpack_used() -> int:
+	return weapons.size() + devices.size()
+
+
+## 一把武器此刻的 DPS（按板面实装模块算；多目标按分摊公式算总伤）
+## 这是「理论 DPS」：假设目标一直够、弹药一直有
+func _weapon_dps(w: Dictionary) -> float:
+	var mo := _weapon_mods(w)
+	var t := int(w["targets"])
+	if t > 0:
+		t += int(mo["targets"])
+	var rng_d := float(w["range"]) + float(mo["range"])
+	var hits: float = 1.0
+	if t < 0:
+		hits = float(maxi(1, _count_in_range(rng_d)))
+	elif t > 1:
+		hits = float(mini(t, maxi(1, _count_in_range(rng_d))))
+	var per := _shot_power_of(w) * (1.0 + 0.1 * (hits - 1.0)) / hits
+	return per * hits / (float(w["interval"]) * float(mo["iv"]))
+
+
+## 理论 DPS 与 _weapon_dps 同义（v2.6 起不再假设空槽填满：那是「未来」不是「现在」）
+func _theory_dps(w: Dictionary) -> float:
+	return _weapon_dps(w)
+
+
+## 实测 DPS：最近 5 秒真正打出去的伤害 ÷ 5
+## 用 0.5 秒一个桶（10 个桶 = 5 秒），比存每条伤害省内存，也天然做成滚动窗口
+const DMG_BUCKET := 0.5
+const DMG_BUCKETS := 10
+
+
+func _log_damage(w: Dictionary, dmg: float) -> void:
+	if dmg <= 0.0:
+		return
+	var b := int(elapsed / DMG_BUCKET)
+	var hist: Dictionary = w["dmg"]
+	hist[b] = float(hist.get(b, 0.0)) + dmg
+	# 顺手剪掉窗口外的桶，避免字典无限长
+	for k in hist.keys():
+		if int(k) < b - DMG_BUCKETS:
+			hist.erase(k)
+
+
+func _actual_dps(w: Dictionary) -> float:
+	var b := int(elapsed / DMG_BUCKET)
+	var hist: Dictionary = w["dmg"]
+	var sum := 0.0
+	for k in hist.keys():
+		if int(k) > b - DMG_BUCKETS:
+			sum += float(hist[k])
+	return sum / (DMG_BUCKET * DMG_BUCKETS)
+
+
+func _count_in_range(r: float) -> int:
+	var n := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(e) and e.position.distance_to(player.position) <= r:
+			n += 1
+	return n
+
+
+## v2.6 起品质只由「宝箱」决定：拿到即定死，不再跟着波次统一抬升
+## （否则抽到什么最后都是紫 5 槽，宝箱的赌性就没了）
+func _ensure_weapon() -> void:
+	pass
+
+
+
+
+# ============================================================================
+# 5. 敌人与刷怪
+# ============================================================================
+## 波次血量：12 波之前走平缓曲线；之后额外乘 1.045/波 —— 这时玩家武器基本成型，
+## 难度不提就会被碾压（曲线要追着玩家的构筑跑，而不是线性增长）
+func _wave_hp() -> float:
+	var late := maxf(0.0, float(wave - HP_LATE_WAVE))
+	return HP_BASE * pow(HP_GROWTH, wave - 1) * pow(HP_LATE_GROWTH, late)
+
+
+## 当前波次的编成模板（每 5 波循环一次）
+func _plan() -> Dictionary:
+	return WAVE_PLANS[(wave - 1) % WAVE_PLANS.size()]
+
+
+## 本波敌人的平均血量倍率（用来把「总血量预算」换算成刷怪速度）
+func _plan_avg_mult() -> float:
+	var plan := _plan()
+	var wsum := 0.0
+	var msum := 0.0
+	for k in plan["kinds"]:
+		var w: float = float(plan["kinds"][k])
+		wsum += w
+		msum += w * float(ENEMY_KINDS[k]["hp_mult"])
+	return msum / maxf(wsum, 0.001)
+
+
+## 刷怪速度：先按预算系数缩放，再按平均血量倍率反比缩放
+## → 每波「总血量/秒」大致相同，但密度与单个强度差别很大（这就是玩法的差别）
+## 上限 1.7× 是同血量预算的补充：速度快的怪本来就多，不给上限疾行波会变成 9 只/秒的墙
+func _spawn_rate() -> float:
+	# 数量优先：指数刷怪（1.20 × 1.19^波），血量只温和地涨，压力主要来自「人多」
+	var base: float = SPAWN_BASE * pow(SPAWN_GROWTH, float(wave))
+	var raw: float = base * float(_plan()["coeff"])
+	return minf(raw, base * SPAWN_CAP_MULT)
+
+
+func _pick_kind() -> String:
+	var plan := _plan()
+	# 射手要占住「射程外打你」的位置，数量一多就没法玩了：同屏上限 10
+	if _count_kind("shooter") >= SHOOTER_MAX:
+		for k in plan["kinds"]:
+			if k != "shooter":
+				return k
+	var total := 0.0
+	for k in plan["kinds"]:
+		total += float(plan["kinds"][k])
+	var r := rng.randf() * total
+	for k in plan["kinds"]:
+		r -= float(plan["kinds"][k])
+		if r <= 0.0:
+			return k
+	return "flood"
+
+
+func _count_kind(k: String) -> int:
+	var n := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(e) and e.kind == k:
+			n += 1
+	return n
+
+
+## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
+## 同时在地图上随机扔一个宝箱，让玩家有理由离开中心区域。
+func _on_wave_start() -> void:
+	_spawn_chest_random()
+	if wave < ELITE_FIRST_WAVE:
+		return
+	if (wave - ELITE_FIRST_WAVE) % ELITE_EVERY != 0:
+		return
+	if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+		return
+	var alive := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if is_instance_valid(e) and e.kind == "charger":
+			alive += 1
+	if alive >= ELITE_MAX:
+		return
+	_spawn_enemy("charger")
+
+
+func _spawn(delta: float) -> void:
+	# 90 秒保底一个宝箱，防止运气差到一把新武器都拿不到
+	var since := elapsed - last_chest_t
+	if since >= CHEST_GUARANTEE and get_tree().get_nodes_in_group("chest").is_empty():
+		_spawn_chest_random()
+	spawn_acc = minf(spawn_acc + delta * _spawn_rate(), 24.0)  # 卡顿后不要一口气吐出几百个
+	while spawn_acc >= 1.0:
+		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+			spawn_acc = minf(spawn_acc, 6.0)
+			break
+		var pat: Dictionary = _pick_pattern()
+		var size := rng.randi_range(int(pat["min"]), int(pat["max"]))
+		# 预算不够就等下一帧，让「一团 / 一圈」完整地出现
+		if spawn_acc < float(size):
+			break
+		spawn_acc -= float(size)
+		_emit_pattern(String(pat["id"]), size)
+
+
+func _pick_pattern() -> Dictionary:
+	var pool: Array = []
+	var total := 0.0
+	for p in PATTERNS:
+		if wave < int(p["wave"]):
+			continue
+		pool.append(p)
+		total += float(p["w"])
+	var r := rng.randf() * total
+	for p in pool:
+		r -= float(p["w"])
+		if r <= 0.0:
+			return p
+	return pool[0]
+
+
+func _emit_pattern(id: String, n: int) -> void:
+	var base_ang: float = rng.randf() * TAU
+	var rad: float = rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
+	for i in n:
+		var pos: Vector2
+		match id:
+			"cluster":
+				# 一团：同方向挤在一起，像一波小潮水
+				var a := base_ang + rng.randf_range(-0.30, 0.30)
+				pos = player.position + Vector2.from_angle(a) * rad + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(0.0, 70.0)
+			"arc":
+				# 弧线：一条 50° 的弧压过来，横向铺开
+				var a2 := base_ang + (float(i) / maxf(1.0, float(n - 1)) - 0.5) * 0.9
+				pos = player.position + Vector2.from_angle(a2) * rad
+			"ring":
+				# 一圈：整圈合围，逼玩家选一个方向突出去
+				var a3 := base_ang + TAU * float(i) / float(n)
+				pos = player.position + Vector2.from_angle(a3) * rad
+			_:
+				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
+		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+			return
+		_spawn_enemy_at(pos)
+
+
+func _spawn_enemy(forced: String = "") -> void:
+	var ang: float = rng.randf() * TAU
+	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX), forced)
+
+
+func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
+	var kind := forced if forced != "" else _pick_kind()
+	var kd: Dictionary = ENEMY_KINDS[kind]
+	var e = Node2D.new()
+	e.set_script(load("res://scripts/enemy.gd"))
+	e.add_to_group("enemy")
+	e.process_mode = Node.PROCESS_MODE_PAUSABLE
+	e.position = pos
+	e.kind = kind
+	e.hp_mult = float(kd["hp_mult"])
+	e.radius = float(kd["radius"])
+	e.body_color = kd["color"]
+	e.max_hp = _wave_hp() * float(kd["hp_mult"])
+	e.hp = e.max_hp
+	e.speed = float(kd["speed"]) * (1.0 + wave * 0.01)
+	add_child(e)
+	return e
+
+
+## 同屏 bulwark 数量
+func _count_bulwark() -> int:
+	var n := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if String(e.kind) == "bulwark":
+			n += 1
+	return n
+
+
+## 每 16 秒在玩家「前进方向 ±50°」排一堵慢速高血量墙：往前走就会被撞上（docs/plan-v3.md §3.2）
+func _tick_bulwark(delta: float) -> void:
+	if wave >= 3:
+		bulwark_t -= delta
+		if bulwark_t <= 0.0:
+			bulwark_t = 16.0
+			_spawn_bulwark_arc()
+	_recycle_bulwark()
+
+
+func _spawn_bulwark_arc() -> void:
+	var cap := mini(14, 2 + int(wave / 4.0))
+	var n := mini(4, cap - _count_bulwark())
+	if n <= 0:
+		return
+	var dir := last_move_dir
+	if dir.length() < 0.1:
+		dir = Vector2.from_angle(rng.randf() * TAU)
+	var base_ang := dir.angle()
+	for i in n:
+		var a := base_ang + lerpf(-0.87, 0.87, (float(i) + 0.5) / float(n))
+		var pos := player.position + Vector2.from_angle(a) * rng.randf_range(380.0, 460.0)
+		var e := _spawn_enemy_at(pos, "bulwark")
+		if e != null:
+			# 依次浮现 0.9s / 1.5s / 2.1s …，像一堵墙慢慢立起来
+			e.telegraph = 0.9 + 0.6 * float(i)
+
+
+## 跑到玩家身后很远、又活得够久的 bulwark 直接回收，免得越积越多
+func _recycle_bulwark() -> void:
+	if int(elapsed * 2.0) % 4 != 0:
+		return
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if String(e.kind) != "bulwark":
+			continue
+		if float(e.age) > 6.0 and (e.position - player.position).dot(last_move_dir) < -1600.0:
+			e.queue_free()
+
+
+
+
+# ============================================================================
+# 6. 宝箱与开箱选武器
+# ============================================================================
 ## 宝箱：一局的主要成长来源（新武器）。品质按波次给，激光环 8 波后才入池。
 func _spawn_chest_random() -> void:
 	# 别刷在 HUD 底下（屏幕左上那块），否则图标被文字盖住、看不见也点不到
@@ -2342,154 +1846,215 @@ func _replace_weapon(i: int) -> void:
 	_adopt_weapon(pending_weapon)
 
 
-func _spawn_pickup(pos: Vector2, mid: String) -> void:
-	var p = Node2D.new()
-	p.set_script(load("res://scripts/pickup.gd"))
-	p.add_to_group("pickup")
-	p.process_mode = Node.PROCESS_MODE_PAUSABLE
-	p.position = pos
-	p.mid = mid
-	p.tier = int(MODULES[mid]["tier"])
-	add_child(p)
 
 
-## 单次伤害入口（子弹 / 精英冲撞）。接触伤害仍走 _contact 的持续扣血。
-func hurt_player(dmg: float, push: Vector2, src: String = "bullet") -> void:
-	if dead:
+# ============================================================================
+# 7. 电路板与模块：结算 / 安装 / 方案
+# ============================================================================
+## 自动配置方案要对「所有武器」生效：bot 每 4 秒会换一把正在编辑的枪，
+## 只填当前选中那把的话，其余枪永远空着（面板上就是 slot=2/4）
+func _auto_plan_all() -> void:
+	var keep := sel
+	for i in weapons.size():
+		_use_weapon(i)
+		_auto_plan_fill()
+	_use_weapon(keep)
+
+
+## bot 专用：方案里写的模块补不上时（库存没有那个 id，或那个 id 只能靠合成），
+## 每 2 秒允许把缺料格子的方案改写成「当前库存里整板增益最大」的 id。
+## 玩家侧不开这个开关：玩家要的是「我摆的方案永远生效」，缺料就红着提示，绝不偷偷换。
+func _auto_plan_fix(delta: float) -> void:
+	plan_fix_t += delta
+	if plan_fix_t < 2.0:
 		return
-	last_hit_t = elapsed
-	dmg_src[src] = float(dmg_src[src]) + dmg
-	hp -= dmg
-	flash_t = 0.35
-	_reward_damage(dmg)
-	if player != null and player.has_method("add_knock"):
-		player.add_knock(push)
-	if hp <= 0.0:
-		_die()
+	plan_fix_t = 0.0
+	var keep := sel
+	for wi in weapons.size():
+		_use_weapon(wi)
+		for i in _missing_cells():
+			var want := String(weapon.plan[i])
+			if want != "" and _inv(want) > 0:
+				_refill(i)  # 有料就直接补，不改方案
+				continue
+			var best_id := ""
+			var best_v := _board_total(weapon)
+			# 只允许「不降阶」的改写：否则库存里只剩基础模块时，方案会被改写成基础，整板跟着退化
+			var floor_t := 1
+			if want != "" and MODULES.has(want):
+				floor_t = int(MODULES[want]["tier"])
+			for k in _stocked_ids():
+				if MODULES.has(k) and int(MODULES[k]["tier"]) < floor_t:
+					continue
+				weapon.slots[i] = _new_module(k)
+				var v := _board_total(weapon)
+				weapon.slots[i] = null
+				if v > best_v + 0.0001:
+					best_v = v
+					best_id = k
+			if best_id == "":
+				continue
+			weapon.plan[i] = best_id
+			_refill(i)
+		# 已装但快烧空的格子：只把方案改成「库存里更强」的 id，不立刻顶掉模块。
+		# 等这一格烧空时 _refill 会按新方案补货 —— 既满足「不自动替换已装模块」，
+		# 又不会让机器人永远停在基础模块上。
+		for i in (weapon["slots"] as Array).size():
+			var m = weapon.slots[i]
+			if m == null:
+				continue
+			var ratio := float(m["left"]) / maxf(float(m.get("max", 1.0)), 0.001)
+			if ratio > 0.25:
+				continue
+			var cur := String(m["id"])
+			var best2 := ""
+			var best_v2 := _board_total(weapon)
+			var cur_t: int = int(MODULES[cur]["tier"]) if MODULES.has(cur) else 1
+			for k in _stocked_ids():
+				if k == cur or _inv(k) <= 0:
+					continue
+				if MODULES.has(k) and int(MODULES[k]["tier"]) <= cur_t:
+					continue
+				weapon.slots[i] = _new_module(k)
+				var v2 := _board_total(weapon)
+				weapon.slots[i] = m
+				if v2 > best_v2 + 0.0001:
+					best_v2 = v2
+					best2 = k
+			if best2 != "":
+				weapon.plan[i] = best2
+	_use_weapon(keep)
 
 
-func _contact(delta: float) -> void:
-	var touching := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if not is_instance_valid(e):
+## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
+func _new_module(mid: String) -> Dictionary:
+	var d: Dictionary = MODULES[mid]
+	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15) * pow(1.08, float(_bl("uses")))
+	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u}
+
+
+## 相邻 = 网格曼哈顿距离 1
+func _neighbors(i: int, w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	return Board.neighbors(ww["layout"], i)
+
+
+## 半径 r 内（曼哈顿距离 ≤ r）的所有槽位
+func _within(i: int, r: int) -> Array:
+	return Board.within(weapon["layout"], i, r)
+
+
+## 每个槽位这次的「出力」。
+## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
+## cls 决定行为；绑定武器的特化件在这个层面就是普通 flat（效果在 _weapon_mods 里生效）
+func _slot_out(slots = null, w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	var sl: Array = (ww["slots"] as Array) if slots == null else slots
+	var base: Array = []
+	base.resize(sl.size())
+	for i in sl.size():
+		var m = sl[i]
+		base[i] = 0.0 if m == null else float(MODULES[String(m["id"])]["rate"])
+	var eff := base.duplicate()
+	# 共振：相邻同 cls 的模块 +50% 基础值
+	for i in sl.size():
+		var m = sl[i]
+		if m == null or _cls(m) != "reson":
 			continue
-		if e.position.distance_to(player.position) < 26.0:
-			touching += 1
-			if touching >= CROWD_CAP:
-				break
-	if touching > 0:
-		var dmg: float = CONTACT_DPS * pow(0.92, float(_bl("contact"))) * touching * delta
-		dmg_src["contact"] = float(dmg_src["contact"]) + dmg
-		last_hit_t = elapsed
-		if not god:
-			hp -= dmg
-		flash_t = 0.35
-		_reward_damage(dmg)
-	if hp <= 0.0:
-		_die()
-
-## 挨打换模块：弹药会耗尽，所以掉血要反哺构筑（越挨打越有料补）
-func _reward_damage(dmg: float) -> void:
-	damage_credit += dmg
-	while damage_credit >= DAMAGE_PER_MODULE:
-		damage_credit -= DAMAGE_PER_MODULE
-		modules_from_damage += 1
-		var t := _damage_reward_id()
-		# 掉在玩家脚边，能看见它被吸走，反馈比直接进背包好
-		var n := _damage_reward_count()
-		for k in n:
-			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
-
-
-## 补偿只给「能产出的」模块：增幅自身 0 出力，当补偿发等于发了个空槽
-func _damage_reward_id() -> String:
-	if wave >= 12:
-		return "add"
-	return "base"
+		for j in _neighbors(i, ww):
+			if sl[j] != null and _cls(sl[j]) == "reson":
+				eff[j] = float(eff[j]) + float(base[j]) * 0.5
+	var out: Array = []
+	out.resize(sl.size())
+	for i in sl.size():
+		var m = sl[i]
+		if m == null:
+			out[i] = 0.0
+			continue
+		var v: float = eff[i]
+		if _cls(m) == "mirror":  # 加法：镜像相邻的低阶模块
+			var t := int(m["tier"])
+			for j in _neighbors(i, ww):
+				if sl[j] != null and int(sl[j]["tier"]) < t:
+					v += float(eff[j])
+		out[i] = v
+	# 增幅：自身 0 出力，把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
+	for i in sl.size():
+		var m = sl[i]
+		if m == null or _cls(m) != "boost":
+			continue
+		var b := float(MODULES[String(m["id"])]["boost"])
+		for j in _neighbors(i, ww):
+			if sl[j] != null and _cls(sl[j]) != "boost":
+				out[j] = float(out[j]) + b
+	return out
 
 
-func _damage_reward_count() -> int:
-	if wave >= 24:
-		return 2
-	return 1
+func _cls(m: Dictionary) -> String:
+	return String(MODULES[String(m["id"])]["cls"])
 
 
-func _die() -> void:
-	_test_end("dead")
-	if dead:
-		return
-	dead = true
-	hp = 0.0
-	flash_t = 0.0
-	flash.color = Color(1, 0.2, 0.25, 0.0)
-	if playtest:
-		print("DEAD t=%d w=%d lvl=%d kills=%d" % [int(pt_t), wave, level, kills_total])
-		get_tree().quit()
-		return
-	build_root.visible = true
-	board_root.visible = false
-	build_info.visible = false
-	hud_status.visible = false
-	hud_ammo.visible = false
-	hud_tip.visible = false
-	build_text.position = Vector2(80, 240)
-	build_text.add_theme_font_size_override("font_size", 26)
-	build_text.text = "你被淹没了\n\n%s\n\n按 R 重开" % _run_summary()
+## 武器级效果汇总：扫一遍板面，把带效果的模块折算成「这把枪的修正值」
+## bind 非空的模块只在对应武器上生效（否则它只剩 rate，见方案 §1.3）
+func _weapon_mods(w: Dictionary) -> Dictionary:
+	var mo := {"mul": 1.0, "mul_add": 0.0, "iv": 1.0, "range": 0.0, "targets": 0,
+		"pierce": 0, "elite": 0.0, "burn": 1.0, "recycle": 0.0, "combo": 0.0,
+		"ramp_cap": 0.0, "blast": 0.0, "blade": 0.0}
+	var wid := String(w["id"])
+	for m in w["slots"]:
+		if m == null:
+			continue
+		var mid := String(m["id"])
+		var d: Dictionary = MODULES[mid]
+		var b := String(d.get("bind", ""))
+		if b != "" and b != wid:
+			continue
+		match mid:
+			"edge": mo["mul_add"] = float(mo["mul_add"]) + 0.08
+			"light": mo["burn"] = float(mo["burn"]) * 0.5
+			"extend": mo["range"] = float(mo["range"]) + 25.0
+			"calib": mo["iv"] = float(mo["iv"]) * 0.95
+			"pierce": mo["pierce"] = int(mo["pierce"]) + 1
+			"breaker": mo["elite"] = float(mo["elite"]) + 0.20
+			"coolant": mo["iv"] = float(mo["iv"]) * 0.92
+			"recycle": mo["recycle"] = float(mo["recycle"]) + 0.20
+			"overload": mo["mul"] = float(mo["mul"]) * 1.15
+			"tempo": mo["combo"] = float(mo["combo"]) + 0.04
+			"multi", "spread": mo["targets"] = int(mo["targets"]) + 1
+			"belt": mo["burn"] = float(mo["burn"]) * 0.35
+			"focus": mo["ramp_cap"] = float(mo["ramp_cap"]) + 1.80
+			"charge": mo["blast"] = float(mo["blast"]) + 40.0
+			"blade": mo["blade"] = float(mo["blade"]) + 25.0
+	# 「扩散器」对霰弹枪是 +2（不是 +1）
+	if wid == "shotgun":
+		for m in w["slots"]:
+			if m != null and String(m["id"]) == "spread":
+				mo["targets"] = int(mo["targets"]) + 1
+	# 升级 buff：全局修正
+	var bl := float(_bl("rate"))
+	if bl > 0.0:
+		mo["iv"] = float(mo["iv"]) * pow(0.92, bl)
+	var bpow := float(_bl("power"))
+	if bpow > 0.0:
+		mo["mul"] = float(mo["mul"]) * pow(1.10, bpow)
+	mo["range"] = float(mo["range"]) + 60.0 * float(_bl("range"))
+	mo["pierce"] = int(mo["pierce"]) + _bl("pierce")
+	mo["elite"] = float(mo["elite"]) + 0.25 * float(_bl("elite"))
+	if int(w["targets"]) > 0:
+		mo["targets"] = int(mo["targets"]) + _bl("target")
+	return mo
 
 
-func _run_summary() -> String:
-	return "存活 %s   ·   波次 %d   ·   等级 %d   ·   击杀 %d   ·   受击补偿 %d" % [
-		_fmt_time(elapsed), wave, level, kills_total, modules_from_damage
-	]
+func _shot_power_of(w: Dictionary) -> float:
+	var mo := _weapon_mods(w)
+	var total := float(w["base"])
+	for v in _slot_out(null, w):
+		total += float(v)
+	return total * float(w["mul"]) * float(mo["mul"]) * (1.0 + float(mo["mul_add"]))
 
 
-func _fmt_time(t: float) -> String:
-	return "%02d:%02d" % [int(t) / 60, int(t) % 60]
-
-
-## 全部模块 id（含 base；MOD_ORDER 是「可合成」的配方顺序，不含 base）
-func _ids_all() -> Array:
-	return ["base"] + MOD_ORDER
-
-## 构筑屏里切换「当前配方」([Q]/[E])，并立刻重画右栏
-func _cycle_recipe(d: int) -> void:
-	recipe_sel = posmod(recipe_sel + d, MOD_ORDER.size())
-	_refresh_build()
-
-
-
-func _inv_str() -> String:
-	var parts: Array = []
-	for k in _ids_all():
-		if _inv(k) > 0:
-			parts.append(String(MODULES[k]["name"]) + str(_inv(k)))
-	return " ".join(parts)
-
-
-## ---- 库存：真实逻辑在 scripts/systems/inventory.gd，这里只留薄封装，
-##      免得 192 个调用点全部改名（R2 之后会继续把调用点直接改成 inv.xxx）----
-func _inv(mid: String) -> int:
-	return inv.of(mid)
-
-
-func _add_inv(mid: String, n: int) -> void:
-	inv.add(mid, n)
-
-
-func _take_inv(mid: String, n: int) -> void:
-	inv.take(mid, n)
-
-
-func _inv_total() -> int:
-	return inv.total()
-
-
-func _all_total() -> int:
-	return _inv_total() + _count_filled()
-
-
-func _inv_tier(t: int) -> int:
-	return inv.of_tier(t)
+func _shot_power() -> float:
+	return _shot_power_of(weapon)
 
 
 ## 某阶在「库存 + 板面」里的总量（配方按阶吃料：特化件也算同阶任意模块）
@@ -2547,11 +2112,6 @@ func _board_total(w = null) -> float:
 	for v in _slot_out(null, w):
 		s += v
 	return s
-
-
-## 库存里还有货的 id
-func _stocked_ids() -> Array:
-	return inv.stocked_ids()
 
 
 ## DEBUG
@@ -2627,258 +2187,278 @@ func _install(mid: String, w = null) -> void:
 	_add_inv(mid, 1)
 
 
-func level_cost() -> int:
-	return int(round(LEVEL_COST_BASE * pow(LEVEL_COST_GROWTH, level - 1)))
+func _installed_count(t: int) -> int:
+	var n := 0
+	for m in weapon["slots"]:
+		if m != null and int(m["tier"]) == t:
+			n += 1
+	return n
 
 
-## 升级只吃库存（槽位是工作区，不能被顺手拆掉）——「多余的基础模块」才拿去升级
-func try_level() -> bool:
-	var cost := level_cost()
-	if _inv_total() < cost:
+func _installed_id(mid: String) -> int:
+	var n := 0
+	for m in weapon["slots"]:
+		if m != null and String(m["id"]) == mid:
+			n += 1
+	return n
+
+
+func add_module(mid: String) -> void:
+	var sl: Array = weapon["slots"]
+	for i in sl.size():
+		if sl[i] == null:
+			sl[i] = _new_module(mid)
+			return
+	_add_inv(mid, 1)
+
+
+func _count_filled() -> int:
+	var n := 0
+	for m in weapon.slots:
+		if m != null:
+			n += 1
+	return n
+
+
+func _on_slot_input(event: InputEvent, i: int) -> void:
+	if not (event as InputEventMouseButton).pressed:
+		return
+	var mb := event as InputEventMouseButton
+	if mb.button_index == MOUSE_BUTTON_RIGHT:
+		_uninstall(i)
+		_refresh_build()
+		return
+	if mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if hand_mid != "":
+		_place_at(i, hand_mid)
+	elif String(weapon.plan[i]) != "" and weapon.slots[i] == null:
+		_refill(i)  # 有方案但缺料：手动点一下等于「再试一次补料」
+	else:
+		# 点空白格默认什么都不做：装哪个模块是玩家的决定，不该被系统代劳。
+		# 只有自测机器人（bot / playtest）才自动挑一个当前最优的填进去。
+		if bot:
+			_auto_place_best(i)
+	_refresh_build()
+
+
+## 把库存里的 mid 放进第 i 格，并登记成这一格的方案（方案 = 以后自动补料的目标）
+func _place_at(i: int, mid: String) -> bool:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	if i < 0 or i >= sl.size() or not MODULES.has(mid) or _inv(mid) <= 0:
+		hand_mid = ""
 		return false
-	var left := cost
-	for k in _ids_all():
-		if left <= 0:
-			break
-		var take: int = mini(left, _inv(k))
-		if take > 0:
-			_add_inv(k, -take)
-			left -= take
-	if left > 0:
-		return false
-	level += 1
-	_roll_offer()
-	_open_pick()
+	_add_inv(mid, -1)
+	if sl[i] != null:
+		_add_inv(String(sl[i]["id"]), 1)  # 原有的退回库存，等于覆盖
+	sl[i] = _new_module(mid)
+	plan[i] = mid
+	hand_mid = ""
 	return true
 
 
-## buff 层数
-func _bl(id: String) -> int:
-	return int(buffs.get(id, 0))
-
-
-## 抽 4 张卡：3 张 buff（攻击/经济/生存各 1）+ 1 张配方卡
-func _roll_offer() -> void:
-	if pick_mode != "chest" and pick_mode != "replace":
-		pick_mode = "level"
-	offer.clear()
-	reroll_used = false
-	var cats := ["atk", "eco", "sur"]
-	for c in cats:
-		var pool: Array = []
-		for id in BUFFS:
-			var d: Dictionary = BUFFS[id]
-			if String(d["cat"]) != c:
-				continue
-			if _bl(id) >= int(d["max"]):
-				continue
-			if String(d["rar"]) == "gold" and level <= 4:
-				continue
-			pool.append(id)
-		if pool.is_empty():
-			pool = ["rate", "drop", "hp"]
-		var pick: String = String(pool[rng.randi_range(0, pool.size() - 1)])
-		offer.append({"kind": "buff", "id": pick})
-	offer.append(_roll_recipe_card())
-
-
-## 配方卡：从已解锁的配方里抽一个（特化配方只在拥有对应武器时进池）
-func _roll_recipe_card() -> Dictionary:
-	var pool: Array = []
-	for mid in MOD_ORDER:
-		var d: Dictionary = MODULES[mid]
-		var bind := String(d.get("bind", ""))
-		if bind != "":
-			var has := false
-			for w in weapons:
-				if String(w["id"]) == bind:
-					has = true
-			if not has:
-				continue
-		if level < int(CRAFT_UNLOCK.get(mid, 99)) - 3:
-			continue
-		pool.append(mid)
-	if pool.is_empty():
-		pool = ["add"]
-	var mid2: String = String(pool[rng.randi_range(0, pool.size() - 1)])
-	return {"kind": "recipe", "id": mid2}
-
-
-func _open_pick() -> void:
-	# 选卡时真的暂停整棵场景树：只靠 _physics_process 早退挡不住敌人自己的物理帧
-	get_tree().paused = true
-	# 两个全屏覆盖层不能同时开着：开选卡时先收起构筑屏，选完再放回来
-	var was_build: bool = build_root != null and build_root.visible
-	if was_build:
-		_pick_from_build = true
-		_toggle_build()
-	picking = true
-	pick_wait = 0.0
-	pick_root.visible = true
-	_paint_offer()
-	_paint_pick_chrome()
-
-
-func _paint_offer() -> void:
-	if pick_root == null:
+## 卸下第 i 格：模块退回库存，方案清空
+func _uninstall(i: int) -> void:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	if i < 0 or i >= sl.size():
 		return
-	for c in pick_root.get_children():
-		c.queue_free()
-	if pick_mode == "chest":
-		_paint_chest()
-		return
-	if pick_mode == "replace":
-		_paint_replace()
-		return
-	var bg := ColorRect.new()
-	bg.color = Color(0.03, 0.04, 0.07, 0.88)
-	bg.position = Vector2.ZERO
-	bg.size = Vector2(1280, 720)
-	pick_root.add_child(bg)
-	var w_card := 250.0
-	var gap := 18.0
-	var total := 4.0 * w_card + 3.0 * gap
-	var x0 := (1280.0 - total) * 0.5
-	var title := _label(pick_root, Vector2(x0, 118), 28, Color(0.95, 0.93, 0.86))
-	title.text = "升级！点卡片 或 按 1–4 选择"
-	var sub := _label(pick_root, Vector2(x0, 158), 17, Color(0.72, 0.78, 0.88))
-	sub.text = "配方卡可以按 T 换成第 4 张 buff" if not reroll_used else "配方卡已经换过了"
-	for i in offer.size():
-		var card: Dictionary = offer[i]
-		var col := Color(0.55, 0.58, 0.66)
-		var nm := ""
-		var ds := ""
-		if String(card["kind"]) == "buff":
-			var d: Dictionary = BUFFS[String(card["id"])]
-			nm = "%s  Lv%d→%d" % [String(d["name"]), _bl(String(card["id"])), _bl(String(card["id"])) + 1]
-			ds = String(d["desc"])
-			var r := String(d["rar"])
-			col = Color(0.62, 0.86, 1.0) if r == "blue" else (Color(1.0, 0.84, 0.35) if r == "gold" else Color(0.82, 0.84, 0.90))
-		else:
-			var d2: Dictionary = MODULES[String(card["id"])]
-			nm = "配方 · %s" % String(d2["name"])
-			ds = "立刻获得 1 个（%d 阶）" % int(d2["tier"])
-			col = Color(0.55, 0.95, 0.72)
-		var btn := Button.new()
-		btn.position = Vector2(x0 + float(i) * (w_card + gap), 200)
-		btn.size = Vector2(w_card, 210)
-		btn.text = "%d   %s\n\n%s" % [i + 1, nm, ds]
-		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		btn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		btn.add_theme_font_size_override("font_size", 18)
-		btn.add_theme_color_override("font_color", col)
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
-		sb.border_color = col
-		sb.set_border_width_all(2)
-		sb.set_corner_radius_all(10)
-		sb.content_margin_left = 14
-		sb.content_margin_right = 14
-		sb.content_margin_top = 12
-		btn.add_theme_stylebox_override("normal", sb)
-		var sh := sb.duplicate() as StyleBoxFlat
-		sh.bg_color = Color(0.18, 0.20, 0.26, 0.99)
-		sh.border_color = Color(1, 1, 1)
-		btn.add_theme_stylebox_override("hover", sh)
-		btn.add_theme_stylebox_override("pressed", sh)
-		btn.add_theme_stylebox_override("focus", sh)
-		pick_root.add_child(btn)
-		btn.pressed.connect(_take_card.bind(i))
+	if sl[i] != null:
+		_add_inv(String(sl[i]["id"]), 1)
+	sl[i] = null
+	plan[i] = ""
 
 
-## 关掉最上层的界面。返回 true 表示这次输入被消费掉了。
-## 优先级：选卡 > 构筑。升级四选一不允许跳过（必须选一张），所以吞掉输入但不关面板。
-func _close_topmost() -> bool:
-	if picking:
-		if pick_mode == "level":
-			return true
-		_abort_pick()
-		return true
-	if build_root != null and build_root.visible:
-		_toggle_build()
-		return true
-	return false
+## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成方案
+func _auto_place_best(i: int) -> bool:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	if i < 0 or i >= sl.size() or sl[i] != null:
+		return false
+	var best_id := ""
+	var best_v := _board_total(weapon)
+	for k in _stocked_ids():
+		sl[i] = _new_module(k)
+		var v := _board_total(weapon)
+		sl[i] = null
+		if v > best_v + 0.0001:
+			best_v = v
+			best_id = k
+	if best_id == "":
+		return false
+	plan[i] = best_id
+	_add_inv(best_id, -1)
+	sl[i] = _new_module(best_id)
+	return true
 
 
-## 选卡面板的公共外框：右上角 ×。升级四选一必须选一张，所以不给关闭键。
-func _paint_pick_chrome() -> void:
-	if pick_root == null or pick_mode == "level":
-		return
-	UIKit.close_button(pick_root, _abort_pick, 18.0)
+## 自动配置方案（bot 与懒人用）：所有「空格子 + 没方案」都按最优填一次，填完固化成方案
+func _auto_plan_fill() -> void:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	for i in sl.size():
+		if sl[i] == null and String(plan[i]) == "":
+			_auto_place_best(i)
 
 
-## 放弃当前面板（宝箱不拿、替换不换）
-func _abort_pick() -> void:
-	if not picking:
-		return
-	if pick_mode == "chest":
-		chest_offer.clear()
-	elif pick_mode == "replace":
-		pending_weapon = {}
-	_close_pick()
+func _missing_cells(w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	var out: Array = []
+	var sl: Array = ww["slots"]
+	var plan: Array = ww["plan"]
+	for i in sl.size():
+		if sl[i] == null and i < plan.size() and String(plan[i]) != "":
+			out.append(i)
+	return out
 
 
-func _close_pick() -> void:
-	picking = false
-	if pick_root != null:
-		pick_root.visible = false
-	get_tree().paused = false
-	pick_mode = "level"
-	if pending_chest > 0 and not dead:
-		pending_chest -= 1
-		call_deferred("grant_chest")
-	# 选卡前如果正在构筑，选完回到构筑屏（材料变了，正好让玩家继续操作）
-	if not dead and build_root != null and not build_root.visible and _pick_from_build:
-		_toggle_build()
-	_pick_from_build = false
-	if pick_root != null:
-		for c in pick_root.get_children():
-			c.queue_free()
-
-
-## 领第 i 张卡
-func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_offer），以前漏了这个分支，
-	# 结果卡片点得动（button_down 有反应）但 pressed 永远落空、面板关不掉
-	if pick_mode == "chest":
-		_take_weapon_card(i)
-		return
-	if i < 0 or i >= offer.size():
-		return
-	var card: Dictionary = offer[i]
-	var id := String(card["id"])
-	if String(card["kind"]) == "buff":
-		buffs[id] = _bl(id) + 1
-		if id == "hp":
-			max_hp += 15.0
-			hp = minf(max_hp, hp + 15.0)
+func _slot_tip(i: int) -> String:
+	var parts: Array = ["槽 %d" % (i + 1)]
+	var m = weapon.slots[i]
+	if m != null:
+		var d: Dictionary = MODULES[String(m["id"])]
+		parts.append("%s · %d 阶 · 出力 %.1f · 剩余 %d/%d" % [
+			String(d["name"]), int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
 	else:
-		_add_inv(id, 1 + int(level / 12))
-	_close_pick()
-	_refresh_hud()
+		parts.append("空")
+	var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
+	if want != "":
+		parts.append("方案：%s%s" % [String(MODULES[want]["name"]),
+			"" if _inv(want) > 0 else "（库存缺料，攒够自动补）"])
+	parts.append("左键：装入手里的模块 / 自动补料　　右键：卸下")
+	return "\n".join(parts)
 
 
-## 把配方卡 reroll 成第 4 张 buff（每级一次）
-func _reroll_recipe() -> void:
-	if reroll_used or picking == false or offer.size() < 4:
-		return
-	if String(offer[3]["kind"]) != "recipe":
-		return
-	var used := {}
-	for c in offer:
-		if String(c["kind"]) == "buff":
-			used[String(c["id"])] = true
-	var pool: Array = []
-	for id in BUFFS:
-		if used.has(id):
+
+
+# ============================================================================
+# 8. 库存
+# ============================================================================
+## 全部模块 id（含 base；MOD_ORDER 是「可合成」的配方顺序，不含 base）
+func _ids_all() -> Array:
+	return ["base"] + MOD_ORDER
+
+
+## 构筑屏里切换「当前配方」([Q]/[E])，并立刻重画右栏
+func _cycle_recipe(d: int) -> void:
+	recipe_sel = posmod(recipe_sel + d, MOD_ORDER.size())
+	_refresh_build()
+
+
+func _inv_str() -> String:
+	var parts: Array = []
+	for k in _ids_all():
+		if _inv(k) > 0:
+			parts.append(String(MODULES[k]["name"]) + str(_inv(k)))
+	return " ".join(parts)
+
+
+## ---- 库存：真实逻辑在 scripts/systems/inventory.gd，这里只留薄封装，
+##      免得 192 个调用点全部改名（R2 之后会继续把调用点直接改成 inv.xxx）----
+func _inv(mid: String) -> int:
+	return inv.of(mid)
+
+
+func _add_inv(mid: String, n: int) -> void:
+	inv.add(mid, n)
+
+
+func _take_inv(mid: String, n: int) -> void:
+	inv.take(mid, n)
+
+
+func _inv_total() -> int:
+	return inv.total()
+
+
+func _all_total() -> int:
+	return _inv_total() + _count_filled()
+
+
+func _inv_tier(t: int) -> int:
+	return inv.of_tier(t)
+
+
+## 库存里还有货的 id
+func _stocked_ids() -> Array:
+	return inv.stocked_ids()
+
+
+
+
+# ============================================================================
+# 9. 合成与装置
+# ============================================================================
+func _new_device() -> Dictionary:
+	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": []}
+
+
+## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
+func device_cost() -> int:
+	var base := DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))
+	return int(round(base * pow(0.92, float(_bl("device")))))
+
+
+func _idle_device() -> int:
+	for i in devices.size():
+		if String(devices[i]["kind"]) == "":
+			return i
+	return -1
+
+
+func _busy_devices() -> int:
+	var n := 0
+	for d in devices:
+		# kind 是模块 id 字符串（"" = 空闲）。写成 int(kind) 会得到 0，把在干活的装置当成空闲。
+		if String(d["kind"]) != "":
+			n += 1
+	return n
+
+
+## 用基础模块造一台新装置（材料堆积时的唯一出口）
+func buy_device() -> bool:
+	if devices.size() >= DEVICE_MAX:
+		return false
+	if _backpack_used() >= backpack_cap:
+		return false
+	var cost := device_cost()
+	if _inv("base") < cost:
+		return false
+	_take_inv("base", cost)
+	var nd := _new_device()
+	# bot / playtest 里新装置默认开机自动，否则平衡测试会因为「装置没人管」而失真
+	nd["auto"] = (playtest or bot) and not no_auto_craft
+	devices.append(nd)
+	return true
+
+
+## 一键把自动开关同步到所有装置（bot 用）
+func _sync_device_auto(on: bool) -> void:
+	for d in devices:
+		d["auto"] = on
+
+
+## 合成计时：每台装置各自倒计时，到点后产物进电路板
+## （满了会按整板出力决定换不换，换不动就进库存）
+func _craft_tick(delta: float) -> void:
+	for d in devices:
+		if String(d["kind"]) == "":
 			continue
-		if _bl(id) >= int(BUFFS[id]["max"]):
+		d["left"] = float(d["left"]) - delta
+		if float(d["left"]) > 0.0:
 			continue
-		pool.append(id)
-	if pool.is_empty():
-		return
-	offer[3] = {"kind": "buff", "id": String(pool[rng.randi_range(0, pool.size() - 1)])}
-	reroll_used = true
-	_paint_offer()
+		var k := String(d["kind"])
+		d["kind"] = ""
+		d["left"] = 0.0
+		d["total"] = 0.0
+		d["paid"] = []
+		crafted[k] = int(crafted.get(k, 0)) + 1
+		_install(k)
+		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
+		if bool(d.get("auto", false)):
+			if not try_craft(k, devices.find(d)):
+				try_craft("", devices.find(d))
 
 
 ## 该配方当前能不能开：绑定武器、解锁等级、材料
@@ -2994,31 +2574,93 @@ func _auto_recipe() -> String:
 	return ""
 
 
-func _installed_count(t: int) -> int:
-	var n := 0
-	for m in weapon["slots"]:
-		if m != null and int(m["tier"]) == t:
-			n += 1
-	return n
 
 
-func _installed_id(mid: String) -> int:
-	var n := 0
-	for m in weapon["slots"]:
-		if m != null and String(m["id"]) == mid:
-			n += 1
-	return n
+# ============================================================================
+# 10. 升级与 buff 抽卡
+# ============================================================================
+func level_cost() -> int:
+	return int(round(LEVEL_COST_BASE * pow(LEVEL_COST_GROWTH, level - 1)))
 
 
-func add_module(mid: String) -> void:
-	var sl: Array = weapon["slots"]
-	for i in sl.size():
-		if sl[i] == null:
-			sl[i] = _new_module(mid)
-			return
-	_add_inv(mid, 1)
+## 升级只吃库存（槽位是工作区，不能被顺手拆掉）——「多余的基础模块」才拿去升级
+func try_level() -> bool:
+	var cost := level_cost()
+	if _inv_total() < cost:
+		return false
+	var left := cost
+	for k in _ids_all():
+		if left <= 0:
+			break
+		var take: int = mini(left, _inv(k))
+		if take > 0:
+			_add_inv(k, -take)
+			left -= take
+	if left > 0:
+		return false
+	level += 1
+	_roll_offer()
+	_open_pick()
+	return true
 
 
+## buff 层数
+func _bl(id: String) -> int:
+	return int(buffs.get(id, 0))
+
+
+## 抽 4 张卡：3 张 buff（攻击/经济/生存各 1）+ 1 张配方卡
+func _roll_offer() -> void:
+	if pick_mode != "chest" and pick_mode != "replace":
+		pick_mode = "level"
+	offer.clear()
+	reroll_used = false
+	var cats := ["atk", "eco", "sur"]
+	for c in cats:
+		var pool: Array = []
+		for id in BUFFS:
+			var d: Dictionary = BUFFS[id]
+			if String(d["cat"]) != c:
+				continue
+			if _bl(id) >= int(d["max"]):
+				continue
+			if String(d["rar"]) == "gold" and level <= 4:
+				continue
+			pool.append(id)
+		if pool.is_empty():
+			pool = ["rate", "drop", "hp"]
+		var pick: String = String(pool[rng.randi_range(0, pool.size() - 1)])
+		offer.append({"kind": "buff", "id": pick})
+	offer.append(_roll_recipe_card())
+
+
+## 配方卡：从已解锁的配方里抽一个（特化配方只在拥有对应武器时进池）
+func _roll_recipe_card() -> Dictionary:
+	var pool: Array = []
+	for mid in MOD_ORDER:
+		var d: Dictionary = MODULES[mid]
+		var bind := String(d.get("bind", ""))
+		if bind != "":
+			var has := false
+			for w in weapons:
+				if String(w["id"]) == bind:
+					has = true
+			if not has:
+				continue
+		if level < int(CRAFT_UNLOCK.get(mid, 99)) - 3:
+			continue
+		pool.append(mid)
+	if pool.is_empty():
+		pool = ["add"]
+	var mid2: String = String(pool[rng.randi_range(0, pool.size() - 1)])
+	return {"kind": "recipe", "id": mid2}
+
+
+
+
+# ============================================================================
+# 11. HUD 刷新
+# ============================================================================
 ## 总理论 DPS：所有启用武器之和（按板面实装模块算）
 func cur_dps() -> float:
 	var s := 0.0
@@ -3106,14 +2748,11 @@ func _refresh_weapon_panel() -> void:
 	wpanel.modulate = Color(1, 1, 1, 0.95)
 
 
-func _count_filled() -> int:
-	var n := 0
-	for m in weapon.slots:
-		if m != null:
-			n += 1
-	return n
 
 
+# ============================================================================
+# 12. 构筑屏（标签页 / 库存 / 配方 / 装置）
+# ============================================================================
 func _refresh_build() -> void:
 	if build_text == null or dead:
 		return
@@ -3411,12 +3050,6 @@ func _toggle_dev_auto(i: int) -> void:
 	_refresh_build()
 
 
-## 把某个模块拿在手里（下一步点格子放下）
-func _pick_up(mid: String) -> void:
-	hand_mid = mid
-	_refresh_build()
-
-
 func _craft_from_tab(mid: String) -> void:
 	try_craft(mid)
 	_refresh_build()
@@ -3561,6 +3194,18 @@ func _rebuild_board() -> void:
 # --- 鼠标拖拽：按住 → 拖动 → 松开（docs/plan-v3.md §1）----------------------------
 # 坐标全部用 build_root 的局部坐标（build_root.get_local_mouse_position()）：
 # 之前踩过 pick_root.get_global_rect() 是 2560×1440（画布 2× 放大）的坑，用局部坐标就不需要补偿。
+
+
+
+
+# ============================================================================
+# 13. 鼠标拖拽
+# ============================================================================
+## 把某个模块拿在手里（下一步点格子放下）
+func _pick_up(mid: String) -> void:
+	hand_mid = mid
+	_refresh_build()
+
 
 func _drag_input(ev: InputEvent) -> bool:
 	if ev is InputEventMouseButton:
@@ -3748,144 +3393,187 @@ func _drag_clear() -> void:
 		drag_hint.text = ""
 
 
-func _on_slot_input(event: InputEvent, i: int) -> void:
-	if not (event as InputEventMouseButton).pressed:
+
+
+# ============================================================================
+# 14. 选卡界面（升级四选一 / 开箱四选一）
+# ============================================================================
+func _open_pick() -> void:
+	# 选卡时真的暂停整棵场景树：只靠 _physics_process 早退挡不住敌人自己的物理帧
+	get_tree().paused = true
+	# 两个全屏覆盖层不能同时开着：开选卡时先收起构筑屏，选完再放回来
+	var was_build: bool = build_root != null and build_root.visible
+	if was_build:
+		_pick_from_build = true
+		_toggle_build()
+	picking = true
+	pick_wait = 0.0
+	pick_root.visible = true
+	_paint_offer()
+	_paint_pick_chrome()
+
+
+func _paint_offer() -> void:
+	if pick_root == null:
 		return
-	var mb := event as InputEventMouseButton
-	if mb.button_index == MOUSE_BUTTON_RIGHT:
-		_uninstall(i)
-		_refresh_build()
+	for c in pick_root.get_children():
+		c.queue_free()
+	if pick_mode == "chest":
+		_paint_chest()
 		return
-	if mb.button_index != MOUSE_BUTTON_LEFT:
+	if pick_mode == "replace":
+		_paint_replace()
 		return
-	if hand_mid != "":
-		_place_at(i, hand_mid)
-	elif String(weapon.plan[i]) != "" and weapon.slots[i] == null:
-		_refill(i)  # 有方案但缺料：手动点一下等于「再试一次补料」
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.07, 0.88)
+	bg.position = Vector2.ZERO
+	bg.size = Vector2(1280, 720)
+	pick_root.add_child(bg)
+	var w_card := 250.0
+	var gap := 18.0
+	var total := 4.0 * w_card + 3.0 * gap
+	var x0 := (1280.0 - total) * 0.5
+	var title := _label(pick_root, Vector2(x0, 118), 28, Color(0.95, 0.93, 0.86))
+	title.text = "升级！点卡片 或 按 1–4 选择"
+	var sub := _label(pick_root, Vector2(x0, 158), 17, Color(0.72, 0.78, 0.88))
+	sub.text = "配方卡可以按 T 换成第 4 张 buff" if not reroll_used else "配方卡已经换过了"
+	for i in offer.size():
+		var card: Dictionary = offer[i]
+		var col := Color(0.55, 0.58, 0.66)
+		var nm := ""
+		var ds := ""
+		if String(card["kind"]) == "buff":
+			var d: Dictionary = BUFFS[String(card["id"])]
+			nm = "%s  Lv%d→%d" % [String(d["name"]), _bl(String(card["id"])), _bl(String(card["id"])) + 1]
+			ds = String(d["desc"])
+			var r := String(d["rar"])
+			col = Color(0.62, 0.86, 1.0) if r == "blue" else (Color(1.0, 0.84, 0.35) if r == "gold" else Color(0.82, 0.84, 0.90))
+		else:
+			var d2: Dictionary = MODULES[String(card["id"])]
+			nm = "配方 · %s" % String(d2["name"])
+			ds = "立刻获得 1 个（%d 阶）" % int(d2["tier"])
+			col = Color(0.55, 0.95, 0.72)
+		var btn := Button.new()
+		btn.position = Vector2(x0 + float(i) * (w_card + gap), 200)
+		btn.size = Vector2(w_card, 210)
+		btn.text = "%d   %s\n\n%s" % [i + 1, nm, ds]
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		btn.add_theme_font_size_override("font_size", 18)
+		btn.add_theme_color_override("font_color", col)
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
+		sb.border_color = col
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(10)
+		sb.content_margin_left = 14
+		sb.content_margin_right = 14
+		sb.content_margin_top = 12
+		btn.add_theme_stylebox_override("normal", sb)
+		var sh := sb.duplicate() as StyleBoxFlat
+		sh.bg_color = Color(0.18, 0.20, 0.26, 0.99)
+		sh.border_color = Color(1, 1, 1)
+		btn.add_theme_stylebox_override("hover", sh)
+		btn.add_theme_stylebox_override("pressed", sh)
+		btn.add_theme_stylebox_override("focus", sh)
+		pick_root.add_child(btn)
+		btn.pressed.connect(_take_card.bind(i))
+
+
+## 关掉最上层的界面。返回 true 表示这次输入被消费掉了。
+## 优先级：选卡 > 构筑。升级四选一不允许跳过（必须选一张），所以吞掉输入但不关面板。
+func _close_topmost() -> bool:
+	if picking:
+		if pick_mode == "level":
+			return true
+		_abort_pick()
+		return true
+	if build_root != null and build_root.visible:
+		_toggle_build()
+		return true
+	return false
+
+
+## 选卡面板的公共外框：右上角 ×。升级四选一必须选一张，所以不给关闭键。
+func _paint_pick_chrome() -> void:
+	if pick_root == null or pick_mode == "level":
+		return
+	UIKit.close_button(pick_root, _abort_pick, 18.0)
+
+
+## 放弃当前面板（宝箱不拿、替换不换）
+func _abort_pick() -> void:
+	if not picking:
+		return
+	if pick_mode == "chest":
+		chest_offer.clear()
+	elif pick_mode == "replace":
+		pending_weapon = {}
+	_close_pick()
+
+
+func _close_pick() -> void:
+	picking = false
+	if pick_root != null:
+		pick_root.visible = false
+	get_tree().paused = false
+	pick_mode = "level"
+	if pending_chest > 0 and not dead:
+		pending_chest -= 1
+		call_deferred("grant_chest")
+	# 选卡前如果正在构筑，选完回到构筑屏（材料变了，正好让玩家继续操作）
+	if not dead and build_root != null and not build_root.visible and _pick_from_build:
+		_toggle_build()
+	_pick_from_build = false
+	if pick_root != null:
+		for c in pick_root.get_children():
+			c.queue_free()
+
+
+## 领第 i 张卡
+func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_offer），以前漏了这个分支，
+	# 结果卡片点得动（button_down 有反应）但 pressed 永远落空、面板关不掉
+	if pick_mode == "chest":
+		_take_weapon_card(i)
+		return
+	if i < 0 or i >= offer.size():
+		return
+	var card: Dictionary = offer[i]
+	var id := String(card["id"])
+	if String(card["kind"]) == "buff":
+		buffs[id] = _bl(id) + 1
+		if id == "hp":
+			max_hp += 15.0
+			hp = minf(max_hp, hp + 15.0)
 	else:
-		_auto_place_best(i)
-	_refresh_build()
+		_add_inv(id, 1 + int(level / 12))
+	_close_pick()
+	_refresh_hud()
 
 
-## 把库存里的 mid 放进第 i 格，并登记成这一格的方案（方案 = 以后自动补料的目标）
-func _place_at(i: int, mid: String) -> bool:
-	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
-	if i < 0 or i >= sl.size() or not MODULES.has(mid) or _inv(mid) <= 0:
-		hand_mid = ""
-		return false
-	_add_inv(mid, -1)
-	if sl[i] != null:
-		_add_inv(String(sl[i]["id"]), 1)  # 原有的退回库存，等于覆盖
-	sl[i] = _new_module(mid)
-	plan[i] = mid
-	hand_mid = ""
-	return true
-
-
-## 卸下第 i 格：模块退回库存，方案清空
-func _uninstall(i: int) -> void:
-	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
-	if i < 0 or i >= sl.size():
+## 把配方卡 reroll 成第 4 张 buff（每级一次）
+func _reroll_recipe() -> void:
+	if reroll_used or picking == false or offer.size() < 4:
 		return
-	if sl[i] != null:
-		_add_inv(String(sl[i]["id"]), 1)
-	sl[i] = null
-	plan[i] = ""
+	if String(offer[3]["kind"]) != "recipe":
+		return
+	var used := {}
+	for c in offer:
+		if String(c["kind"]) == "buff":
+			used[String(c["id"])] = true
+	var pool: Array = []
+	for id in BUFFS:
+		if used.has(id):
+			continue
+		if _bl(id) >= int(BUFFS[id]["max"]):
+			continue
+		pool.append(id)
+	if pool.is_empty():
+		return
+	offer[3] = {"kind": "buff", "id": String(pool[rng.randi_range(0, pool.size() - 1)])}
+	reroll_used = true
+	_paint_offer()
 
-
-## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成方案
-func _auto_place_best(i: int) -> bool:
-	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
-	if i < 0 or i >= sl.size() or sl[i] != null:
-		return false
-	var best_id := ""
-	var best_v := _board_total(weapon)
-	for k in _stocked_ids():
-		sl[i] = _new_module(k)
-		var v := _board_total(weapon)
-		sl[i] = null
-		if v > best_v + 0.0001:
-			best_v = v
-			best_id = k
-	if best_id == "":
-		return false
-	plan[i] = best_id
-	_add_inv(best_id, -1)
-	sl[i] = _new_module(best_id)
-	return true
-
-
-## 自动配置方案（bot 与懒人用）：所有「空格子 + 没方案」都按最优填一次，填完固化成方案
-func _auto_plan_fill() -> void:
-	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
-	for i in sl.size():
-		if sl[i] == null and String(plan[i]) == "":
-			_auto_place_best(i)
-
-
-func _missing_cells(w = null) -> Array:
-	var ww: Dictionary = weapon if w == null else w
-	var out: Array = []
-	var sl: Array = ww["slots"]
-	var plan: Array = ww["plan"]
-	for i in sl.size():
-		if sl[i] == null and i < plan.size() and String(plan[i]) != "":
-			out.append(i)
-	return out
-
-
-func _slot_tip(i: int) -> String:
-	var parts: Array = ["槽 %d" % (i + 1)]
-	var m = weapon.slots[i]
-	if m != null:
-		var d: Dictionary = MODULES[String(m["id"])]
-		parts.append("%s · %d 阶 · 出力 %.1f · 剩余 %d/%d" % [
-			String(d["name"]), int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
-	else:
-		parts.append("空")
-	var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
-	if want != "":
-		parts.append("方案：%s%s" % [String(MODULES[want]["name"]),
-			"" if _inv(want) > 0 else "（库存缺料，攒够自动补）"])
-	parts.append("左键：装入手里的模块 / 自动补料　　右键：卸下")
-	return "\n".join(parts)
-
-
-## 随机掷数自检：每种武器 × 每个品级各掷 N 次，检查同类型内「低品级不会超过高品级」。
-## 打印每档的分数区间与 mul 区间，便于判断归一化是否把倍率推到不合理的位置。
-func _run_rolltest(n: int = 300) -> void:
-	print("== 武器随机掷数自检（每种每档 %d 次） ==" % n)
-	print("%-8s %-3s %8s %8s %8s %9s %9s" % ["类型", "档", "P0档分", "min", "max", "mul均", "倒挂"])
-	var total_bad := 0
-	var order := ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]
-	for id in order:
-		var p0 := p0_of(String(id))
-		var prev_max := -1.0
-		for q in range(1, 6):
-			var lo := 1e9
-			var hi := -1e9
-			var mul_sum := 0.0
-			for i in n:
-				var w := _make_weapon(String(id), q)
-				var sc := weapon_score(w)
-				lo = minf(lo, sc)
-				hi = maxf(hi, sc)
-				mul_sum += float(w["mul"])
-			var bad := 0
-			if prev_max >= 0.0 and lo <= prev_max:
-				bad = 1
-				total_bad += 1
-			prev_max = hi
-			print("%-8s %-3d %8.2f %8.2f %8.2f %9.2f %9s" % [
-				String(WEAPONS[id]["name"]) if q == 1 else "",
-				q, p0 * float(QM[q]), lo, hi, mul_sum / float(n),
-				"倒挂" if bad == 1 else "-"])
-		print("")
-	print("总倒挂次数 %d（必须为 0）" % total_bad)
 
 ## 品质色（宝箱卡与迷你电路板用）
 func _qcol(q: int) -> Color:
@@ -4057,3 +3745,409 @@ func _paint_replace() -> void:
 	var mini := _mini_board(w["layout"], qc, 22.0, 9.0)
 	mini.position = Vector2(760, 160)
 	pick_root.add_child(mini)
+
+
+
+
+# ============================================================================
+# 15. 调试与自测台
+# ============================================================================
+# --- 作弊码（debug 用） ---------------------------------------------------------
+# CLI: -- "cheat=rich,god,level,wave=15"（逗号分隔，可叠加）
+# 快捷键（任何时候）：F5 无敌开/关　F6 +100 基础　F7 等级 +5　F8 时间 +40s　F9 全套武器
+func _apply_cheats(spec: String) -> void:
+	for raw in spec.split(",", false):
+		var item := raw.strip_edges()
+		if item == "":
+			continue
+		var kv := item.split("=", true, 1)
+		var key := kv[0]
+		var val := int(kv[1]) if kv.size() > 1 else 0
+		match key:
+			"rich":
+				_add_inv("base", 500)
+				print("[cheat] +500 基础模块")
+			"modules":
+				for k in MOD_ORDER:
+					_add_inv(String(k), 20)
+				_add_inv("base", 300)
+				print("[cheat] 每种模块 +20，基础 +300")
+			"god":
+				god = true
+				print("[cheat] 无敌开")
+			"level":
+				level = maxi(level, 25 if val <= 0 else val)
+				print("[cheat] 等级 = %d" % level)
+			"wave":
+				elapsed = maxf(0.0, float(val - 1) * WAVE_SEC)
+				wave = maxi(1, val)
+				print("[cheat] 跳到第 %d 波（elapsed=%.0f）" % [wave, elapsed])
+			"weapons":
+				_give_all_weapons()
+				print("[cheat] 发全套武器，背包 %d" % weapons.size())
+			"devices":
+				var n: int = maxi(1, val if val > 0 else 5)
+				for i in n:
+					devices.append(_new_device())
+				print("[cheat] 装置 +%d（共 %d 台）" % [n, devices.size()])
+			"hp":
+				max_hp = 9999.0
+				hp = max_hp
+				print("[cheat] HP 拉满")
+			_:
+				print("[cheat] 未知作弊码：%s" % key)
+
+
+func _give_all_weapons() -> void:
+	for id in ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]:
+		# 背包是武器+装置共享的：作弊也别把它撑爆，否则「造装置」永远点不动
+		if weapons.size() >= maxi(1, backpack_cap - 1):
+			break
+		var w := _make_weapon(String(id), 5)
+		weapons.append(w)
+	_refresh_hud()
+
+
+func _cheat_key(k: int) -> bool:
+	match k:
+		KEY_F5:
+			god = not god
+			print("[cheat] 无敌 %s" % ("开" if god else "关"))
+		KEY_F6:
+			_add_inv("base", 100)
+			print("[cheat] +100 基础模块（库存 %d）" % _inv("base"))
+		KEY_F7:
+			level += 5
+			print("[cheat] 等级 +5 → %d" % level)
+		KEY_F8:
+			elapsed += WAVE_SEC
+			print("[cheat] 时间 +40s（wave 自动推进）")
+		KEY_F9:
+			_give_all_weapons()
+			print("[cheat] 发全套武器，背包 %d" % weapons.size())
+		_:
+			return false
+	_pass()
+	return true
+
+
+# --- 测试日志 ---------------------------------------------------------------
+# 每次自测都在 stdout 打一对 [TEST] 行：start 说明这次测的是什么配置，end 说明结果。
+# 目的：跑完不用回头翻参数，日志本身就是「测试内容 + 效果」的记录（也会同步到 docs/testlog.md）。
+func _test_banner() -> void:
+	var mode := "normal"
+	if playtest:
+		mode = "playtest"
+	elif bot:
+		mode = "bot"
+	elif shot_path != "":
+		mode = "shot"
+	if mode == "normal" and cheat_arg == "":
+		return
+	print("[TEST] start mode=%s seed=%d bot=%s autoplan=%s cheat=%s pt=%.0f pickdelay=%.2f start=%s tab=%d" % [
+		mode, absi(seed_used) % 1000000000, str(bot), str(autoplan),
+		("—" if cheat_arg == "" else cheat_arg), pt_limit, pick_delay, start_force, tab])
+
+
+func _test_end(reason: String) -> void:
+	if not (playtest or bot or shot_path != "" or cheat_arg != ""):
+		return
+	print("[TEST] end reason=%s t=%.0f wave=%d lvl=%d kills=%d dps=%.1f need=%.1f weapons=%d inv=%d dead=%s" % [
+		reason, elapsed, wave, level, kills_total, cur_actual_dps(),
+		_spawn_rate() * _wave_hp() * _plan_avg_mult(), weapons.size(), _inv_total(), str(dead)])
+
+
+func _push_btn(p: Vector2, pressed: bool) -> void:
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.position = p
+	ev.global_position = p
+	get_viewport().push_input(ev)
+
+
+## 拖拽演示：按下并拖到第 2 格上方但不松手，留着给截图用（幽灵 + 落点预览）
+func _dragdemo_pose() -> void:
+	tab = 0
+	_refresh_build()
+	await get_tree().process_frame
+	if inv_rows.is_empty() or slot_rects.size() < 2:
+		print("DRAGDEMO skip")
+		return
+	var row: Dictionary = inv_rows[0]
+	for r in inv_rows:
+		if String(r["mid"]) != "base":
+			row = r
+			break
+	var from: Vector2 = (row["rect"] as Rect2).get_center()
+	var to: Vector2 = (slot_rects[1] as Rect2).get_center() + Vector2(30, 26)
+	_push_btn(from, true)
+	var mm := InputEventMouseMotion.new()
+	mm.position = to
+	mm.global_position = to
+	get_viewport().push_input(mm)
+	print("DRAGDEMO active=%s mid=%s preview_shown=%s" % [str(drag.get("active", false)), String(row["mid"]), str(drag_hl.visible)])
+
+
+## 拖拽自检：真鼠标事件把库存第一行拖到第 2 格，打印前后槽位内容
+func _run_dragtest() -> void:
+	_toggle_build()
+	tab = 0
+	_refresh_build()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if inv_rows.is_empty() or slot_rects.size() < 2:
+		print("DRAGTEST skip inv=%d slots=%d" % [inv_rows.size(), slot_rects.size()])
+		get_tree().quit()
+		return
+	# 优先挑一个和当前槽位不同的模块，才能看出「真的换了 id」
+	var row: Dictionary = inv_rows[0]
+	for r in inv_rows:
+		if String(r["mid"]) != String(weapon.slots[1]["id"]) if weapon.slots[1] != null else true:
+			row = r
+			break
+	var mid := String(row["mid"])
+	var from: Vector2 = (row["rect"] as Rect2).get_center()
+	var to: Vector2 = (slot_rects[1] as Rect2).get_center()
+	var before := str(weapon.slots[1])
+	var inv_before := _inv(mid)
+	_push_btn(from, true)
+	var mm := InputEventMouseMotion.new()
+	mm.position = to
+	mm.global_position = to
+	get_viewport().push_input(mm)
+	_push_btn(to, false)
+	print("DRAGTEST mid=%s inv %d->%d  slot1 %s -> %s  plan1=%s  active=%s" % [
+		mid, inv_before, _inv(mid), before, str(weapon.slots[1]), str(weapon.plan[1]), str(drag.get("active", false))])
+	get_tree().quit()
+
+
+## 电路板规则自检：金 6 槽 2×3 密堆，摆下共振×2 / 增幅 / 加法 / 基础×2
+## 期望：out = [40.5, 45.5, 0, 1, 5, 6]  power = 100.0
+func _boardtest(delta: float) -> void:
+	if not bt_set:
+		bt_set = true
+		_set_quality(5)
+		weapon["mul"] = 1.0  # 把武器倍率钉成 1.0，否则随机开局的霰弹枪 1.11 会让自检数字飘
+		# 布局改成随机的了，但自检要的是固定 2×3，否则期望值对不上
+		weapon["layout"] = (LAYOUTS[5] as Array).duplicate()
+		while (weapon["slots"] as Array).size() < 6:
+			weapon["slots"].append(null)
+		weapon.interval = 1.0 if demo_board else 999.0  # 自检时不开火，排除弹药消耗的干扰
+		weapon.slots[0] = _new_module("reson")  # 共振（邻 1 共振、3 基础）
+		weapon.slots[1] = _new_module("reson")  # 共振（邻 0 共振、2 增幅、4 加法）
+		weapon.slots[2] = _new_module("amp")  # 增幅（邻 1、5）
+		weapon.slots[3] = _new_module("base")  # 基础（邻 0、4）
+		weapon.slots[4] = _new_module("add")  # 加法（邻 1、3、5）
+		weapon.slots[5] = _new_module("base")  # 基础（邻 2、4）
+		print("BOARD set  out=", _slot_out(), " power=", _shot_power())
+	bt_print += delta
+	if bt_print >= 0.5:
+		bt_print = 0.0
+		print("t=%4.1f  out=%s  power=%5.1f" % [elapsed, str(_slot_out()), _shot_power()])
+	if elapsed > 10.0 and shot_path == "":
+		get_tree().quit()
+
+
+func _playtest_step(delta: float) -> void:
+	pt_t += delta
+	if bot:
+		_bot_step(delta)
+	if pt_t - pt_print >= 5.0:
+		pt_print = pt_t
+		_pt_log()
+	if pt_limit > 0.0 and pt_t >= pt_limit:
+		_test_end("limit")
+		get_tree().quit()
+
+
+## 简化版「玩家」：优先把空闲装置填满（合成是唯一把材料变成出力的手段），
+## 装置全忙且基础模块堆积时再造一台（变相缩短合成时间），每 3 次决策升一次级。
+func _bot_step(delta: float) -> void:
+	bot_t += delta
+	if bot_t < 0.5:
+		return
+	bot_t = 0.0
+	bot_ticks += 1
+	# 升级与合成抢同一批材料：只在材料明显富余时升级，否则板子会被饿空
+	if bot_ticks % 3 == 0 and _inv_total() >= level_cost() * 2:
+		try_level()
+	# 每 ~4 秒把编辑目标切到「最空的那把枪」，让材料摊到各把武器上（否则全堆在第一把）
+	if bot_ticks % 8 == 0:
+		var pick_i := sel
+		var best_n := 99
+		for i in weapons.size():
+			var n2 := 0
+			for m2 in weapons[i]["slots"]:
+				if m2 != null:
+					n2 += 1
+			if n2 < best_n:
+				best_n = n2
+				pick_i = i
+		_use_weapon(pick_i)
+	var guard := 0
+	while guard < 4 and try_craft():
+		guard += 1
+	# 装置越多越好（每台 = 一个并行合成位），别等全忙了才想起来造
+	if devices.size() < DEVICE_MAX and _inv("base") >= device_cost():
+		buy_device()
+	if _inv_total() >= level_cost() * 3:
+		try_level()
+
+
+## 机器人走位：只躲「能秒人的东西」（子弹、冲刺精英的蓄力线），不躲杂兵。
+## 原因：脉冲式武器最怕把怪拉成一长串尾巴——只有扎进怪堆里，一次开火才清得动。
+func _bot_move(delta: float) -> void:
+	# 注意：条件里不能加 playtest——截图模式（shotbot）也要让 bot 动，否则它站着不动、
+	# 捡不到宝箱，拍出来的图跟无头测试的结果完全对不上。
+	if not bot or player == null or dead:
+		return
+	var push := Vector2.ZERO
+	for b in get_tree().get_nodes_in_group("bullet"):
+		if not is_instance_valid(b):
+			continue
+		var to_p: Vector2 = player.position - b.position
+		var d := to_p.length()
+		if d < 190.0 and d > 1.0:
+			var side: float = signf(to_p.cross(b.dir))
+			if side == 0.0:
+				side = 1.0
+			push += b.dir.rotated(side * PI * 0.5) * (1.0 - d / 190.0) * 2.6
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e):
+			continue
+		var to_e: Vector2 = player.position - e.position
+		var de := to_e.length()
+		# 贴脸才退（不是风筝）——站着打才清得动，但也不能让怪白贴
+		if de < 70.0 and de > 1.0:
+			push += to_e / de * (1.0 - de / 70.0) * 0.6
+		if e.kind != "charger":
+			continue
+		if e.windup <= 0.0:
+			continue
+		var to_c: Vector2 = player.position - e.position
+		var dc := to_c.length()
+		if dc < 460.0 and dc > 1.0:
+			var side2: float = signf(to_c.cross(e.facing))
+			if side2 == 0.0:
+				side2 = 1.0
+			push += e.facing.rotated(side2 * PI * 0.5) * 2.4
+	# 宝箱是主要成长来源，有箱子就顺路去捡（躲子弹仍优先，因为权重更大）
+	var best: Node2D = null
+	var best_d := 760.0
+	for c in get_tree().get_nodes_in_group("chest"):
+		if not is_instance_valid(c):
+			continue
+		var dd: float = player.position.distance_to(c.position)
+		if dd < best_d:
+			best_d = dd
+			best = c
+	if best != null and best_d > 26.0:
+		push += player.position.direction_to(best.position) * 4.0
+	if push.length() > 0.05:
+		player.position += push.normalized() * float(player.SPEED) * delta
+		if player.position.length() > 1100.0:
+			player.position = player.position.normalized() * 1100.0
+
+
+func _pt_log() -> void:
+	# 需求 DPS = 每秒进来的总血量 = 刷怪速度 × 单个基础血 × 本波平均血量倍率
+	var need: float = _spawn_rate() * _wave_hp() * _plan_avg_mult()
+	var comp := ""
+	var bw: Dictionary = _board_weapon()
+	for m in bw["slots"]:
+		comp += "." if m == null else str(int(m.tier))
+	var bfill := 0
+	for m in bw["slots"]:
+		if m != null:
+			bfill += 1
+	var bmiss := 0
+	for i in (bw["plan"] as Array).size():
+		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
+			bmiss += 1
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f bw=%d" % [
+		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
+		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
+		_busy_devices(), devices.size(), comp, _inv_str(),
+		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
+		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
+		get_tree().get_nodes_in_group("enemy").size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_bulwark(),
+	])
+
+
+## 调试统计：FPS / 敌人数 / 可见敌人数 / 帧耗时。
+## 关闭 F3 面板时仍然维护常驻的那一小段（可见数 O(n) 遍历只在 0.25s 一次）
+func _update_debug(delta: float) -> void:
+	frame_ms = delta * 1000.0
+	frame_ms_max = maxf(frame_ms_max * 0.97, frame_ms)
+	dbg_acc += delta
+	if dbg_acc < 0.25:
+		return
+	dbg_acc = 0.0
+	var enemies := get_tree().get_nodes_in_group("enemy")
+	var t0 := Time.get_ticks_usec()
+	var ct: Transform2D = get_viewport().get_canvas_transform()
+	var vis := 0
+	for e in enemies:
+		var p: Vector2 = ct * (e as Node2D).global_position
+		if p.x >= 0.0 and p.y >= 0.0 and p.x <= 1280.0 and p.y <= 720.0:
+			vis += 1
+	vis_enemy = vis
+	enemy_ms = float(Time.get_ticks_usec() - t0) / 1000.0
+	if hud_stat != null:
+		hud_stat.text = "FPS %d · 敌 %d(可见 %d)" % [
+			int(Engine.get_frames_per_second()), enemies.size(), vis]
+	_refresh_dbg_panel(enemies.size())
+
+
+func _refresh_dbg_panel(enemy_total: int) -> void:
+	if dbg_text == null or not dbg_on:
+		return
+	dbg_text.text = "\n".join([
+		"FPS %d   帧 %.1fms   峰 %.1fms" % [int(Engine.get_frames_per_second()), frame_ms, frame_ms_max],
+		"敌人 %d   可见 %d   上限 %d   刷怪 %.2f/s" % [enemy_total, vis_enemy, MAX_ENEMIES, _spawn_rate()],
+		"掉落 %d   子弹 %d   宝箱 %d" % [
+			get_tree().get_nodes_in_group("pickup").size(),
+			get_tree().get_nodes_in_group("bullet").size(),
+			get_tree().get_nodes_in_group("chest").size()],
+		"需求 %.1f   实测 %.1f   需求比 %s" % [
+			_spawn_rate() * _wave_hp() * _plan_avg_mult(), cur_actual_dps(),
+			"%.0f%%" % (100.0 * _spawn_rate() * _wave_hp() * _plan_avg_mult() / maxf(cur_actual_dps(), 1.0))],
+		"敌人统计耗时 %.2fms" % enemy_ms,
+		"波次 %d   时间 %s   种子 %d   击杀 %d" % [wave, _fmt_time(elapsed), absi(seed_used) % 1000000000, kills_total],
+	])
+
+
+## 随机掷数自检：每种武器 × 每个品级各掷 N 次，检查同类型内「低品级不会超过高品级」。
+## 打印每档的分数区间与 mul 区间，便于判断归一化是否把倍率推到不合理的位置。
+func _run_rolltest(n: int = 300) -> void:
+	print("== 武器随机掷数自检（每种每档 %d 次） ==" % n)
+	print("%-8s %-3s %8s %8s %8s %9s %9s" % ["类型", "档", "P0档分", "min", "max", "mul均", "倒挂"])
+	var total_bad := 0
+	var order := ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]
+	for id in order:
+		var p0 := p0_of(String(id))
+		var prev_max := -1.0
+		for q in range(1, 6):
+			var lo := 1e9
+			var hi := -1e9
+			var mul_sum := 0.0
+			for i in n:
+				var w := _make_weapon(String(id), q)
+				var sc := weapon_score(w)
+				lo = minf(lo, sc)
+				hi = maxf(hi, sc)
+				mul_sum += float(w["mul"])
+			var bad := 0
+			if prev_max >= 0.0 and lo <= prev_max:
+				bad = 1
+				total_bad += 1
+			prev_max = hi
+			print("%-8s %-3d %8.2f %8.2f %8.2f %9.2f %9s" % [
+				String(WEAPONS[id]["name"]) if q == 1 else "",
+				q, p0 * float(QM[q]), lo, hi, mul_sum / float(n),
+				"倒挂" if bad == 1 else "-"])
+		print("")
+	print("总倒挂次数 %d（必须为 0）" % total_bad)
+
+
