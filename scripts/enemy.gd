@@ -34,6 +34,9 @@ var orbit_dir := 1.0
 var hold_bias := 0.0
 var _g: Node = null
 var facing := Vector2.RIGHT
+var age := 0.0
+## 出生预兆：>0 时冻结不动、只画半透明轮廓 + 收缩圆环（bulwark 用）
+var telegraph := 0.0
 
 ## 通用计时
 var shoot_t := 0.0
@@ -144,6 +147,15 @@ func _draw() -> void:
 	if hit > 0.0:
 		body = body.lerp(Color(1, 1, 1), clampf(hit / 0.18, 0.0, 1.0) * 0.85)
 	var r := radius * (1.0 + hit * 0.6)
+
+	if telegraph > 0.0:
+		# 预兆：只画半透明轮廓 + 一圈收缩光环，玩家有 1~2 秒可以改方向
+		var a := 0.30 + 0.45 * clampf(1.0 - telegraph / 2.1, 0.0, 1.0)
+		draw_circle(Vector2.ZERO, r, Color(body_color.r, body_color.g, body_color.b, a * 0.45))
+		draw_arc(Vector2.ZERO, r + 4.0, 0.0, TAU, 24, Color(1.0, 0.35, 0.35, a), 2.5, true)
+		draw_arc(Vector2.ZERO, r * (1.0 + telegraph * 1.6), 0.0, TAU, 24,
+			Color(1.0, 0.5, 0.5, a * 0.7), 2.0, true)
+		return
 
 	if kind == "runner":
 		# 尖头三角：一眼能看出它冲得快

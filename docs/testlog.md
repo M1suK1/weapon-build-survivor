@@ -32,3 +32,23 @@
 - **目的**：确认「槽位方案 + 自动配置方案」没有把 bot 的构筑能力改坏（对比 U3 之前的最好成绩 t≈896 / wave 23）。
 - **关键输出**：`[TEST] start mode=playtest seed=907590879 bot=true autoplan=true`；全程 `slot=4/4 miss=0`（每一格的方案都补得上）；`[TEST] end reason=dead t=781 wave=20 lvl=28 kills=7477 dps=522.6 need=880.9 weapons=3 inv=336`。
 - **结论**：通过，但与 U3 之前的 t≈896 基本同档（差 13%），说明蓝图系统本身不拖后腿。真正的死因是 **wave 19 起 `need` 跳到 955 而实测 DPS 只有 522**（缺口约 45%），同时库存涨到 336 个基础模块根本来不及合成 —— 瓶颈已经从「构筑能力」转移到「需求曲线的陡降点」和「经济溢出」，留给后面的数值 / 装置阶段处理。
+## V1 装置指派
+
+- 命令：`.\run.cmd`（人工）＋`godot --headless --path . -- playtest bot pt=90`
+- 目的：确认装置能指定配方、进度条走完产出、取消能全额返还
+- 关键输出：`dev=1/1`（装置在忙）、`crafted` 计数上升；`devpick=0` 截图里未解锁配方的「开始」按钮已压暗
+- 结论：装置不再空转；`kind` 存的是模块 id 字符串，判定必须用 `String(d["kind"]) != ""`（用 int 会永远判成空闲）
+
+## V2 鼠标拖拽
+
+- 命令：`godot --path . --resolution 1280x720 -- dragtest "cheat=modules"`
+- 目的：用真实鼠标事件验证「库存行 → 电路板格子」的拖放真的生效
+- 关键输出：`DRAGTEST mid=add inv 20->19  slot1 {id:base} -> {id:add}  plan1=add`
+- 结论：拖放、方案写入、库存扣减都对；**命中判定必须用事件坐标**（`get_global_transform_with_canvas().affine_inverse() * ev.position`），`get_local_mouse_position()` 读的是系统光标，压测时不会动，会永远落空
+
+## V3 bulwark
+
+- 命令：`godot --headless --path . -- playtest bot pt=180`
+- 目的：确认前方撞墙怪会按 16 秒节奏生成，并且不会无限堆积
+- 关键输出：`t= 90 … bw=2` / `t=140 … bw=3` / `t=170 … bw=3`（`bw=` 是 `_count_bulwark()`）
+- 结论：生成与上限正常；截图 `docs/screenshots/bulwark.png` 能看到 0.9~2.1s 的依次浮现（半透明方块 + 红环）

@@ -130,6 +130,8 @@ const ENEMY_KINDS := {
 	"shooter": {"speed": 70.0, "hp_mult": 1.71, "radius": 12.0, "color": Color(0.62, 0.86, 1.00)},
 	# 精英血量是手设的 9.0（不套公式：它靠冲刺而非堆血量制造威胁）
 	"charger": {"speed": 78.0, "hp_mult": 9.00, "radius": 20.0, "color": Color(1.00, 0.36, 0.42)},
+	# bulwark：慢速高血量「墙」，专在玩家前方生成逼走位（docs/plan-v3.md §3）
+	"bulwark": {"speed": 46.0, "hp_mult": 4.20, "radius": 22.0, "color": Color(0.44, 0.72, 0.62)},
 }
 
 ## 波次编成：coeff = 总血量预算系数（1.0 = 涌潮基准），kinds = 相对权重。
@@ -243,6 +245,10 @@ var uitest := false
 var uitest_step := 0
 var drag_test := false
 var drag_demo := false
+# --- bulwark（前方撞墙怪）---
+var bulwark_t := 10.0
+var last_move_dir := Vector2.RIGHT
+var prev_ppos := Vector2.ZERO
 var dt_step := 0
 var tab := 0
 var tab_bar: Control = null
@@ -1107,7 +1113,14 @@ func _physics_process(delta: float) -> void:
 	if wave != prev_wave:
 		_on_wave_start()
 	_bot_move(delta)
+	# 记录玩家真实移动方向：bulwark 要生成在「玩家正在走的方向」前面堵路
+	if player != null:
+		var dp := player.position - prev_ppos
+		if dp.length() > 0.5:
+			last_move_dir = dp.normalized()
+		prev_ppos = player.position
 	_spawn(delta)
+	_tick_bulwark(delta)
 	_craft_tick(delta)
 	if autoplan:
 		_auto_plan_all()
@@ -1266,13 +1279,13 @@ func _pt_log() -> void:
 	for i in (bw["plan"] as Array).size():
 		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
 			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f bw=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		get_tree().get_nodes_in_group("enemy").size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y,
+		get_tree().get_nodes_in_group("enemy").size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_bulwark(),
 	])
 
 
@@ -1953,7 +1966,7 @@ func _spawn_enemy(forced: String = "") -> void:
 	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX), forced)
 
 
-func _spawn_enemy_at(pos: Vector2, forced: String = "") -> void:
+func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
 	var kind := forced if forced != "" else _pick_kind()
 	var kd: Dictionary = ENEMY_KINDS[kind]
 	var e = Node2D.new()
@@ -1969,6 +1982,55 @@ func _spawn_enemy_at(pos: Vector2, forced: String = "") -> void:
 	e.hp = e.max_hp
 	e.speed = float(kd["speed"]) * (1.0 + wave * 0.01)
 	add_child(e)
+	return e
+
+
+## 同屏 bulwark 数量
+func _count_bulwark() -> int:
+	var n := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if String(e.kind) == "bulwark":
+			n += 1
+	return n
+
+
+## 每 16 秒在玩家「前进方向 ±50°」排一堵慢速高血量墙：往前走就会被撞上（docs/plan-v3.md §3.2）
+func _tick_bulwark(delta: float) -> void:
+	if wave >= 3:
+		bulwark_t -= delta
+		if bulwark_t <= 0.0:
+			bulwark_t = 16.0
+			_spawn_bulwark_arc()
+	_recycle_bulwark()
+
+
+func _spawn_bulwark_arc() -> void:
+	var cap := mini(14, 2 + int(wave / 4.0))
+	var n := mini(4, cap - _count_bulwark())
+	if n <= 0:
+		return
+	var dir := last_move_dir
+	if dir.length() < 0.1:
+		dir = Vector2.from_angle(rng.randf() * TAU)
+	var base_ang := dir.angle()
+	for i in n:
+		var a := base_ang + lerpf(-0.87, 0.87, (float(i) + 0.5) / float(n))
+		var pos := player.position + Vector2.from_angle(a) * rng.randf_range(380.0, 460.0)
+		var e := _spawn_enemy_at(pos, "bulwark")
+		if e != null:
+			# 依次浮现 0.9s / 1.5s / 2.1s …，像一堵墙慢慢立起来
+			e.telegraph = 0.9 + 0.6 * float(i)
+
+
+## 跑到玩家身后很远、又活得够久的 bulwark 直接回收，免得越积越多
+func _recycle_bulwark() -> void:
+	if int(elapsed * 2.0) % 4 != 0:
+		return
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if String(e.kind) != "bulwark":
+			continue
+		if float(e.age) > 6.0 and (e.position - player.position).dot(last_move_dir) < -1600.0:
+			e.queue_free()
 
 
 ## 开火：每把武器各自按自己的间隔寻找目标。
