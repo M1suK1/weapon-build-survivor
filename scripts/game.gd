@@ -241,6 +241,10 @@ var build_close_btn: Button = null
 var build_back_btn: Button = null
 var uitest := false
 var uitest_step := 0
+var tab := 0
+var tab_bar: Control = null
+var tab_body: Control = null
+var tab_btns: Array = []
 var dbg_acc := 0.0
 var _pick_from_build := false
 var pick_mode := "level"
@@ -301,6 +305,8 @@ func _ready() -> void:
 			pick_delay = float(a.substr(10))
 		elif a == "rolltest":
 			roll_test = true
+		elif a.begins_with("tab="):
+			tab = int(a.substr(4))
 		elif a == "uitest":
 			uitest = true
 		elif a == "swarmtest":
@@ -383,7 +389,8 @@ func _idle_device() -> int:
 func _busy_devices() -> int:
 	var n := 0
 	for d in devices:
-		if String(d["kind"]) != "":
+		# kind 是 int（0 = 空闲）。以前写 String(kind) != ""，恒为真 → 空闲数永远显示 0
+		if int(d["kind"]) != 0:
 			n += 1
 	return n
 
@@ -502,10 +509,25 @@ func _make_hud() -> void:
 	build_root.add_child(board_root)
 
 	build_info = Label.new()
-	build_info.position = Vector2(660, 190)
-	build_info.add_theme_font_size_override("font_size", 17)
+	build_info.position = Vector2(660, 176)
+	build_info.add_theme_font_size_override("font_size", 16)
 	build_info.add_theme_color_override("font_color", Color(0.82, 0.88, 0.98))
 	build_root.add_child(build_info)
+
+	# 右栏三标签页：库存 / 配方 / 装置（见 docs/plan-ui-v1.md §2.1）
+	tab_bar = Control.new()
+	tab_bar.position = Vector2(660, 230)
+	build_root.add_child(tab_bar)
+	var tab_names := ["库存", "配方", "装置"]
+	for i in 3:
+		var tb := UIKit.button(tab_names[i], Vector2(88, 30), UIKit.C_BLUE, 15)
+		tb.position = Vector2(i * 96, 0)
+		tb.pressed.connect(_set_tab.bind(i))
+		tab_bar.add_child(tb)
+		tab_btns.append(tb)
+	tab_body = Control.new()
+	tab_body.position = Vector2(660, 272)
+	build_root.add_child(tab_body)
 
 	flash = ColorRect.new()
 	flash.color = Color(1, 0.2, 0.25, 0.0)
@@ -2707,42 +2729,140 @@ func _refresh_build() -> void:
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []
-	var inv_parts: Array = []
-	for k in _ids_all():
-		if _inv(k) > 0:
-			inv_parts.append("%s %d" % [String(MODULES[k]["name"]), _inv(k)])
-	if inv_parts.is_empty():
-		inv_parts.append("空")
-	info.append("库存    " + "    ".join(inv_parts))
-	info.append("受击补偿    +%d 个模块（每 %d HP 补 1 个）" % [
-		modules_from_damage, int(DAMAGE_PER_MODULE)
-	])
-	info.append("等级 %d  →  %d     需要 %d 个模块     [U]" % [
-		level, level + 1, level_cost()
-	])
-	info.append("配方 %d/%d   [Q]/[E] 翻页    [C] 合成选中    装置 %d 台（空闲 %d）" % [
-		recipe_sel + 1, MOD_ORDER.size(), devices.size(), devices.size() - _busy_devices()
-	])
-	# 只显示 8 行窗口：配方有 20 个，全列会顶出屏幕
-	var first := maxi(0, mini(recipe_sel - 3, MOD_ORDER.size() - 8))
-	for i in range(first, mini(MOD_ORDER.size(), first + 8)):
-		var mid: String = MOD_ORDER[i]
-		var st := recipe_state(mid)
-		var t := int(st["tier"])
-		var mark := "▸" if i == recipe_sel else " "
-		info.append("  %s %-6s %d×%d阶  %4.0fs  %s" % [
-			mark, String(MODULES[mid]["name"]), int(st["cost"]), t - 1,
-			float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft"))), String(st["state"])
-		])
-	if devices.size() < DEVICE_MAX:
-		info.append("    [X] 造装置  需要 %d 个基础模块" % device_cost())
-	else:
-		info.append("    [X] 装置已满（%d 台）" % devices.size())
-	info.append("")
-	info.append("净弹药 %+.2f/s     实测 DPS %.1f     理论 DPS %.1f" % [
+	info.append("等级 %d  →  %d     需要 %d 个模块（库存 %d）" % [level, level + 1, level_cost(), _inv_total()])
+	info.append("受击补偿 +%d     装置 %d 台（空闲 %d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
+		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
 	])
 	build_info.text = "\n".join(info)
+	_rebuild_tab()
+	_highlight_tab()
+
+
+func _set_tab(i: int) -> void:
+	tab = i
+	_refresh_build()
+
+
+func _highlight_tab() -> void:
+	for i in tab_btns.size():
+		(tab_btns[i] as Button).modulate = Color(1, 1, 1) if i == tab else Color(0.58, 0.63, 0.72)
+
+
+## 右栏标签页内容。每次重建（行数不大，重建比增量更新简单可靠）
+func _rebuild_tab() -> void:
+	if tab_body == null:
+		return
+	for c in tab_body.get_children():
+		c.queue_free()
+	if tab == 0:
+		_rebuild_tab_inv()
+	elif tab == 1:
+		_rebuild_tab_recipe()
+	else:
+		_rebuild_tab_device()
+
+
+func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, enabled := true, tip := "") -> void:
+	var chip := ColorRect.new()
+	chip.color = col
+	chip.position = Vector2(0, y + 8)
+	chip.size = Vector2(10, 18)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tab_body.add_child(chip)
+	var l := _label(tab_body, Vector2(20, y + 4), 15, UIKit.C_TEXT)
+	l.text = text
+	if btn != "":
+		var b := UIKit.button(btn, Vector2(66, 28), UIKit.C_GREEN if enabled else UIKit.C_DIM, 14)
+		b.position = Vector2(524, y)
+		b.disabled = not enabled
+		if tip != "":
+			b.tooltip_text = tip
+		b.pressed.connect(cb)
+		tab_body.add_child(b)
+
+
+func _rebuild_tab_inv() -> void:
+	var y := 0.0
+	var any := false
+	for k in _ids_all():
+		var mid := String(k)
+		var n := _inv(mid)
+		if n <= 0:
+			continue
+		any = true
+		var d: Dictionary = MODULES[mid]
+		_tab_row(y, "%s  ×%d      %d 阶    出力 %.1f    寿命 %d" % [
+			String(d["name"]), n, int(d["tier"]), float(d["rate"]), int(d["uses"])
+		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "装入",
+			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格")
+		y += 34.0
+	if not any:
+		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "库存空：打怪掉落会先进这里"
+
+
+func _rebuild_tab_recipe() -> void:
+	var y := 0.0
+	var locked := 0
+	for k in MOD_ORDER:
+		var mid := String(k)
+		var st := recipe_state(mid)
+		var d: Dictionary = MODULES[mid]
+		var t := int(d["tier"])
+		var sec := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
+		var ok := bool(st["ok"])
+		if String(st["state"]).begins_with("解锁"):
+			locked += 1
+			continue
+		_tab_row(y, "%s   %d×%d阶   %.0fs   %s" % [
+			String(d["name"]), int(st["cost"]), t - 1, sec, String(st["state"])
+		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "合成",
+			_craft_from_tab.bind(mid), ok, String(st["state"]))
+		y += 34.0
+		if y > 300.0:
+			break
+	if y == 0.0:
+		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "还没有解锁任何配方（升级会解锁）"
+	if locked > 0:
+		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "还有 %d 个配方未解锁（等级不够 / 没有对应武器）" % locked
+
+
+func _rebuild_tab_device() -> void:
+	var y := 0.0
+	for i in devices.size():
+		var dv: Dictionary = devices[i]
+		var kind := int(dv["kind"])
+		var busy := kind != 0
+		var txt := "装置 %d    空闲" % (i + 1)
+		if busy:
+			txt = "装置 %d    合成 %s    剩余 %.1fs" % [
+				i + 1, String(MODULES[MOD_ORDER[kind - 1]]["name"]), float(dv["left"])]
+		_tab_row(y, txt, UIKit.C_GOLD if busy else UIKit.C_DIM, "", Callable(), false)
+		y += 34.0
+	if devices.size() < DEVICE_MAX and y < 300.0:
+		_tab_row(y, "再造一台装置（需要 %d 个基础模块）" % device_cost(), UIKit.C_BLUE, "造",
+			_buy_device_from_tab, _inv("base") >= device_cost(), "吃基础模块；装置越多并行合成越快")
+	elif devices.size() >= DEVICE_MAX:
+		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
+
+
+func _craft_from_tab(mid: String) -> void:
+	try_craft(mid)
+	_refresh_build()
+
+
+func _buy_device_from_tab() -> void:
+	buy_device()
+	_refresh_build()
+
+
+## 从库存取出一个模块装进当前武器；装不下会自动退回库存（_install 的兜底）
+func _install_from_inv(mid: String) -> void:
+	if _inv(mid) <= 0:
+		return
+	_take_inv(mid, 1)
+	_install(mid)
+	_refresh_build()
 
 
 ## 电路板视图：槽位按真实网格摆放，相邻槽位连线

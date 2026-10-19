@@ -292,3 +292,12 @@
 - 新增 `uitest` CLI：打印 `UIKit.diag()` + 闭合按钮的 `get_global_rect()`，再用 `push_input` 合成一次真实左键点击验证。
   实测（**窗口模式**）：`viewport=(1280,720) content_scale=(1280,720) factor=1.00`、`close_rect=(1228,18,34,38)`、`after_click build_visible=false` → 坐标是 1:1，不需要补偿。
   注意：`--headless` 下 `push_input` 不会派发到 GUI（`after_click build_visible=true`，误报），验证点击必须开窗口跑。
+### U2 构筑屏三标签页 —— 已完成
+
+- 右栏拆成 `[库存] [配方] [装置]` 三个标签（`_set_tab` / `_rebuild_tab` / `_highlight_tab`，当前页按钮提亮，其余 72% 亮度）。
+- **库存**：一行一个 id（色块 + 名称 + 数量 + 阶 + 出力 + 寿命），右侧「装入」按钮 → `_install_from_inv(mid)`（先从库存扣 1 个再 `_install`，装不进去会自动退回库存，不会丢）。
+- **配方**：只列已解锁的，每行「合成」按钮 → `try_craft(mid)`；未达等级 / 没有绑定武器的配方不显示，底部一行 `还有 N 个配方未解锁`。
+- **装置**：每台一行（编号 + 空闲 / 正在合成什么 + 剩余秒数），底部「再造一台（需要 N 个基础模块）」按钮。
+- 顶栏两行摘要：`等级 x→y 需要 N（库存 M）` / `受击补偿 · 装置 N 台（空闲 M）· 净弹药 · 实测/理论`。
+- 顺手修 bug：`_busy_devices()` 原来用 `String(d["kind"]) != ""` 判断，int 转字符串永远非空 → 空闲装置数恒为 0。
+- 新增 `tab=<0|1|2>` CLI（截图/自测直接打开某一页）。
