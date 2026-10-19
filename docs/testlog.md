@@ -52,3 +52,11 @@
 - 目的：确认前方撞墙怪会按 16 秒节奏生成，并且不会无限堆积
 - 关键输出：`t= 90 … bw=2` / `t=140 … bw=3` / `t=170 … bw=3`（`bw=` 是 `_count_bulwark()`）
 - 结论：生成与上限正常；截图 `docs/screenshots/bulwark.png` 能看到 0.9~2.1s 的依次浮现（半透明方块 + 红环）
+## V4 修复两条反馈
+
+- 命令：`godot --headless --path . -- playtest bot pt=600`
+- 目的：确认自测里「高级模块不再顶掉已装模块」，同时机器人不会因此退化成全基础模块
+- 关键输出（修前）：`[TEST] end reason=limit t=400 wave=11 dps=35.0 need=44.7`
+- 关键输出（修后）：`t=586 w=15 dps=237.2 need=169.6 lvl=22 slot=4/4 miss=0 [2233] dev=3/3`、`[TEST] end t=600 wave=16 lvl=23 dps=136.3 need=222.0`
+- 结论：`_install` 在 autoplan/playtest/bot 下只填空槽；方案升级改成「寿命剩 25% 以下时才把 plan 改写成更高阶」，等烧空时由 `_refill` 按新方案补货 —— 既不顶掉模块，也不卡在 T1。另修 `_auto_plan_all` 用 `sel = i` 切武器无效（`weapon` 是别名，必须 `_use_weapon`）。
+- 装置按钮：`buy_device()` 需要 `背包 < 6`，之前背包满时按钮看着能点其实无效；现在按钮禁用 + 红字说明原因，并提供「丢弃当前武器（腾格子）」。

@@ -420,6 +420,9 @@ func _ready() -> void:
 	# bot / playtest 默认把所有装置设成自动，等价于旧版「装置一直在干活」的行为
 	if (playtest or bot) and not no_auto_craft:
 		_sync_device_auto(true)
+	# 自测里自动配置方案默认开着：否则「只填空槽」的规则会让机器人永远停在基础模块上
+	if (playtest or bot) and not noautoplan:
+		autoplan = true
 	_refresh_hud()
 	_test_banner()
 
@@ -473,7 +476,8 @@ func _apply_cheats(spec: String) -> void:
 
 func _give_all_weapons() -> void:
 	for id in ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]:
-		if weapons.size() >= 12:
+		# 背包是武器+装置共享的：作弊也别把它撑爆，否则「造装置」永远点不动
+		if weapons.size() >= maxi(1, backpack_cap - 1):
 			break
 		var w := _make_weapon(String(id), 5)
 		weapons.append(w)
@@ -535,9 +539,9 @@ func _test_end(reason: String) -> void:
 func _auto_plan_all() -> void:
 	var keep := sel
 	for i in weapons.size():
-		sel = i
+		_use_weapon(i)
 		_auto_plan_fill()
-	sel = keep
+	_use_weapon(keep)
 
 ## bot 专用：方案里写的模块补不上时（库存没有那个 id，或那个 id 只能靠合成），
 ## 每 2 秒允许把缺料格子的方案改写成「当前库存里整板增益最大」的 id。
@@ -557,7 +561,13 @@ func _auto_plan_fix(delta: float) -> void:
 				continue
 			var best_id := ""
 			var best_v := _board_total(weapon)
+			# 只允许「不降阶」的改写：否则库存里只剩基础模块时，方案会被改写成基础，整板跟着退化
+			var floor_t := 1
+			if want != "" and MODULES.has(want):
+				floor_t = int(MODULES[want]["tier"])
 			for k in _stocked_ids():
+				if MODULES.has(k) and int(MODULES[k]["tier"]) < floor_t:
+					continue
 				weapon.slots[i] = _new_module(k)
 				var v := _board_total(weapon)
 				weapon.slots[i] = null
@@ -567,8 +577,34 @@ func _auto_plan_fix(delta: float) -> void:
 			if best_id == "":
 				continue
 			weapon.plan[i] = best_id
-			_add_inv(best_id, -1)
-			weapon.slots[i] = _new_module(best_id)
+			_refill(i)
+		# 已装但快烧空的格子：只把方案改成「库存里更强」的 id，不立刻顶掉模块。
+		# 等这一格烧空时 _refill 会按新方案补货 —— 既满足「不自动替换已装模块」，
+		# 又不会让机器人永远停在基础模块上。
+		for i in (weapon["slots"] as Array).size():
+			var m = weapon.slots[i]
+			if m == null:
+				continue
+			var ratio := float(m["left"]) / maxf(float(m.get("max", 1.0)), 0.001)
+			if ratio > 0.25:
+				continue
+			var cur := String(m["id"])
+			var best2 := ""
+			var best_v2 := _board_total(weapon)
+			var cur_t: int = int(MODULES[cur]["tier"]) if MODULES.has(cur) else 1
+			for k in _stocked_ids():
+				if k == cur or _inv(k) <= 0:
+					continue
+				if MODULES.has(k) and int(MODULES[k]["tier"]) <= cur_t:
+					continue
+				weapon.slots[i] = _new_module(k)
+				var v2 := _board_total(weapon)
+				weapon.slots[i] = m
+				if v2 > best_v2 + 0.0001:
+					best_v2 = v2
+					best2 = k
+			if best2 != "":
+				weapon.plan[i] = best2
 	_use_weapon(keep)
 
 ## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
@@ -2686,7 +2722,11 @@ func _install(mid: String, w = null) -> void:
 	var now := _board_total(ww)
 	var best := -1
 	var best_v := now + 0.001
+	# 自测/自动配置方案时只填空槽：绝不顶掉已经装好的模块（玩家反馈过这条）
+	var fill_empty_only := autoplan or playtest or bot
 	for i in sl.size():
+		if fill_empty_only and sl[i] != null:
+			continue
 		var m = sl[i]
 		sl[i] = _new_module(mid)
 		var v := _board_total(ww)
@@ -2696,8 +2736,8 @@ func _install(mid: String, w = null) -> void:
 			best = i
 	if best >= 0:
 		sl[best] = _new_module(mid)
-
-		pass
+		if best < (ww["plan"] as Array).size():
+			ww["plan"][best] = mid  # 装进去 = 这一格的方案被更新
 		return
 	_add_inv(mid, 1)
 
@@ -3400,8 +3440,25 @@ func _rebuild_tab_device() -> void:
 	head.text = "共 %d 台 · 空闲 %d · 自动 %d" % [devices.size(), idle, auto_n]
 	y += 26.0
 	if devices.size() < DEVICE_MAX:
-		_tab_row(y, "再造一台装置（需要 %d 个基础模块）" % device_cost(), UIKit.C_BLUE, "造",
-			_buy_device_from_tab, _inv("base") >= device_cost(), "吃基础模块；装置越多并行合成越快")
+		var cost := device_cost()
+		var bp_full := _backpack_used() >= backpack_cap
+		var can := (not bp_full) and _inv("base") >= cost
+		var reason := ""
+		if bp_full:
+			reason = "背包已满（%d/%d）：先按 F 关掉不用的武器，或合成掉一些模块" % [_backpack_used(), backpack_cap]
+		elif _inv("base") < cost:
+			reason = "基础模块不够：现有 %d，需要 %d" % [_inv("base"), cost]
+		_tab_row(y, "再造一台装置（需要 %d 个基础模块）" % cost, UIKit.C_BLUE, "造",
+			_buy_device_from_tab, can, "吃基础模块；装置越多并行合成越快")
+		if reason != "":
+			_label(tab_body, Vector2(0, y + 24), 13, UIKit.C_RED).text = reason
+		if bp_full and weapons.size() > 1:
+			# 背包满时给一条出路：丢掉当前选中的武器，立刻腾出一个格子
+			var sb := UIKit.button("丢弃当前武器（腾格子）", Vector2(200, 26), UIKit.C_RED, 13)
+			sb.position = Vector2(0, y + 46)
+			sb.tooltip_text = "武器+装置共享 6 格背包；丢掉这个武器不会返还材料"
+			sb.pressed.connect(_scrap_sel_weapon)
+			tab_body.add_child(sb)
 	else:
 		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
 
@@ -3481,6 +3538,16 @@ func _pick_up(mid: String) -> void:
 
 func _craft_from_tab(mid: String) -> void:
 	try_craft(mid)
+	_refresh_build()
+
+
+## 丢掉当前选中的武器（只为腾背包格子，不返还材料）
+func _scrap_sel_weapon() -> void:
+	if weapons.size() <= 1:
+		return
+	weapons.remove_at(sel)
+	sel = clampi(sel, 0, weapons.size() - 1)
+	_use_weapon(sel)
 	_refresh_build()
 
 
