@@ -245,6 +245,13 @@ var tab := 0
 var tab_bar: Control = null
 var tab_body: Control = null
 var tab_btns: Array = []
+var hand_mid := ""
+var autoplan := false
+var noautoplan := false
+var god := false
+var cheat_arg := ""
+var plan_fix_t := 0.0
+var plan_missing_demo := false
 var dbg_acc := 0.0
 var _pick_from_build := false
 var pick_mode := "level"
@@ -305,8 +312,18 @@ func _ready() -> void:
 			pick_delay = float(a.substr(10))
 		elif a == "rolltest":
 			roll_test = true
+		elif a.begins_with("cheat="):
+			cheat_arg = a.substr(6)
+		elif a == "autoplan":
+			autoplan = true
+			noautoplan = false
+		elif a == "noautoplan":
+			autoplan = false
+			noautoplan = true
 		elif a.begins_with("tab="):
 			tab = int(a.substr(4))
+		elif a == "planmissing":
+			plan_missing_demo = true
 		elif a == "uitest":
 			uitest = true
 		elif a == "swarmtest":
@@ -331,6 +348,9 @@ func _ready() -> void:
 	# holdpick 可以强制保留界面（拍图用），pickdelay=<秒> 可以改等待时间
 	if (playtest or bot or shot_bot or shot_pick or shot_chest) and pick_delay <= 0.0:
 		pick_delay = 0.5
+	# bot 默认开着「自动配置方案」：它不会自己去拖模块，得让补料规则替它决定每格放什么
+	if bot and not noautoplan:
+		autoplan = true
 	if playtest:
 		# 无头模拟按实时速度跑太慢，放大时间步（步长变粗，数值平衡够用）
 		Engine.time_scale = 8.0
@@ -355,12 +375,167 @@ func _ready() -> void:
 	_use_weapon(0)
 	for i in weapon.slots.size():
 		weapon.slots[i] = _new_module("base")
+		weapon.plan[i] = "base"  # 开局满板基础模块，方案也一起登记，之后烧完会自动补
 	_add_inv("base", 2)
 	devices.append(_new_device())
 	_make_player()
 	_make_hud()
+	if plan_missing_demo:
+		for i in weapon.slots.size():
+			weapon.slots[i] = null
+			weapon.plan[i] = "reson"
+	if cheat_arg != "":
+		_apply_cheats(cheat_arg)
+	_refresh_hud()
+	_test_banner()
+
+
+
+# --- 作弊码（debug 用） ---------------------------------------------------------
+# CLI: -- "cheat=rich,god,level,wave=15"（逗号分隔，可叠加）
+# 快捷键（任何时候）：F5 无敌开/关　F6 +100 基础　F7 等级 +5　F8 时间 +40s　F9 全套武器
+func _apply_cheats(spec: String) -> void:
+	for raw in spec.split(",", false):
+		var item := raw.strip_edges()
+		if item == "":
+			continue
+		var kv := item.split("=", true, 1)
+		var key := kv[0]
+		var val := int(kv[1]) if kv.size() > 1 else 0
+		match key:
+			"rich":
+				_add_inv("base", 500)
+				print("[cheat] +500 基础模块")
+			"modules":
+				for k in MOD_ORDER:
+					_add_inv(String(k), 20)
+				_add_inv("base", 300)
+				print("[cheat] 每种模块 +20，基础 +300")
+			"god":
+				god = true
+				print("[cheat] 无敌开")
+			"level":
+				level = maxi(level, 25 if val <= 0 else val)
+				print("[cheat] 等级 = %d" % level)
+			"wave":
+				elapsed = maxf(0.0, float(val - 1) * WAVE_SEC)
+				wave = maxi(1, val)
+				print("[cheat] 跳到第 %d 波（elapsed=%.0f）" % [wave, elapsed])
+			"weapons":
+				_give_all_weapons()
+				print("[cheat] 发全套武器，背包 %d" % weapons.size())
+			"devices":
+				var n: int = maxi(1, val if val > 0 else 5)
+				for i in n:
+					devices.append(_new_device())
+				print("[cheat] 装置 +%d（共 %d 台）" % [n, devices.size()])
+			"hp":
+				max_hp = 9999.0
+				hp = max_hp
+				print("[cheat] HP 拉满")
+			_:
+				print("[cheat] 未知作弊码：%s" % key)
+
+
+func _give_all_weapons() -> void:
+	for id in ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]:
+		if weapons.size() >= 12:
+			break
+		var w := _make_weapon(String(id), 5)
+		weapons.append(w)
 	_refresh_hud()
 
+
+func _cheat_key(k: int) -> bool:
+	match k:
+		KEY_F5:
+			god = not god
+			print("[cheat] 无敌 %s" % ("开" if god else "关"))
+		KEY_F6:
+			_add_inv("base", 100)
+			print("[cheat] +100 基础模块（库存 %d）" % _inv("base"))
+		KEY_F7:
+			level += 5
+			print("[cheat] 等级 +5 → %d" % level)
+		KEY_F8:
+			elapsed += WAVE_SEC
+			print("[cheat] 时间 +40s（wave 自动推进）")
+		KEY_F9:
+			_give_all_weapons()
+			print("[cheat] 发全套武器，背包 %d" % weapons.size())
+		_:
+			return false
+	_pass()
+	return true
+
+
+# --- 测试日志 ---------------------------------------------------------------
+# 每次自测都在 stdout 打一对 [TEST] 行：start 说明这次测的是什么配置，end 说明结果。
+# 目的：跑完不用回头翻参数，日志本身就是「测试内容 + 效果」的记录（也会同步到 docs/testlog.md）。
+func _test_banner() -> void:
+	var mode := "normal"
+	if playtest:
+		mode = "playtest"
+	elif bot:
+		mode = "bot"
+	elif shot_path != "":
+		mode = "shot"
+	if mode == "normal" and cheat_arg == "":
+		return
+	print("[TEST] start mode=%s seed=%d bot=%s autoplan=%s cheat=%s pt=%.0f pickdelay=%.2f start=%s tab=%d" % [
+		mode, absi(seed_used) % 1000000000, str(bot), str(autoplan),
+		("—" if cheat_arg == "" else cheat_arg), pt_limit, pick_delay, start_force, tab])
+
+
+func _test_end(reason: String) -> void:
+	if not (playtest or bot or shot_path != "" or cheat_arg != ""):
+		return
+	print("[TEST] end reason=%s t=%.0f wave=%d lvl=%d kills=%d dps=%.1f need=%.1f weapons=%d inv=%d dead=%s" % [
+		reason, elapsed, wave, level, kills_total, cur_actual_dps(),
+		_spawn_rate() * _wave_hp() * _plan_avg_mult(), weapons.size(), _inv_total(), str(dead)])
+
+
+
+## 自动配置方案要对「所有武器」生效：bot 每 4 秒会换一把正在编辑的枪，
+## 只填当前选中那把的话，其余枪永远空着（面板上就是 slot=2/4）
+func _auto_plan_all() -> void:
+	var keep := sel
+	for i in weapons.size():
+		sel = i
+		_auto_plan_fill()
+	sel = keep
+
+## bot 专用：方案里写的模块补不上时（库存没有那个 id，或那个 id 只能靠合成），
+## 每 2 秒允许把缺料格子的方案改写成「当前库存里整板增益最大」的 id。
+## 玩家侧不开这个开关：玩家要的是「我摆的方案永远生效」，缺料就红着提示，绝不偷偷换。
+func _auto_plan_fix(delta: float) -> void:
+	plan_fix_t += delta
+	if plan_fix_t < 2.0:
+		return
+	plan_fix_t = 0.0
+	var keep := sel
+	for wi in weapons.size():
+		_use_weapon(wi)
+		for i in _missing_cells():
+			var want := String(weapon.plan[i])
+			if want != "" and _inv(want) > 0:
+				_refill(i)  # 有料就直接补，不改方案
+				continue
+			var best_id := ""
+			var best_v := _board_total(weapon)
+			for k in _stocked_ids():
+				weapon.slots[i] = _new_module(k)
+				var v := _board_total(weapon)
+				weapon.slots[i] = null
+				if v > best_v + 0.0001:
+					best_v = v
+					best_id = k
+			if best_id == "":
+				continue
+			weapon.plan[i] = best_id
+			_add_inv(best_id, -1)
+			weapon.slots[i] = _new_module(best_id)
+	_use_weapon(keep)
 
 ## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
 func _new_module(mid: String) -> Dictionary:
@@ -509,14 +684,14 @@ func _make_hud() -> void:
 	build_root.add_child(board_root)
 
 	build_info = Label.new()
-	build_info.position = Vector2(660, 176)
+	build_info.position = Vector2(660, 168)
 	build_info.add_theme_font_size_override("font_size", 16)
 	build_info.add_theme_color_override("font_color", Color(0.82, 0.88, 0.98))
 	build_root.add_child(build_info)
 
 	# 右栏三标签页：库存 / 配方 / 装置（见 docs/plan-ui-v1.md §2.1）
 	tab_bar = Control.new()
-	tab_bar.position = Vector2(660, 230)
+	tab_bar.position = Vector2(660, 248)
 	build_root.add_child(tab_bar)
 	var tab_names := ["库存", "配方", "装置"]
 	for i in 3:
@@ -526,7 +701,7 @@ func _make_hud() -> void:
 		tab_bar.add_child(tb)
 		tab_btns.append(tb)
 	tab_body = Control.new()
-	tab_body.position = Vector2(660, 272)
+	tab_body.position = Vector2(660, 290)
 	build_root.add_child(tab_body)
 
 	flash = ColorRect.new()
@@ -548,6 +723,9 @@ func _input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
+	# 作弊键：F5 无敌 / F6 +100 基础 / F7 等级+5 / F8 时间+40s / F9 全套武器
+	if k >= KEY_F5 and k <= KEY_F9 and _cheat_key(k):
+		return
 	if k == KEY_F3:
 		dbg_on = not dbg_on
 		if dbg_root != null:
@@ -767,6 +945,9 @@ func _physics_process(delta: float) -> void:
 	_bot_move(delta)
 	_spawn(delta)
 	_craft_tick(delta)
+	if autoplan:
+		_auto_plan_all()
+		_auto_plan_fix(delta)
 	_fire(delta)
 	_contact(delta)
 	_hud_tick(delta)
@@ -813,6 +994,7 @@ func _playtest_step(delta: float) -> void:
 		pt_print = pt_t
 		_pt_log()
 	if pt_limit > 0.0 and pt_t >= pt_limit:
+		_test_end("limit")
 		get_tree().quit()
 
 
@@ -909,11 +1091,20 @@ func _pt_log() -> void:
 	# 需求 DPS = 每秒进来的总血量 = 刷怪速度 × 单个基础血 × 本波平均血量倍率
 	var need: float = _spawn_rate() * _wave_hp() * _plan_avg_mult()
 	var comp := ""
-	for m in weapon.slots:
+	var bw: Dictionary = _board_weapon()
+	for m in bw["slots"]:
 		comp += "." if m == null else str(int(m.tier))
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f" % [
+	var bfill := 0
+	for m in bw["slots"]:
+		if m != null:
+			bfill += 1
+	var bmiss := 0
+	for i in (bw["plan"] as Array).size():
+		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
+			bmiss += 1
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
-		cur_drop(), cur_burn(), level, _count_filled(), _board_weapon()["slots"].size(),
+		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
@@ -1061,6 +1252,9 @@ func _make_weapon(id: String, q: int) -> Dictionary:
 		"enabled": true, "fire_t": 0.0, "dmg": {},
 		"blast": 90.0, "ramp_max": 1.20,
 		"score": 0.0, "p0": 0.0, "band": 1.0, "dr": {},
+		# 槽位方案：每格记住「这一格该放什么模块 id」。寿命耗尽后按它自动补料，
+		# 空字符串表示这一格没有方案（自动入槽才允许乱填）。
+		"plan": [],
 	}
 	_set_quality_of(w, q)
 	_roll_weapon(w)
@@ -1250,10 +1444,15 @@ func _set_quality_of(w: Dictionary, q: int) -> void:
 	w["base"] = float(QUALITY_BASE[q])
 	w["layout"] = _gen_layout(int(LAYOUTS[q].size()))
 	var slots: Array = w["slots"]
+	var plan: Array = w["plan"]
 	while slots.size() < w["layout"].size():
 		slots.append(null)
 	while slots.size() > w["layout"].size():
 		slots.pop_back()
+	while plan.size() < slots.size():
+		plan.append("")
+	while plan.size() > slots.size():
+		plan.pop_back()
 
 
 func _set_quality(q: int) -> void:
@@ -2020,7 +2219,8 @@ func _contact(delta: float) -> void:
 		var dmg: float = CONTACT_DPS * pow(0.92, float(_bl("contact"))) * touching * delta
 		dmg_src["contact"] = float(dmg_src["contact"]) + dmg
 		last_hit_t = elapsed
-		hp -= dmg
+		if not god:
+			hp -= dmg
 		flash_t = 0.35
 		_reward_damage(dmg)
 	if hp <= 0.0:
@@ -2053,6 +2253,7 @@ func _damage_reward_count() -> int:
 
 
 func _die() -> void:
+	_test_end("dead")
 	if dead:
 		return
 	dead = true
@@ -2204,6 +2405,16 @@ func _stocked_ids() -> Array:
 func _refill(i: int, w = null) -> void:
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = ww["slots"]
+	var plan: Array = ww["plan"]
+	# 有方案的格子：只认方案里的 id，缺料就空着（绝不降阶替换），等库存补上再自动装回
+	var want := String(plan[i]) if i < plan.size() else ""
+	if want != "":
+		if _inv(want) > 0:
+			_add_inv(want, -1)
+			sl[i] = _new_module(want)
+		else:
+			sl[i] = null
+		return
 	var best_id := ""
 	# 起点是 0：出力为 0 的模块（增幅单独放着）不许占格子，否则板上会周期性地被增幅填满又烧空
 	var best_v := 0.0
@@ -2734,6 +2945,14 @@ func _refresh_build() -> void:
 		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
 	])
+	var miss := _missing_cells()
+	if hand_mid != "":
+		info.append("手持 %s —— 点电路板格子放下（ESC 取消）" % String(MODULES[hand_mid]["name"]))
+	elif miss.size() > 0:
+		var mn: Array = []
+		for i in miss:
+			mn.append(String(MODULES[String(weapon.plan[i])]["name"]))
+		info.append("缺料 %d 格：%s（攒够自动补上）" % [miss.size(), " / ".join(mn)])
 	build_info.text = "\n".join(info)
 	_rebuild_tab()
 	_highlight_tab()
@@ -2763,7 +2982,7 @@ func _rebuild_tab() -> void:
 		_rebuild_tab_device()
 
 
-func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, enabled := true, tip := "") -> void:
+func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, enabled := true, tip := "", btn2 := "", cb2 := Callable()) -> void:
 	var chip := ColorRect.new()
 	chip.color = col
 	chip.position = Vector2(0, y + 8)
@@ -2772,6 +2991,12 @@ func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, ena
 	tab_body.add_child(chip)
 	var l := _label(tab_body, Vector2(20, y + 4), 15, UIKit.C_TEXT)
 	l.text = text
+	if btn2 != "":
+		var b2 := UIKit.button(btn2, Vector2(58, 28), UIKit.C_GOLD, 14)
+		b2.position = Vector2(456, y)
+		b2.tooltip_text = "拿在手里，然后点电路板上的格子放下"
+		b2.pressed.connect(cb2)
+		tab_body.add_child(b2)
 	if btn != "":
 		var b := UIKit.button(btn, Vector2(66, 28), UIKit.C_GREEN if enabled else UIKit.C_DIM, 14)
 		b.position = Vector2(524, y)
@@ -2795,7 +3020,7 @@ func _rebuild_tab_inv() -> void:
 		_tab_row(y, "%s  ×%d      %d 阶    出力 %.1f    寿命 %d" % [
 			String(d["name"]), n, int(d["tier"]), float(d["rate"]), int(d["uses"])
 		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "装入",
-			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格")
+			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格", "拿起", _pick_up.bind(mid))
 		y += 34.0
 	if not any:
 		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "库存空：打怪掉落会先进这里"
@@ -2844,6 +3069,12 @@ func _rebuild_tab_device() -> void:
 			_buy_device_from_tab, _inv("base") >= device_cost(), "吃基础模块；装置越多并行合成越快")
 	elif devices.size() >= DEVICE_MAX:
 		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
+
+
+## 把某个模块拿在手里（下一步点格子放下）
+func _pick_up(mid: String) -> void:
+	hand_mid = mid
+	_refresh_build()
 
 
 func _craft_from_tab(mid: String) -> void:
@@ -2910,7 +3141,16 @@ func _rebuild_board() -> void:
 			var col: Color = MODULES[String(m["id"])]["color"]
 			sb.border_color = col
 			sb.bg_color = Color(col.r, col.g, col.b, 0.10)
+		var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
+		if m == null and want != "":
+			# 有方案但缺料：红框，把「缺什么」写在格子上
+			sb.border_color = UIKit.C_RED
+			sb.bg_color = Color(0.35, 0.10, 0.12, 0.35)
 		panel.add_theme_stylebox_override("panel", sb)
+		panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		panel.tooltip_text = _slot_tip(i)
+		panel.gui_input.connect(_on_slot_input.bind(i))
 		board_root.add_child(panel)
 
 		var name_l := Label.new()
@@ -2918,7 +3158,11 @@ func _rebuild_board() -> void:
 		name_l.size = Vector2(cell, 24)
 		name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		name_l.add_theme_font_size_override("font_size", 16)
-		if m == null:
+		name_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if m == null and want != "":
+			name_l.text = "缺 %s" % String(MODULES[want]["name"])
+			name_l.add_theme_color_override("font_color", UIKit.C_RED)
+		elif m == null:
 			name_l.text = "%d 空" % (i + 1)
 			name_l.add_theme_color_override("font_color", Color(0.42, 0.46, 0.56))
 		else:
@@ -2932,6 +3176,7 @@ func _rebuild_board() -> void:
 		out_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		out_l.add_theme_font_size_override("font_size", 15)
 		out_l.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
+		out_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		if m == null:
 			out_l.text = "—"
 		elif _cls(m) == "boost":
@@ -2952,8 +3197,117 @@ func _rebuild_board() -> void:
 		use_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		use_l.add_theme_font_size_override("font_size", 13)
 		use_l.add_theme_color_override("font_color", Color(0.55, 0.62, 0.72))
+		use_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(m.max)]
 		panel.add_child(use_l)
+
+
+## 鼠标点格子：左键 = 放入手里的模块（或没拿东西时自动挑最优 / 按方案补料），右键 = 卸下
+func _on_slot_input(event: InputEvent, i: int) -> void:
+	if not (event as InputEventMouseButton).pressed:
+		return
+	var mb := event as InputEventMouseButton
+	if mb.button_index == MOUSE_BUTTON_RIGHT:
+		_uninstall(i)
+		_refresh_build()
+		return
+	if mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if hand_mid != "":
+		_place_at(i, hand_mid)
+	elif String(weapon.plan[i]) != "" and weapon.slots[i] == null:
+		_refill(i)  # 有方案但缺料：手动点一下等于「再试一次补料」
+	else:
+		_auto_place_best(i)
+	_refresh_build()
+
+
+## 把库存里的 mid 放进第 i 格，并登记成这一格的方案（方案 = 以后自动补料的目标）
+func _place_at(i: int, mid: String) -> bool:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	if i < 0 or i >= sl.size() or not MODULES.has(mid) or _inv(mid) <= 0:
+		hand_mid = ""
+		return false
+	_add_inv(mid, -1)
+	if sl[i] != null:
+		_add_inv(String(sl[i]["id"]), 1)  # 原有的退回库存，等于覆盖
+	sl[i] = _new_module(mid)
+	plan[i] = mid
+	hand_mid = ""
+	return true
+
+
+## 卸下第 i 格：模块退回库存，方案清空
+func _uninstall(i: int) -> void:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	if i < 0 or i >= sl.size():
+		return
+	if sl[i] != null:
+		_add_inv(String(sl[i]["id"]), 1)
+	sl[i] = null
+	plan[i] = ""
+
+
+## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成方案
+func _auto_place_best(i: int) -> bool:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	if i < 0 or i >= sl.size() or sl[i] != null:
+		return false
+	var best_id := ""
+	var best_v := _board_total(weapon)
+	for k in _stocked_ids():
+		sl[i] = _new_module(k)
+		var v := _board_total(weapon)
+		sl[i] = null
+		if v > best_v + 0.0001:
+			best_v = v
+			best_id = k
+	if best_id == "":
+		return false
+	plan[i] = best_id
+	_add_inv(best_id, -1)
+	sl[i] = _new_module(best_id)
+	return true
+
+
+## 自动配置方案（bot 与懒人用）：所有「空格子 + 没方案」都按最优填一次，填完固化成方案
+func _auto_plan_fill() -> void:
+	var sl: Array = weapon["slots"]
+	var plan: Array = weapon["plan"]
+	for i in sl.size():
+		if sl[i] == null and String(plan[i]) == "":
+			_auto_place_best(i)
+
+
+func _missing_cells(w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	var out: Array = []
+	var sl: Array = ww["slots"]
+	var plan: Array = ww["plan"]
+	for i in sl.size():
+		if sl[i] == null and i < plan.size() and String(plan[i]) != "":
+			out.append(i)
+	return out
+
+
+func _slot_tip(i: int) -> String:
+	var parts: Array = ["槽 %d" % (i + 1)]
+	var m = weapon.slots[i]
+	if m != null:
+		var d: Dictionary = MODULES[String(m["id"])]
+		parts.append("%s · %d 阶 · 出力 %.1f · 剩余 %d/%d" % [
+			String(d["name"]), int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
+	else:
+		parts.append("空")
+	var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
+	if want != "":
+		parts.append("方案：%s%s" % [String(MODULES[want]["name"]),
+			"" if _inv(want) > 0 else "（库存缺料，攒够自动补）"])
+	parts.append("左键：装入手里的模块 / 自动补料　　右键：卸下")
+	return "\n".join(parts)
 
 
 ## 随机掷数自检：每种武器 × 每个品级各掷 N 次，检查同类型内「低品级不会超过高品级」。

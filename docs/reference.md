@@ -290,3 +290,45 @@ P0(类型) = 用该类型「典型模板」按品质 3 算出的分 = 该类型�
 | `boardtest` | 固定 2×3 板自检，期望 `out=[40.5, 45.5, 0.0, 1.0, 5.0, 6.0] power=100.0` |
 | `chesttest` | 开箱链路自检：`CHESTTEST opened mode=chest cards=4` → `taken weapons=2` → `done` |
 | 截图 | `shot=<路径> shotat=<秒> [shotbuild] [shotbot] [shotpick] [shotchest] [holdpick] [ff=<秒>]`；`holdpick` 保留选卡面板，其余测试模式 0.5 秒后自动选第一张 |
+## 9. 作弊码与测试日志（debug 效率用）
+
+### 9.1 作弊码
+
+CLI 一次性叠加（逗号分隔）：`-- "cheat=rich,god,level=25,wave=15,weapons,devices=5,modules,hp"`
+
+| 码 | 效果 |
+| --- | --- |
+| `rich` | 基础模块 +500 |
+| `modules` | 每种可合成模块 +20、基础 +300 |
+| `god` | 无敌（接触伤害不扣血，仍然闪红） |
+| `level=<N>` | 等级直接设到 N（默认 25），一次解锁全部配方 |
+| `wave=<N>` | 跳到第 N 波（改 `elapsed`） |
+| `weapons` | 送全套 8 把金档武器 |
+| `devices=<N>` | 装置 +N（默认 5） |
+| `hp` | 最大 HP 拉到 9999 并回满 |
+
+游戏中随时可用的按键：
+
+| 键 | 效果 |
+| --- | --- |
+| `F5` | 无敌开/关 |
+| `F6` | +100 基础模块 |
+| `F7` | 等级 +5 |
+| `F8` | 时间 +40s（推进一波） |
+| `F9` | 发全套武器 |
+
+### 9.2 测试日志
+
+任何自测模式（`playtest` / `bot` / `shot=` / `cheat=`）启动时会打印一行：
+
+`
+[TEST] start mode=playtest seed=123456789 bot=true autoplan=true cheat=— pt=900 pickdelay=0.50 start= tab=0
+`
+
+结束（死亡或到 `pt=` 上限）时打印一行：
+
+`
+[TEST] end reason=limit t=896 wave=23 lvl=28 kills=10160 dps=184.8 need=267.2 weapons=3 inv=359 dead=false
+`
+
+人工跑的测试记录在 `docs/testlog.md`：每条包含命令、目的、关键输出、结论四行。
