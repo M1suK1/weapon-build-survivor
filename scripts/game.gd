@@ -220,6 +220,9 @@ var shot_pick := false
 var shot_chest := false
 var hold_pick := false
 var pick_pre := false
+var click_test := false
+var ct2 := 0.0
+var click_done := false
 var chest_test := false
 var ct_t := 0.0
 var ct_opened := false
@@ -297,6 +300,9 @@ func _ready() -> void:
 			swarm_test = true
 		elif a == "chesttest":
 			chest_test = true
+		elif a == "clicktest":
+			click_test = true
+			hold_pick = true
 		elif a == "holdpick":
 			hold_pick = true
 		elif a == "shotchest":
@@ -461,12 +467,13 @@ func _make_hud() -> void:
 
 	pick_root = Control.new()
 	pick_root.set_anchors_preset(Control.PRESET_FULL_RECT)
-	pick_root.visible = true
+	pick_root.size = Vector2(1280, 720)
+	pick_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	# 选卡面板默认隐藏：以前这里常驻一层 0.86 的暗色，导致整局画面都像被暂停
+	pick_root.visible = false
+	# 整棵树被 paused 时，控件必须显式 ALWAYS 才能收到鼠标事件
+	pick_root.process_mode = Node.PROCESS_MODE_ALWAYS
 	layer.add_child(pick_root)
-	var pbg := ColorRect.new()
-	pbg.color = Color(0.03, 0.04, 0.07, 0.86)
-	pbg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	pick_root.add_child(pbg)
 
 	var bg := ColorRect.new()
 	bg.color = Color(0.04, 0.05, 0.08, 0.88)
@@ -631,6 +638,36 @@ func _physics_process(delta: float) -> void:
 			var gx := (i % 12) - 6
 			var gy := int(i / 12) - 5
 			_spawn_enemy_at(player.position + Vector2(gx * 52.0, gy * 46.0))
+	# 点击自检：开箱 -> 1 秒后向视口塞一个真实鼠标点击 -> 看卡片是否被响应
+	if click_test:
+		ct2 += delta
+		if ct2 > 0.5 and not picking and not pick_pre:
+			pick_pre = true
+			grant_chest(true)
+			print("CLICKTEST opened mode=%s cards=%d" % [pick_mode, chest_offer.size()])
+		elif ct2 > 1.5 and picking and not click_done:
+			click_done = true
+			var ev := InputEventMouseButton.new()
+			ev.button_index = MOUSE_BUTTON_LEFT
+			ev.pressed = true
+			ev.position = Vector2(300, 360)
+			ev.global_position = ev.position
+			get_viewport().push_input(ev)
+			var up := InputEventMouseButton.new()
+			up.button_index = MOUSE_BUTTON_LEFT
+			up.pressed = false
+			up.position = ev.position
+			up.global_position = ev.position
+			get_viewport().push_input(up)
+			var mv := InputEventMouseMotion.new()
+			mv.position = ev.position
+			mv.global_position = ev.position
+			get_viewport().push_input(mv)
+			var hov := get_viewport().gui_get_hovered_control()
+			print("CLICKTEST hovered=%s pick_rect=%s" % [str(hov), str(pick_root.get_global_rect())])
+		elif ct2 > 2.2 and click_done:
+			print("CLICKTEST result picking=%s weapons=%d" % [str(picking), weapons.size()])
+			get_tree().quit()
 	# 开箱链路自检：开 → 选第 2 张 → 验证进背包
 	if chest_test:
 		ct_t += delta
@@ -2241,6 +2278,7 @@ func _open_pick() -> void:
 		_toggle_build()
 	picking = true
 	pick_wait = 0.0
+	pick_root.visible = true
 	_paint_offer()
 	if playtest or shot_bot or bot:
 		print("[pick] mode=%s pause=%s" % [pick_mode, str(get_tree().paused)])
@@ -2315,6 +2353,8 @@ func _paint_offer() -> void:
 
 func _close_pick() -> void:
 	picking = false
+	if pick_root != null:
+		pick_root.visible = false
 	get_tree().paused = false
 	pick_mode = "level"
 	if pending_chest > 0 and not dead:
@@ -2331,6 +2371,11 @@ func _close_pick() -> void:
 
 ## 领第 i 张卡
 func _take_card(i: int) -> void:
+	# 宝箱面板走的是另一套数据（chest_offer），以前漏了这个分支，
+	# 结果卡片点得动（button_down 有反应）但 pressed 永远落空、面板关不掉
+	if pick_mode == "chest":
+		_take_weapon_card(i)
+		return
 	if i < 0 or i >= offer.size():
 		return
 	var card: Dictionary = offer[i]
