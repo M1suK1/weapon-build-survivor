@@ -280,3 +280,15 @@
 3. **装置面板里「材料不够的配方完全不显示」** 会让人不知道还有哪些配方存在。倾向：不显示 + 底部一行「还有 N 个配方材料不足」。
 4. **卸下武器**：现在没有这个操作，要不要加？（加了要处理背包格释放与当前选中武器被删）
 5. **二级界面是否也支持拖拽**（把库存模块拖到装置上 = 喂材料）？倾向 U3 先不做，U4 看手感再加。
+
+## 9. 实施进度
+
+### U1 交互底座 —— 已完成（commit 见 git log）
+
+- 新增 `scripts/ui_kit.gd`（preload 常量 `UIKit`，不是 `class_name`，这样 headless 不需要编辑器生成的全局类缓存）：`button(text,size,accent,font_size)`、`icon_button`、`close_button(parent,on_press,margin)`、`back_button(parent,text,on_press,pos)`、`hint`、`dim`、`diag`。四套 StyleBox：normal / hover（白边+提亮）/ pressed / disabled（45% 亮度），按钮统一 `mouse_default_cursor_shape = POINTING_HAND`、`focus_mode = NONE`。
+- 构筑屏左上角 `← 返回战斗`、右上角 `×`，都走 `_toggle_build()`。
+- 选卡面板右上角 `×`（`_paint_pick_chrome()`）——**升级四选一不显示**，必须选一张。
+- 统一返回：`_input` 最前面拦截 `ESC` 与鼠标右键 → `_close_topmost()`（选卡优先于构筑；升级四选一吞掉输入但不关面板）。
+- 新增 `uitest` CLI：打印 `UIKit.diag()` + 闭合按钮的 `get_global_rect()`，再用 `push_input` 合成一次真实左键点击验证。
+  实测（**窗口模式**）：`viewport=(1280,720) content_scale=(1280,720) factor=1.00`、`close_rect=(1228,18,34,38)`、`after_click build_visible=false` → 坐标是 1:1，不需要补偿。
+  注意：`--headless` 下 `push_input` 不会派发到 GUI（`after_click build_visible=true`，误报），验证点击必须开窗口跑。

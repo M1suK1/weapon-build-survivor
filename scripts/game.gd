@@ -77,6 +77,7 @@ const LAYOUTS := {
 	4: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0), Vector2i(1, -1), Vector2i(1, 1)],
 	5: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0), Vector2i(0, 1), Vector2i(1, 1), Vector2i(2, 1)],
 }
+const UIKit := preload("res://scripts/ui_kit.gd")
 const QUALITY_NAME := {1: "白", 2: "绿", 3: "蓝", 4: "紫", 5: "金"}
 ## 波次 → 品质：开局蓝（4 槽 T 型），12 波紫（5 槽十字），20 波金（6 槽双排）
 const QUALITY_SCHEDULE := {12: 4, 20: 5}
@@ -236,6 +237,10 @@ var dbg_text: Label = null
 var dbg_on := false
 var seed_used := 0
 var vis_enemy := 0
+var build_close_btn: Button = null
+var build_back_btn: Button = null
+var uitest := false
+var uitest_step := 0
 var dbg_acc := 0.0
 var _pick_from_build := false
 var pick_mode := "level"
@@ -296,6 +301,8 @@ func _ready() -> void:
 			pick_delay = float(a.substr(10))
 		elif a == "rolltest":
 			roll_test = true
+		elif a == "uitest":
+			uitest = true
 		elif a == "swarmtest":
 			swarm_test = true
 		elif a == "chesttest":
@@ -480,6 +487,10 @@ func _make_hud() -> void:
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	build_root.add_child(bg)
 
+	# 构筑屏的统一返回入口：右上角 × 和左上角 ←，都走 _toggle_build
+	build_close_btn = UIKit.close_button(build_root, _toggle_build, 18.0)
+	build_back_btn = UIKit.back_button(build_root, "返回战斗", _toggle_build, Vector2(24, 14))
+
 	build_text = Label.new()
 	build_text.position = Vector2(80, 60)
 	build_text.add_theme_font_size_override("font_size", 19)
@@ -504,6 +515,14 @@ func _make_hud() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# 统一返回：ESC / 鼠标右键 都能退出最上层的界面（选卡 -> 构筑）
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if _close_topmost():
+			return
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+		if _close_topmost():
+			get_viewport().set_input_as_handled()
+			return
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
@@ -632,6 +651,33 @@ func _process(delta: float) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# UI 底座自检：开构筑屏 → 打印坐标诊断 → 合成一次真实鼠标点击 → 看是否真点到 ×
+	if uitest and uitest_step == 0:
+		uitest_step = 1
+		_toggle_build()
+		print("UITEST " + UIKit.diag(self, build_root))
+		if build_close_btn != null:
+			print("UITEST close_rect=%s visible_in_tree=%s" % [
+				str(build_close_btn.get_global_rect()), str(build_close_btn.is_visible_in_tree())])
+	elif uitest and uitest_step == 1:
+		uitest_step = 2
+		var c := Vector2(1140, 34)
+		if build_close_btn != null:
+			c = build_close_btn.get_global_rect().get_center()
+		var dn := InputEventMouseButton.new()
+		dn.button_index = MOUSE_BUTTON_LEFT
+		dn.pressed = true
+		dn.position = c
+		dn.global_position = c
+		get_viewport().push_input(dn)
+		var up := InputEventMouseButton.new()
+		up.button_index = MOUSE_BUTTON_LEFT
+		up.pressed = false
+		up.position = c
+		up.global_position = c
+		get_viewport().push_input(up)
+		print("UITEST click_at=%s after_click build_visible=%s" % [str(c), str(build_root.visible)])
+		get_tree().quit()
 	if swarm_test and elapsed > 1.0 and not ws_done:
 		ws_done = true
 		for i in 120:
@@ -2280,8 +2326,7 @@ func _open_pick() -> void:
 	pick_wait = 0.0
 	pick_root.visible = true
 	_paint_offer()
-	if playtest or shot_bot or bot:
-		print("[pick] mode=%s pause=%s" % [pick_mode, str(get_tree().paused)])
+	_paint_pick_chrome()
 
 
 func _paint_offer() -> void:
@@ -2351,6 +2396,38 @@ func _paint_offer() -> void:
 		btn.pressed.connect(_take_card.bind(i))
 
 
+## 关掉最上层的界面。返回 true 表示这次输入被消费掉了。
+## 优先级：选卡 > 构筑。升级四选一不允许跳过（必须选一张），所以吞掉输入但不关面板。
+func _close_topmost() -> bool:
+	if picking:
+		if pick_mode == "level":
+			return true
+		_abort_pick()
+		return true
+	if build_root != null and build_root.visible:
+		_toggle_build()
+		return true
+	return false
+
+
+## 选卡面板的公共外框：右上角 ×。升级四选一必须选一张，所以不给关闭键。
+func _paint_pick_chrome() -> void:
+	if pick_root == null or pick_mode == "level":
+		return
+	UIKit.close_button(pick_root, _abort_pick, 18.0)
+
+
+## 放弃当前面板（宝箱不拿、替换不换）
+func _abort_pick() -> void:
+	if not picking:
+		return
+	if pick_mode == "chest":
+		chest_offer.clear()
+	elif pick_mode == "replace":
+		pending_weapon = {}
+	_close_pick()
+
+
 func _close_pick() -> void:
 	picking = false
 	if pick_root != null:
@@ -2370,8 +2447,7 @@ func _close_pick() -> void:
 
 
 ## 领第 i 张卡
-func _take_card(i: int) -> void:
-	# 宝箱面板走的是另一套数据（chest_offer），以前漏了这个分支，
+func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_offer），以前漏了这个分支，
 	# 结果卡片点得动（button_down 有反应）但 pressed 永远落空、面板关不掉
 	if pick_mode == "chest":
 		_take_weapon_card(i)
@@ -2611,7 +2687,7 @@ func _refresh_build() -> void:
 		return
 	_rebuild_board()
 	var lines: Array = []
-	lines.append("构筑（暂停中）     TAB 返回")
+	lines.append("构筑（暂停中）      TAB / ESC / 右键 / ← 返回")
 	lines.append("")
 	lines.append("武器  %s·%s·%d 槽    射程 %.0f    间隔 %.2fs    目标 %s    基础 %.1f    单次出力 %.1f    当前 DPS %.1f" % [
 		str(WEAPONS[weapon["id"]]["name"]), QUALITY_NAME[int(weapon["quality"])],
