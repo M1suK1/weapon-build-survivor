@@ -1,155 +1,88 @@
 extends Node2D
-## 主控制器：刷怪、开火、掉落、构筑、HUD。
+## 游戏主控制器（编排层）。
+##
+## 职责：创建场景节点、跑主循环（刷怪 → 合成 → 开火 → 接触伤害 → HUD）、
+## 暂停与界面栈、输入分发、把数据交给各功能块。
+##
+## 本文件正按 docs/plan-refactor-v1.md 逐步拆分：
+##   R1 数据表         → scripts/data/                 （已完成）
+##   R2 库存 + 电路板  → scripts/systems/              （下一步）
+##   R3–R7 合成 / 战斗 / 敌人 / UI / 自测台
+## 拆完之后这里只剩 ~350 行编排代码。
+##
+## 阅读顺序：数据表引用 → 状态 → _physics_process 主循环 → 各功能块（每个块开头有 ==== 分隔）。
 
-## 模块目录（方案 v2.6 §1）。cls 决定网络里怎么结算：
-##   flat  = 老实给 rate（默认）
-##   mirror= 加法：把相邻「比自己低阶」的模块读数再镜像一份
-##   boost = 增幅：自身 0 出力，把 boost 加到相邻非 boost 模块的最终输出上
-##   reson = 共振：相邻同 cls 的模块基础值 +50%
-## bind 非空 = 武器专属模块：只在该武器板上生效，否则只剩 rate（方案 §1.3）
-const MODULES := {
-	"base":   {"name": "基础",   "tier": 1, "rate": 1.0,  "uses": 45.0,  "cls": "flat",   "color": Color(0.56, 0.70, 1.0)},
-	"add":    {"name": "加法",   "tier": 2, "rate": 3.0,  "uses": 60.0,  "cls": "mirror", "color": Color(0.49, 0.94, 0.66)},
-	"amp":    {"name": "增幅",   "tier": 3, "rate": 0.0,  "uses": 120.0, "cls": "boost",  "color": Color(0.36, 0.88, 0.82), "boost": 5.0},
-	"reson":  {"name": "共振",   "tier": 4, "rate": 27.0, "uses": 100.0, "cls": "reson",  "color": Color(1.0, 0.56, 0.64)},
-	# --- 通用配方（10 个）：一点点、不喧宾夺主的增益 ---
-	"edge":   {"name": "锋锐刃", "tier": 2, "rate": 2.0,  "uses": 40.0,  "cls": "flat",   "color": Color(0.86, 0.90, 0.98), "note": "单发倍率 +8%"},
-	"temper": {"name": "淬火块", "tier": 2, "rate": 4.5,  "uses": 30.0,  "cls": "flat",   "color": Color(0.98, 0.72, 0.48), "note": "纯数值，烧得快"},
-	"light":  {"name": "轻量片", "tier": 2, "rate": 1.5,  "uses": 90.0,  "cls": "flat",   "color": Color(0.72, 0.92, 0.86), "note": "每次只烧 0.5 次使用次数"},
-	"extend": {"name": "增程器", "tier": 2, "rate": 1.0,  "uses": 50.0,  "cls": "flat",   "color": Color(0.60, 0.82, 1.0),  "note": "射程 +25"},
-	"calib":  {"name": "校准镜", "tier": 3, "rate": 1.0,  "uses": 45.0,  "cls": "flat",   "color": Color(0.78, 0.86, 0.98), "note": "开火间隔 ×0.95"},
-	"pierce": {"name": "贯穿弹", "tier": 3, "rate": 6.0,  "uses": 60.0,  "cls": "flat",   "color": Color(1.0, 0.86, 0.60),  "note": "穿透 +1（身后 120px 再吃 60%）"},
-	"breaker":{"name": "破甲锥", "tier": 3, "rate": 5.0,  "uses": 50.0,  "cls": "flat",   "color": Color(0.90, 0.62, 0.42), "note": "对精英/磐石 +20%"},
-	"coolant":{"name": "冷却片", "tier": 3, "rate": 3.0,  "uses": 70.0,  "cls": "flat",   "color": Color(0.56, 0.86, 0.94), "note": "开火间隔 ×0.92"},
-	"recycle":{"name": "回收片", "tier": 3, "rate": 2.0,  "uses": 80.0,  "cls": "flat",   "color": Color(0.66, 0.90, 0.62), "note": "20% 概率给相邻 +3 次寿命"},
-	"overload":{"name":"过载核", "tier": 4, "rate": 18.0, "uses": 70.0,  "cls": "flat",   "color": Color(1.0, 0.52, 0.42),  "note": "单发倍率 ×1.15"},
-	"tempo":  {"name": "时序核", "tier": 4, "rate": 15.0, "uses": 90.0,  "cls": "flat",   "color": Color(0.86, 0.74, 1.0),  "note": "连击 +4%/发，上限 +40%"},
-	# --- 武器特化配方（6 个）：只绑一把枪，换的是「玩法」不是数字 ---
-	"multi":  {"name": "多膛组", "tier": 3, "rate": 6.0,  "uses": 55.0,  "cls": "flat",   "color": Color(0.90, 0.78, 1.0),  "note": "狙击枪目标数 +1", "bind": "sniper"},
-	"belt":   {"name": "轻质弹链","tier": 3, "rate": 2.0, "uses": 100.0, "cls": "flat",   "color": Color(0.98, 0.84, 0.50), "note": "冲锋枪每次只烧 0.35 次", "bind": "smg"},
-	"spread": {"name": "扩散器", "tier": 3, "rate": 5.0,  "uses": 50.0,  "cls": "flat",   "color": Color(1.0, 0.70, 0.54),  "note": "霰弹枪目标数 +2", "bind": "shotgun"},
-	"focus":  {"name": "聚焦环", "tier": 4, "rate": 14.0, "uses": 80.0,  "cls": "flat",   "color": Color(0.70, 0.94, 1.0),  "note": "镭射倍率上限 +180%", "bind": "laser"},
-	"charge": {"name": "集束装药","tier": 3, "rate": 5.5, "uses": 45.0,  "cls": "flat",   "color": Color(1.0, 0.60, 0.36),  "note": "榴弹爆炸半径 +40", "bind": "grenade"},
-	"blade":  {"name": "长刃",   "tier": 3, "rate": 5.0,  "uses": 70.0,  "cls": "flat",   "color": Color(0.92, 0.86, 0.70), "note": "环绕刃半径 +25、倍率 +20%", "bind": "blade"},
-}
-## 配方 = 2 个「低一阶」的任意模块（T2 吃 3 个基础）。时间按阶区分，特化件更慢。
-const CRAFT_COST := {2: 3, 3: 2, 4: 2}
-const CRAFT_TIME := {2: 5.0, 3: 10.0, 4: 18.0}
-const CRAFT_UNLOCK := {"add": 4, "amp": 8, "reson": 16, "edge": 5, "temper": 5, "light": 6, "extend": 7,
-	"calib": 9, "pierce": 11, "breaker": 12, "coolant": 13, "recycle": 14, "overload": 17, "tempo": 18,
-	"multi": 12, "belt": 12, "spread": 13, "focus": 20, "charge": 15, "blade": 15}
-## UI / 自动合成都按这个顺序遍历
-const MOD_ORDER := ["add", "amp", "reson", "edge", "temper", "light", "extend", "calib", "pierce",
-	"breaker", "coolant", "recycle", "overload", "tempo", "multi", "belt", "spread", "focus", "charge", "blade"]
-const CORE_ORDER := ["base", "add", "amp", "reson"]
+# ============================================================================
+# 数据表：改数值请去 scripts/data/，这里只是只读引用，
+# 这样切到本文件时一眼能看出「这个逻辑依赖了哪几张表」。
+# ============================================================================
+const ModDB := preload("res://scripts/data/modules_db.gd")
+const WeaponDB := preload("res://scripts/data/weapons_db.gd")
+const EnemyDB := preload("res://scripts/data/enemies_db.gd")
+const BuffDB := preload("res://scripts/data/buffs_db.gd")
 
-## 升级三选一 buff 池（方案 §7.5）。cat：atk 攻击 / eco 经济 / sur 生存。
-## 每张卡只给 1 层，max 是层数上限；层数影响见 _weapon_mods / _new_module / device_cost 等处。
-const BUFFS := {
-	"pierce": {"name": "穿透", "cat": "atk", "rar": "blue", "max": 3, "desc": "主目标身后 120px 内最近敌人吃 60%"},
-	"elite": {"name": "破甲", "cat": "atk", "rar": "blue", "max": 4, "desc": "对冲刺精英与磐石 +25% 伤害"},
-	"rate": {"name": "攻速", "cat": "atk", "rar": "white", "max": 8, "desc": "开火间隔 ×0.92"},
-	"power": {"name": "强化", "cat": "atk", "rar": "white", "max": 6, "desc": "伤害倍率 ×1.10"},
-	"range": {"name": "射程", "cat": "atk", "rar": "white", "max": 4, "desc": "射程 +60"},
-	"target": {"name": "多目标", "cat": "atk", "rar": "gold", "max": 3, "desc": "每把武器目标数 +1"},
-	"drop": {"name": "掉落", "cat": "eco", "rar": "white", "max": 6, "desc": "敌人掉落率 +0.04"},
-	"uses": {"name": "耐久", "cat": "eco", "rar": "white", "max": 5, "desc": "新模块寿命 ×1.08"},
-	"craft": {"name": "工艺", "cat": "eco", "rar": "blue", "max": 5, "desc": "合成时间 ×0.90"},
-	"device": {"name": "降本", "cat": "eco", "rar": "blue", "max": 4, "desc": "装置造价 ×0.92"},
-	"hp": {"name": "体魄", "cat": "sur", "rar": "white", "max": 6, "desc": "最大 HP +15，立即回血"},
-	"contact": {"name": "护甲", "cat": "sur", "rar": "white", "max": 5, "desc": "接触伤害 ×0.92"},
-	"regen": {"name": "恢复", "cat": "sur", "rar": "blue", "max": 4, "desc": "脱战回血 +0.5/s"},
-	"iframe": {"name": "闪避", "cat": "sur", "rar": "gold", "max": 3, "desc": "受击无敌帧 +0.10s"},
-}
+## 模块目录 + 配方 + 合成装置造价（scripts/data/modules_db.gd）
+const MODULES := ModDB.MODULES
+const CRAFT_COST := ModDB.CRAFT_COST
+const CRAFT_TIME := ModDB.CRAFT_TIME
+const CRAFT_UNLOCK := ModDB.CRAFT_UNLOCK
+const MOD_ORDER := ModDB.MOD_ORDER
+const CORE_ORDER := ModDB.CORE_ORDER
+const DEVICE_COST_BASE := ModDB.DEVICE_COST_BASE
+const DEVICE_COST_GROWTH := ModDB.DEVICE_COST_GROWTH
+const DEVICE_MAX := ModDB.DEVICE_MAX
 
-## 合成装置：每台 = 1 个并行合成位。可反复制造，材料堆积就多做几台（变相缩短合成时间）。
-## 开局免费 1 台，第 n 台的价钱 = 12 × 1.7^(n-2) 个基础模块，上限 8 台。
-const DEVICE_COST_BASE := 12
-const DEVICE_COST_GROWTH := 1.7
-const DEVICE_MAX := 8
+## 武器 + 品质 + 布局模板 + 随机数值（scripts/data/weapons_db.gd）
+const WEAPONS := WeaponDB.WEAPONS
+const START_POOL := WeaponDB.START_POOL
+const LAYOUTS := WeaponDB.LAYOUTS
+const QUALITY_NAME := WeaponDB.QUALITY_NAME
+const QUALITY_SCHEDULE := WeaponDB.QUALITY_SCHEDULE
+const QUALITY_BASE := WeaponDB.QUALITY_BASE
+const QM := WeaponDB.QM
+const ROLL_P := WeaponDB.ROLL_P
 
-## 武器品质 = 电路板布局（槽位数量 + 连接方式）。
-## 相邻 = 网格曼哈顿距离 1，所以直线是链、T/十字/双排会在中间形成枢纽。
-const LAYOUTS := {
-	1: [Vector2i(0, 0), Vector2i(1, 0)],
-	2: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0)],
-	3: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0), Vector2i(1, 1)],
-	4: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0), Vector2i(1, -1), Vector2i(1, 1)],
-	5: [Vector2i(0, 0), Vector2i(1, 0), Vector2i(2, 0), Vector2i(0, 1), Vector2i(1, 1), Vector2i(2, 1)],
-}
-const UIKit := preload("res://scripts/ui_kit.gd")
-const QUALITY_NAME := {1: "白", 2: "绿", 3: "蓝", 4: "紫", 5: "金"}
-## 波次 → 品质：开局蓝（4 槽 T 型），12 波紫（5 槽十字），20 波金（6 槽双排）
-const QUALITY_SCHEDULE := {12: 4, 20: 5}
-## 武器自带基础伤害：不吃模块次数，模块烧光时留一条底（否则 DPS 直接归零 = 必死）
-const QUALITY_BASE := {1: 0.5, 2: 0.8, 3: 1.0, 4: 1.5, 5: 2.0}
+## 敌人 + 波次编成 + 生成编队 + 刷怪曲线（scripts/data/enemies_db.gd）
+const ENEMY_KINDS := EnemyDB.ENEMY_KINDS
+const WAVE_PLANS := EnemyDB.WAVE_PLANS
+const PATTERNS := EnemyDB.PATTERNS
+const WAVE_SEC := EnemyDB.WAVE_SEC
+const DROP_CHANCE := EnemyDB.DROP_CHANCE
+const CHEST_GUARANTEE := EnemyDB.CHEST_GUARANTEE
+const HP_BASE := EnemyDB.HP_BASE
+const HP_GROWTH := EnemyDB.HP_GROWTH
+const HP_LATE_WAVE := EnemyDB.HP_LATE_WAVE
+const HP_LATE_GROWTH := EnemyDB.HP_LATE_GROWTH
+const SPAWN_BASE := EnemyDB.SPAWN_BASE
+const SPAWN_GROWTH := EnemyDB.SPAWN_GROWTH
+const SPAWN_CAP_MULT := EnemyDB.SPAWN_CAP_MULT
+const MAX_ENEMIES := EnemyDB.MAX_ENEMIES
+const SPAWN_R_MIN := EnemyDB.SPAWN_R_MIN
+const SPAWN_R_MAX := EnemyDB.SPAWN_R_MAX
+const CONTACT_DPS := EnemyDB.CONTACT_DPS
+const CROWD_CAP := EnemyDB.CROWD_CAP
+const ELITE_FIRST_WAVE := EnemyDB.ELITE_FIRST_WAVE
+const ELITE_EVERY := EnemyDB.ELITE_EVERY
+const ELITE_MAX := EnemyDB.ELITE_MAX
+const SHOOTER_MAX := EnemyDB.SHOOTER_MAX
 
-## 武器种类：射程 / 间隔 / 目标数 是三种不同的资源。
-## 冲锋枪：高射速换弹药消耗；霰弹枪：多目标换单体伤害；狙击枪：长射程低消耗换出手频率。
-## targets = -1 表示「范围内全部敌人」（激光环的清场定位）。
-## 多目标伤害分摊：per = dmg × (1 + 0.1×(hits−1)) / hits —— 打得越多总伤越高，但每个目标更低。
-const WEAPONS := {
-	"pistol": {"name": "手枪", "range": 300.0, "interval": 0.70, "targets": 2, "mul": 1.00, "base": 1.0, "color": Color(0.55, 0.80, 1.00)},
-	"smg": {"name": "冲锋枪", "range": 210.0, "interval": 0.30, "targets": 1, "mul": 1.10, "base": 0.5, "color": Color(1.00, 0.85, 0.45)},
-	"shotgun": {"name": "霰弹枪", "range": 200.0, "interval": 0.90, "targets": 5, "mul": 1.11, "base": 0.8, "color": Color(1.00, 0.62, 0.35)},
-	"sniper": {"name": "狙击枪", "range": 640.0, "interval": 2.50, "targets": 1, "mul": 1.00, "base": 3.0, "color": Color(0.70, 0.95, 0.75), "prefer": "shooter,charger"},
-	"laser": {"name": "激光环", "range": 420.0, "interval": 40.0, "targets": -1, "mul": 4.00, "base": 2.0, "color": Color(0.85, 0.55, 1.00)},
-	"beam": {"name": "镭射", "range": 380.0, "interval": 0.20, "targets": 1, "mul": 1.00, "base": 0.6, "color": Color(0.42, 0.98, 0.92), "prefer": "highest_hp"},
-	"grenade": {"name": "榴弹炮", "range": 460.0, "interval": 1.60, "targets": 1, "mul": 1.30, "base": 0.8, "color": Color(1.00, 0.52, 0.22)},
-	"blade": {"name": "环绕刃", "range": 105.0, "interval": 1.80, "targets": -1, "mul": 0.80, "base": 0.4, "color": Color(0.80, 0.92, 0.45)},
-}
-## 开局随机一把（激光环 wave 8 之后才入池）
-const START_POOL := ["pistol", "smg", "shotgun"]
-const WAVE_SEC := 40.0
-const DROP_CHANCE := 0.30
-const CHEST_GUARANTEE := 90.0
-const HP_BASE := 1.80
-const HP_GROWTH := 1.118
-const SPAWN_BASE := 1.20
-const SPAWN_GROWTH := 1.190
-const MAX_ENEMIES := 560
-## 生成半径必须落在**镜头视野之外**：zoom 0.62 时半个屏幕是 1032×580，
-## 对角约 1184，所以 >1200 才能保证任何角度都在屏幕外，让敌人「走」进来而不是凭空出现
-const SPAWN_R_MIN := 1220.0
-const SPAWN_R_MAX := 1400.0
+## 升级四选一的 buff 池（scripts/data/buffs_db.gd）
+const BUFFS := BuffDB.BUFFS
+
+# ============================================================================
+# 留在本文件的调参（还没归属到某张表）
+# ============================================================================
+## 升级成本：3 × 1.18^(level−1) 个模块
 const LEVEL_COST_BASE := 3.0
 const LEVEL_COST_GROWTH := 1.18
-const CONTACT_DPS := 2.2
 ## 受击补偿：每损失这么多 HP 补 1 个模块（弹药系统的劣势补偿，挨打就回填）
 const DAMAGE_PER_MODULE := 8.0
-const CROWD_CAP := 6
 const FIRE_RANGE := 260.0
 const PULSE_DUR := 0.30
 
-## 敌人种类：hp_mult = (100 / 速度)^1.5 —— 速度越快血越少。
-## 以后加新怪直接套这个公式，不用一张张手调。
-const ENEMY_KINDS := {
-	"flood": {"speed": 100.0, "hp_mult": 1.00, "radius": 13.0, "color": Color(0.92, 0.30, 0.34)},
-	"runner": {"speed": 205.0, "hp_mult": 0.45, "radius": 9.0, "color": Color(1.00, 0.70, 0.26)},
-	"rock": {"speed": 52.0, "hp_mult": 2.67, "radius": 19.0, "color": Color(0.56, 0.46, 0.86)},
-	"shooter": {"speed": 70.0, "hp_mult": 1.71, "radius": 12.0, "color": Color(0.62, 0.86, 1.00)},
-	# 精英血量是手设的 9.0（不套公式：它靠冲刺而非堆血量制造威胁）
-	"charger": {"speed": 78.0, "hp_mult": 9.00, "radius": 20.0, "color": Color(1.00, 0.36, 0.42)},
-	# bulwark：慢速高血量「墙」，专在玩家前方生成逼走位（docs/plan-v3.md §3）
-	"bulwark": {"speed": 46.0, "hp_mult": 4.20, "radius": 22.0, "color": Color(0.44, 0.72, 0.62)},
-}
-
-## 波次编成：coeff = 总血量预算系数（1.0 = 涌潮基准），kinds = 相对权重。
-## 每 5 波循环一次，所以玩家能从「这波怪变多了/变硬了」读出编成变化。
-const WAVE_PLANS := [
-	{"name": "涌潮", "coeff": 1.00, "kinds": {"flood": 1.0}},
-	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 5.0, "runner": 3.0, "shooter": 2.0}},
-	{"name": "疾行", "coeff": 1.40, "kinds": {"runner": 1.0}},
-	{"name": "磐石", "coeff": 0.60, "kinds": {"rock": 1.0}},
-	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 4.0, "rock": 2.0, "runner": 2.0, "shooter": 1.0}},
-]
-
-## 精英：wave 4 首只，之后每 6 波保证一只；同屏上限 3
-const ELITE_FIRST_WAVE := 4
-const ELITE_EVERY := 6
-const ELITE_MAX := 3
-const SHOOTER_MAX := 5
-
+# ============================================================================
+# 状态
+# ============================================================================
 ## 背包：武器与合成装置共同占用容量（-1 = 先不做上限）
 var backpack_cap := 6
 var weapons: Array = []
@@ -1398,8 +1331,8 @@ func _refresh_dbg_panel(enemy_total: int) -> void:
 ## 波次血量：12 波之前走平缓曲线；之后额外乘 1.045/波 —— 这时玩家武器基本成型，
 ## 难度不提就会被碾压（曲线要追着玩家的构筑跑，而不是线性增长）
 func _wave_hp() -> float:
-	var late := maxf(0.0, float(wave - 12))
-	return HP_BASE * pow(HP_GROWTH, wave - 1) * pow(1.045, late)
+	var late := maxf(0.0, float(wave - HP_LATE_WAVE))
+	return HP_BASE * pow(HP_GROWTH, wave - 1) * pow(HP_LATE_GROWTH, late)
 
 
 ## 当前波次的编成模板（每 5 波循环一次）
@@ -1426,7 +1359,7 @@ func _spawn_rate() -> float:
 	# 数量优先：指数刷怪（1.20 × 1.19^波），血量只温和地涨，压力主要来自「人多」
 	var base: float = SPAWN_BASE * pow(SPAWN_GROWTH, float(wave))
 	var raw: float = base * float(_plan()["coeff"])
-	return minf(raw, base * 1.8)
+	return minf(raw, base * SPAWN_CAP_MULT)
 
 
 func _pick_kind() -> String:
@@ -1473,24 +1406,6 @@ func _make_weapon(id: String, q: int) -> Dictionary:
 	_roll_weapon(w)
 	return w
 
-
-# --- 武器随机数值（方案 v2.8 §17）------------------------------------------------
-# 分值只在同种类内比较：P0(id) = 该类型的「蓝档 100 分」。
-# 随机改的是「形状」（射程/间隔/基础/目标数/专属字段），总分用 mul 归一化钉回 band，
-# 所以同类型同品级的两把一定强度相当、手感不同。
-const QM := {1: 0.55, 2: 0.75, 3: 1.00, 4: 1.35, 5: 1.80}
-
-# 每种武器自己的浮动幅度：r 射程 / i 间隔 / b 基础 / tg 目标+1 概率 / x 专属字段
-const ROLL_P := {
-	"pistol": {"r": 0.10, "i": 0.12, "b": 0.15, "tg": 0.12},
-	"smg": {"r": 0.08, "i": 0.10, "b": 0.20, "tg": 0.0},
-	"shotgun": {"r": 0.08, "i": 0.10, "b": 0.15, "tg": 0.0},
-	"sniper": {"r": 0.12, "i": 0.08, "b": 0.18, "tg": 0.10},
-	"beam": {"r": 0.10, "i": 0.08, "b": 0.15, "tg": 0.0, "x": 0.20},
-	"grenade": {"r": 0.10, "i": 0.10, "b": 0.15, "tg": 0.0, "x": 0.15},
-	"blade": {"r": 0.12, "i": 0.10, "b": 0.15, "tg": 0.0, "x": 0.12},
-	"laser": {"r": 0.10, "i": 0.15, "b": 0.15, "tg": 0.0},
-}
 
 
 func _eff_targets(w: Dictionary) -> float:
@@ -1946,14 +1861,6 @@ func _spawn(delta: float) -> void:
 		spawn_acc -= float(size)
 		_emit_pattern(String(pat["id"]), size)
 
-
-## 生成编队：单点 / 一团 / 弧线 / 一圈。同样的人数，排布不同，压迫感完全不同。
-const PATTERNS := [
-	{"id": "single", "w": 46, "min": 1, "max": 1, "wave": 1},
-	{"id": "cluster", "w": 28, "min": 4, "max": 7, "wave": 2},
-	{"id": "arc", "w": 18, "min": 6, "max": 9, "wave": 4},
-	{"id": "ring", "w": 16, "min": 10, "max": 14, "wave": 6},
-]
 
 
 func _pick_pattern() -> Dictionary:
