@@ -241,6 +241,9 @@ var build_close_btn: Button = null
 var build_back_btn: Button = null
 var uitest := false
 var uitest_step := 0
+var drag_test := false
+var drag_demo := false
+var dt_step := 0
 var tab := 0
 var tab_bar: Control = null
 var tab_body: Control = null
@@ -251,6 +254,19 @@ var noautoplan := false
 var god := false
 var cheat_arg := ""
 var plan_fix_t := 0.0
+var dev_pick_for := -1
+var no_auto_craft := false
+# --- 鼠标拖拽（构筑屏）---
+var drag := {}
+var drag_layer: Control = null
+var drag_ghost: Panel = null
+var drag_label: Label = null
+var drag_hl: Panel = null
+var drag_hint: Label = null
+var recycle_btn: Button = null
+var slot_rects: Array = []
+var slot_panels: Array = []
+var inv_rows: Array = []
 var plan_missing_demo := false
 var dbg_acc := 0.0
 var _pick_from_build := false
@@ -317,6 +333,11 @@ func _ready() -> void:
 		elif a == "autoplan":
 			autoplan = true
 			noautoplan = false
+		elif a.begins_with("devpick="):
+			dev_pick_for = int(a.substr(8))
+			tab = 2
+		elif a == "noautocraft":
+			no_auto_craft = true
 		elif a == "noautoplan":
 			autoplan = false
 			noautoplan = true
@@ -324,6 +345,10 @@ func _ready() -> void:
 			tab = int(a.substr(4))
 		elif a == "planmissing":
 			plan_missing_demo = true
+		elif a == "dragdemo":
+			drag_demo = true
+		elif a == "dragtest":
+			drag_test = true
 		elif a == "uitest":
 			uitest = true
 		elif a == "swarmtest":
@@ -386,6 +411,9 @@ func _ready() -> void:
 			weapon.plan[i] = "reson"
 	if cheat_arg != "":
 		_apply_cheats(cheat_arg)
+	# bot / playtest 默认把所有装置设成自动，等价于旧版「装置一直在干活」的行为
+	if (playtest or bot) and not no_auto_craft:
+		_sync_device_auto(true)
 	_refresh_hud()
 	_test_banner()
 
@@ -545,7 +573,7 @@ func _new_module(mid: String) -> Dictionary:
 
 
 func _new_device() -> Dictionary:
-	return {"kind": "", "left": 0.0, "total": 0.0}
+	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": []}
 
 
 ## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
@@ -564,8 +592,8 @@ func _idle_device() -> int:
 func _busy_devices() -> int:
 	var n := 0
 	for d in devices:
-		# kind 是 int（0 = 空闲）。以前写 String(kind) != ""，恒为真 → 空闲数永远显示 0
-		if int(d["kind"]) != 0:
+		# kind 是模块 id 字符串（"" = 空闲）。写成 int(kind) 会得到 0，把在干活的装置当成空闲。
+		if String(d["kind"]) != "":
 			n += 1
 	return n
 
@@ -580,8 +608,17 @@ func buy_device() -> bool:
 	if _inv("base") < cost:
 		return false
 	_take_inv("base", cost)
-	devices.append(_new_device())
+	var nd := _new_device()
+	# bot / playtest 里新装置默认开机自动，否则平衡测试会因为「装置没人管」而失真
+	nd["auto"] = (playtest or bot) and not no_auto_craft
+	devices.append(nd)
 	return true
+
+
+## 一键把自动开关同步到所有装置（bot 用）
+func _sync_device_auto(on: bool) -> void:
+	for d in devices:
+		d["auto"] = on
 
 
 func _make_player() -> void:
@@ -683,6 +720,45 @@ func _make_hud() -> void:
 	board_root.position = Vector2(100, 185)
 	build_root.add_child(board_root)
 
+	# 卸载区：把电路板上的模块拖到这里 = 卸下退回库存（见 docs/plan-v3.md §1）
+	recycle_btn = UIKit.button("⌫ 拖到此处卸下", Vector2(150, 40), UIKit.C_RED, 14)
+	recycle_btn.position = Vector2(330, 640)
+	recycle_btn.tooltip_text = "把电路板上的模块拖进来：卸下并退回库存，同时清空这一格的方案"
+	build_root.add_child(recycle_btn)
+
+	# 拖拽层：幽灵 + 落点高亮 + 出力预览（全部 IGNORE，不抢鼠标）
+	drag_layer = Control.new()
+	drag_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	drag_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	drag_layer.visible = false
+	build_root.add_child(drag_layer)
+
+	drag_ghost = Panel.new()
+	drag_ghost.size = Vector2(210, 34)
+	drag_ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var gsb := StyleBoxFlat.new()
+	gsb.set_corner_radius_all(8)
+	gsb.bg_color = Color(0.10, 0.13, 0.19, 0.94)
+	gsb.set_border_width_all(2)
+	gsb.border_color = UIKit.C_GOLD
+	drag_ghost.add_theme_stylebox_override("panel", gsb)
+	drag_label = Label.new()
+	drag_label.position = Vector2(10, 6)
+	drag_label.add_theme_font_size_override("font_size", 15)
+	drag_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	drag_ghost.add_child(drag_label)
+	drag_layer.add_child(drag_ghost)
+
+	drag_hl = Panel.new()
+	drag_hl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	drag_hl.visible = false
+	drag_layer.add_child(drag_hl)
+
+	drag_hint = Label.new()
+	drag_hint.add_theme_font_size_override("font_size", 16)
+	drag_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	drag_layer.add_child(drag_hint)
+
 	build_info = Label.new()
 	build_info.position = Vector2(660, 168)
 	build_info.add_theme_font_size_override("font_size", 16)
@@ -712,8 +788,16 @@ func _make_hud() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# 拖拽优先：构筑屏里的按住-拖动-松开由这里独占（见 docs/plan-v3.md §1）
+	if build_root != null and build_root.visible and not dead:
+		if _drag_input(event):
+			return
 	# 统一返回：ESC / 鼠标右键 都能退出最上层的界面（选卡 -> 构筑）
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if not drag.is_empty():
+			drag = {}
+			_drag_clear()
+			return
 		if _close_topmost():
 			return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
@@ -842,6 +926,10 @@ func _process(delta: float) -> void:
 		_open_pick()
 	if shot_build and not build_root.visible:
 		_toggle_build()
+	if drag_demo and not dt_step:
+		dt_step = 1
+		await get_tree().process_frame
+		await _dragdemo_pose()
 	await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	var img := get_viewport().get_texture().get_image()
@@ -850,12 +938,88 @@ func _process(delta: float) -> void:
 	get_tree().quit()
 
 
+func _push_btn(p: Vector2, pressed: bool) -> void:
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.position = p
+	ev.global_position = p
+	get_viewport().push_input(ev)
+
+
+## 拖拽演示：按下并拖到第 2 格上方但不松手，留着给截图用（幽灵 + 落点预览）
+func _dragdemo_pose() -> void:
+	tab = 0
+	_refresh_build()
+	await get_tree().process_frame
+	if inv_rows.is_empty() or slot_rects.size() < 2:
+		print("DRAGDEMO skip")
+		return
+	var row: Dictionary = inv_rows[0]
+	for r in inv_rows:
+		if String(r["mid"]) != "base":
+			row = r
+			break
+	var from: Vector2 = (row["rect"] as Rect2).get_center()
+	var to: Vector2 = (slot_rects[1] as Rect2).get_center() + Vector2(30, 26)
+	_push_btn(from, true)
+	var mm := InputEventMouseMotion.new()
+	mm.position = to
+	mm.global_position = to
+	get_viewport().push_input(mm)
+	print("DRAGDEMO active=%s mid=%s preview_shown=%s" % [str(drag.get("active", false)), String(row["mid"]), str(drag_hl.visible)])
+
+
+## 拖拽自检：真鼠标事件把库存第一行拖到第 2 格，打印前后槽位内容
+func _run_dragtest() -> void:
+	_toggle_build()
+	tab = 0
+	_refresh_build()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if inv_rows.is_empty() or slot_rects.size() < 2:
+		print("DRAGTEST skip inv=%d slots=%d" % [inv_rows.size(), slot_rects.size()])
+		get_tree().quit()
+		return
+	# 优先挑一个和当前槽位不同的模块，才能看出「真的换了 id」
+	var row: Dictionary = inv_rows[0]
+	for r in inv_rows:
+		if String(r["mid"]) != String(weapon.slots[1]["id"]) if weapon.slots[1] != null else true:
+			row = r
+			break
+	var mid := String(row["mid"])
+	var from: Vector2 = (row["rect"] as Rect2).get_center()
+	var to: Vector2 = (slot_rects[1] as Rect2).get_center()
+	var before := str(weapon.slots[1])
+	var inv_before := _inv(mid)
+	_push_btn(from, true)
+	var mm := InputEventMouseMotion.new()
+	mm.position = to
+	mm.global_position = to
+	get_viewport().push_input(mm)
+	_push_btn(to, false)
+	print("DRAGTEST mid=%s inv %d->%d  slot1 %s -> %s  plan1=%s  active=%s" % [
+		mid, inv_before, _inv(mid), before, str(weapon.slots[1]), str(weapon.plan[1]), str(drag.get("active", false))])
+	get_tree().quit()
+
+
 func _physics_process(delta: float) -> void:
+	if drag_test and dt_step == 0 and not playtest:
+		pass
+	if drag_test and dt_step == 0:
+		dt_step = 1
+		_run_dragtest()
 	# UI 底座自检：开构筑屏 → 打印坐标诊断 → 合成一次真实鼠标点击 → 看是否真点到 ×
 	if uitest and uitest_step == 0:
 		uitest_step = 1
 		_toggle_build()
 		print("UITEST " + UIKit.diag(self, build_root))
+		print("UITEST vp=%s slot0_local=%s slot0_global=%s inv0=%s slots=%d inv_rows=%d" % [
+			str(get_viewport().get_visible_rect().size),
+			str(slot_rects[0]) if slot_rects.size() > 0 else "none",
+			str((slot_panels[0] as Control).get_global_rect()) if slot_panels.size() > 0 else "none",
+			str(inv_rows[0]["rect"]) if inv_rows.size() > 0 else "none",
+			slot_rects.size(), inv_rows.size()])
 		if build_close_btn != null:
 			print("UITEST close_rect=%s visible_in_tree=%s" % [
 				str(build_close_btn.get_global_rect()), str(build_close_btn.is_visible_in_tree())])
@@ -1686,8 +1850,14 @@ func _craft_tick(delta: float) -> void:
 		var k := String(d["kind"])
 		d["kind"] = ""
 		d["left"] = 0.0
+		d["total"] = 0.0
+		d["paid"] = []
 		crafted[k] = int(crafted.get(k, 0)) + 1
 		_install(k)
+		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
+		if bool(d.get("auto", false)):
+			if not try_craft(k, devices.find(d)):
+				try_craft("", devices.find(d))
 
 
 ## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
@@ -2754,9 +2924,14 @@ func recipe_state(mid: String) -> Dictionary:
 ## 合成吃「库存」（槽位是工作区，绝不能被合成顺手拆掉）。
 ## 有空闲装置才能开工，产物在 _craft_tick 到点后进板子。
 ## mid = "" 表示自动选配方。
-func try_craft(mid: String = "") -> bool:
-	var idx := _idle_device()
+## 让某台装置开始做某个配方。idx = -1 表示「第一台空闲装置」。
+## 返回 true 表示真的开工了（材料已扣）。
+func try_craft(mid: String = "", idx: int = -1) -> bool:
 	if idx < 0:
+		idx = _idle_device()
+	if idx < 0 or idx >= devices.size():
+		return false
+	if String(devices[idx]["kind"]) != "":
 		return false
 	if mid == "":
 		mid = _auto_recipe()
@@ -2766,12 +2941,53 @@ func try_craft(mid: String = "") -> bool:
 	if not bool(st["ok"]):
 		return false
 	var t := int(st["tier"])
-	_take_tier(t - 1, int(st["cost"]))
+	var need := int(st["cost"])
+	# 记录实际扣掉的模块 id，取消合成时按原样退还（种类可能混着，例如 2 个基础 1 个加法）
+	var paid: Array = []
+	for i in need:
+		var got := _take_one_of_tier(t - 1)
+		if got == "":
+			break
+		paid.append(got)
+	if paid.size() < need:
+		for p in paid:
+			_add_inv(String(p), 1)
+		return false
 	var dur := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
 	devices[idx]["kind"] = mid
 	devices[idx]["total"] = dur
 	devices[idx]["left"] = dur
+	devices[idx]["paid"] = paid
 	return true
+
+
+## 从库存里取走一个指定阶的模块，返回它的 id（取不到返回 ""）
+func _take_one_of_tier(t: int) -> String:
+	var best := ""
+	var best_n := 0
+	for k in _ids_all():
+		if int(MODULES[k]["tier"]) != t:
+			continue
+		if _inv(k) > best_n:
+			best_n = _inv(k)
+			best = String(k)
+	if best == "":
+		return ""
+	_add_inv(best, -1)
+	return best
+
+
+## 取消某台装置的合成：材料全额退还
+func device_cancel(idx: int) -> void:
+	if idx < 0 or idx >= devices.size():
+		return
+	var paid: Array = devices[idx].get("paid", [])
+	for p in paid:
+		_add_inv(String(p), 1)
+	devices[idx]["kind"] = ""
+	devices[idx]["left"] = 0.0
+	devices[idx]["total"] = 0.0
+	devices[idx]["paid"] = []
 
 
 func _auto_recipe() -> String:
@@ -3001,6 +3217,8 @@ func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, ena
 		var b := UIKit.button(btn, Vector2(66, 28), UIKit.C_GREEN if enabled else UIKit.C_DIM, 14)
 		b.position = Vector2(524, y)
 		b.disabled = not enabled
+		if not enabled:
+			b.modulate = Color(1, 1, 1, 0.45)  # 禁用态再压暗一档，一眼看出点不动
 		if tip != "":
 			b.tooltip_text = tip
 		b.pressed.connect(cb)
@@ -3010,6 +3228,8 @@ func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, ena
 func _rebuild_tab_inv() -> void:
 	var y := 0.0
 	var any := false
+	var rest := 0
+	inv_rows.clear()
 	for k in _ids_all():
 		var mid := String(k)
 		var n := _inv(mid)
@@ -3017,13 +3237,20 @@ func _rebuild_tab_inv() -> void:
 			continue
 		any = true
 		var d: Dictionary = MODULES[mid]
+		if y >= 340.0:
+			rest += 1
+			continue
 		_tab_row(y, "%s  ×%d      %d 阶    出力 %.1f    寿命 %d" % [
 			String(d["name"]), n, int(d["tier"]), float(d["rate"]), int(d["uses"])
 		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "装入",
 			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格", "拿起", _pick_up.bind(mid))
+		# 拖拽命中用：tab_body 局部坐标下的整行矩形（右侧按钮区会被 _over_inv_area 排除）
+		inv_rows.append({'mid': mid, 'rect': Rect2(tab_body.position + Vector2(0, y), Vector2(360, 34))})
 		y += 34.0
 	if not any:
 		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "库存空：打怪掉落会先进这里"
+	elif rest > 0:
+		_label(tab_body, Vector2(0, y + 2), 15, UIKit.C_DIM).text = "还有 %d 种模块没显示（先合成/升级消化掉）" % rest
 
 
 func _rebuild_tab_recipe() -> void:
@@ -3053,22 +3280,135 @@ func _rebuild_tab_recipe() -> void:
 
 
 func _rebuild_tab_device() -> void:
+	if dev_pick_for >= 0:
+		_rebuild_device_pick()
+		return
 	var y := 0.0
 	for i in devices.size():
 		var dv: Dictionary = devices[i]
-		var kind := int(dv["kind"])
-		var busy := kind != 0
+		var kind := String(dv["kind"])
+		var busy := kind != ""
+		var nm := String(MODULES[kind]["name"]) if MODULES.has(kind) else ""
 		var txt := "装置 %d    空闲" % (i + 1)
 		if busy:
-			txt = "装置 %d    合成 %s    剩余 %.1fs" % [
-				i + 1, String(MODULES[MOD_ORDER[kind - 1]]["name"]), float(dv["left"])]
-		_tab_row(y, txt, UIKit.C_GOLD if busy else UIKit.C_DIM, "", Callable(), false)
-		y += 34.0
-	if devices.size() < DEVICE_MAX and y < 300.0:
+			txt = "装置 %d    %s    %.1fs / %.1fs" % [i + 1, nm, float(dv["left"]), float(dv["total"])]
+		var l := _label(tab_body, Vector2(0, y), 15, UIKit.C_GOLD if busy else UIKit.C_DIM)
+		l.text = txt
+		if busy:
+			var bw := 330.0
+			var bg := ColorRect.new()
+			bg.color = Color(0.16, 0.18, 0.24)
+			bg.position = Vector2(0, y + 22)
+			bg.size = Vector2(bw, 6)
+			bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			tab_body.add_child(bg)
+			var total := maxf(float(dv["total"]), 0.01)
+			var pct := clampf(1.0 - float(dv["left"]) / total, 0.0, 1.0)
+			var fg := ColorRect.new()
+			fg.color = UIKit.C_GOLD
+			fg.position = Vector2(0, y + 22)
+			fg.size = Vector2(bw * pct, 6)
+			fg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			tab_body.add_child(fg)
+		# 选配方 / 取消
+		var act := UIKit.button("取消" if busy else "选配方", Vector2(78, 26),
+			UIKit.C_RED if busy else UIKit.C_BLUE, 14)
+		act.position = Vector2(340, y - 2)
+		act.tooltip_text = "取消并全额退还材料" if busy else "给这台装置挑一个配方"
+		if busy:
+			act.pressed.connect(_cancel_device.bind(i))
+		else:
+			act.pressed.connect(_set_dev_pick.bind(i))
+		tab_body.add_child(act)
+		# 自动
+		var au := bool(dv.get("auto", false))
+		var ab := UIKit.button("自动 开" if au else "自动 关", Vector2(86, 26),
+			UIKit.C_GREEN if au else UIKit.C_DIM, 14)
+		ab.position = Vector2(426, y - 2)
+		ab.tooltip_text = "做完自动接下一个配方（材料够的话）"
+		ab.pressed.connect(_toggle_dev_auto.bind(i))
+		tab_body.add_child(ab)
+		y += 44.0
+	var idle := devices.size() - _busy_devices()
+	var auto_n := 0
+	for d in devices:
+		if bool(d.get("auto", false)):
+			auto_n += 1
+	var head := _label(tab_body, Vector2(0, y + 2), 13, UIKit.C_DIM)
+	head.text = "共 %d 台 · 空闲 %d · 自动 %d" % [devices.size(), idle, auto_n]
+	y += 26.0
+	if devices.size() < DEVICE_MAX:
 		_tab_row(y, "再造一台装置（需要 %d 个基础模块）" % device_cost(), UIKit.C_BLUE, "造",
 			_buy_device_from_tab, _inv("base") >= device_cost(), "吃基础模块；装置越多并行合成越快")
-	elif devices.size() >= DEVICE_MAX:
+	else:
 		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
+
+
+## 装置页的二级列表：给某一台装置挑配方
+func _rebuild_device_pick() -> void:
+	var back := UIKit.back_button(tab_body, "返回装置列表", _set_dev_pick.bind(-1), Vector2(0, 0))
+	back.tooltip_text = ""
+	var t := _label(tab_body, Vector2(150, 6), 15, UIKit.C_GOLD)
+	t.text = "装置 %d —— 选择配方" % (dev_pick_for + 1)
+	var y := 44.0
+	var shown := 0
+	for k in MOD_ORDER:
+		var mid := String(k)
+		var d: Dictionary = MODULES[mid]
+		if level < int(CRAFT_UNLOCK.get(mid, 99)) and not _has_weapon_bind(String(d.get("bind", ""))):
+			continue
+		var st := recipe_state(mid)
+		var ok := bool(st["ok"])
+		var cost := int(st["cost"])
+		var tier := int(st["tier"])
+		var secs := float(CRAFT_TIME[tier]) * pow(0.90, float(_bl("craft")))
+		var txt := "%s   %d×%d 阶料 · %.0fs" % [String(d["name"]), cost, tier - 1, secs]
+		if not ok:
+			txt += "    " + String(st["state"])
+		_tab_row(y, txt, Color(d.get("color", UIKit.C_TEXT)), "开始", _start_dev_recipe.bind(mid),
+			ok, "材料不够或未解锁时不能开工")
+		y += 30.0
+		shown += 1
+		if shown >= 11:
+			break
+	if shown == 0:
+		_label(tab_body, Vector2(0, y), 14, UIKit.C_DIM).text = "还没有可用配方（升级解锁更多）"
+
+
+func _has_weapon_bind(bind: String) -> bool:
+	if bind == "":
+		return true
+	for w in weapons:
+		if String(w["id"]) == bind:
+			return true
+	return false
+
+
+func _set_dev_pick(i: int) -> void:
+	dev_pick_for = i
+	_refresh_build()
+
+
+func _start_dev_recipe(mid: String) -> void:
+	var idx := dev_pick_for
+	dev_pick_for = -1
+	if idx >= 0:
+		try_craft(mid, idx)
+	_refresh_build()
+
+
+func _cancel_device(i: int) -> void:
+	device_cancel(i)
+	_refresh_build()
+
+
+func _toggle_dev_auto(i: int) -> void:
+	if i >= 0 and i < devices.size():
+		devices[i]["auto"] = not bool(devices[i].get("auto", false))
+		# 打开自动时如果它是空闲的，立刻开一单，不然玩家会以为开关没生效
+		if bool(devices[i]["auto"]) and String(devices[i]["kind"]) == "":
+			try_craft("", i)
+	_refresh_build()
 
 
 ## 把某个模块拿在手里（下一步点格子放下）
@@ -3126,6 +3466,8 @@ func _rebuild_board() -> void:
 				link.size = Vector2(4.0, step - cell + 8.0)
 			link.position = (pa + pb) * 0.5 - link.size * 0.5
 			board_root.add_child(link)
+	slot_rects.clear()
+	slot_panels.clear()
 	for i in weapon.layout.size():
 		var p: Vector2i = weapon.layout[i]
 		var m = weapon.slots[i]
@@ -3152,6 +3494,9 @@ func _rebuild_board() -> void:
 		panel.tooltip_text = _slot_tip(i)
 		panel.gui_input.connect(_on_slot_input.bind(i))
 		board_root.add_child(panel)
+		# 拖拽命中用：build_root 局部坐标下的格子矩形（board_root 是 build_root 的子节点）
+		slot_rects.append(Rect2(board_root.position + panel.position, panel.size))
+		slot_panels.append(panel)
 
 		var name_l := Label.new()
 		name_l.position = Vector2(0, 7)
@@ -3203,6 +3548,196 @@ func _rebuild_board() -> void:
 
 
 ## 鼠标点格子：左键 = 放入手里的模块（或没拿东西时自动挑最优 / 按方案补料），右键 = 卸下
+# --- 鼠标拖拽：按住 → 拖动 → 松开（docs/plan-v3.md §1）----------------------------
+# 坐标全部用 build_root 的局部坐标（build_root.get_local_mouse_position()）：
+# 之前踩过 pick_root.get_global_rect() 是 2560×1440（画布 2× 放大）的坑，用局部坐标就不需要补偿。
+
+func _drag_input(ev: InputEvent) -> bool:
+	if ev is InputEventMouseButton:
+		var mb := ev as InputEventMouseButton
+		if mb.button_index != MOUSE_BUTTON_LEFT:
+			return false
+		# 必须用事件自带的坐标换算成 build_root 局部坐标：get_local_mouse_position() 读的是真实的系统光标，
+		# 自检时用 push_input 塞进来的假事件不会移动光标，会导致命中判定永远落空
+		var mp := build_root.get_global_transform_with_canvas().affine_inverse() * mb.position
+		if mb.pressed:
+			return _drag_begin(mp)
+		if drag.is_empty():
+			return false
+		var active := bool(drag.get("active", false))
+		if active:
+			_drag_drop(mp)
+		else:
+			_drag_click_fallback()
+		drag = {}
+		_drag_clear()
+		get_viewport().set_input_as_handled()
+		return true
+	if ev is InputEventMouseMotion and not drag.is_empty():
+		var mm := ev as InputEventMouseMotion
+		_drag_move(build_root.get_global_transform_with_canvas().affine_inverse() * mm.position)
+		if bool(drag.get("active", false)):
+			get_viewport().set_input_as_handled()
+			return true
+	return false
+
+
+func _drag_begin(mp: Vector2) -> bool:
+	var hit := _drag_hit(mp)
+	if hit.is_empty():
+		return false
+	drag = {"src": hit["src"], "mid": hit["mid"], "from": int(hit["idx"]),
+		"start": mp, "pos": mp, "active": false}
+	return true
+
+
+## 拖拽源：电路板上有模块的格子 > 库存行的文字区（避开右侧「拿起/装入」按钮）
+func _drag_hit(mp: Vector2) -> Dictionary:
+	var si := _slot_at(mp)
+	if si >= 0:
+		var m = weapon.slots[si]
+		if m != null:
+			return {"src": "slot", "mid": String(m["id"]), "idx": si}
+		return {}
+	if tab == 0:
+		for r in inv_rows:
+			if (r["rect"] as Rect2).has_point(mp):
+				return {"src": "inv", "mid": String(r["mid"]), "idx": 0}
+	return {}
+
+
+func _slot_at(mp: Vector2) -> int:
+	for i in slot_rects.size():
+		if (slot_rects[i] as Rect2).has_point(mp):
+			return i
+	return -1
+
+
+func _drag_move(mp: Vector2) -> void:
+	drag["pos"] = mp
+	if not bool(drag["active"]) and mp.distance_to(drag["start"] as Vector2) > 6.0:
+		drag["active"] = true
+		drag_layer.visible = true
+		var mid := String(drag["mid"])
+		var col: Color = MODULES[mid]["color"]
+		drag_label.text = "▣ %s   ×%d" % [String(MODULES[mid]["name"]), _inv(mid)]
+		drag_label.add_theme_color_override("font_color", col)
+	if not bool(drag["active"]):
+		return
+	drag_ghost.position = mp + Vector2(14, 10)
+	_drag_highlight(mp)
+
+
+func _drag_highlight(mp: Vector2) -> void:
+	var t := _slot_at(mp)
+	var over_recycle := recycle_btn != null and recycle_btn.get_global_rect().has_point(get_global_mouse_position())
+	drag_hint.position = Vector2(100, 150)
+	if t >= 0:
+		drag_hl.visible = true
+		var r: Rect2 = slot_rects[t]
+		drag_hl.position = r.position
+		drag_hl.size = r.size
+		var sb := StyleBoxFlat.new()
+		sb.set_corner_radius_all(10)
+		sb.set_border_width_all(3)
+		sb.bg_color = Color(0, 0, 0, 0)
+		sb.border_color = UIKit.C_GOLD
+		drag_hl.add_theme_stylebox_override("panel", sb)
+		var ok := true
+		if String(drag["src"]) == "inv" and _inv(String(drag["mid"])) <= 0:
+			ok = false
+		drag_hint.text = _drag_preview(t) if ok else "库存里已经没有这个模块了"
+		drag_hint.add_theme_color_override("font_color", UIKit.C_GREEN if ok else UIKit.C_RED)
+	elif over_recycle and String(drag["src"]) == "slot":
+		drag_hl.visible = false
+		drag_hint.text = "松手卸下：模块退回库存，这一格的方案也会清空"
+		drag_hint.add_theme_color_override("font_color", UIKit.C_RED)
+	else:
+		drag_hl.visible = false
+		drag_hint.text = "拖到电路板格子上放下（右键卸下，ESC 取消）"
+		drag_hint.add_theme_color_override("font_color", UIKit.C_DIM)
+
+
+## 落点预览：换完之后整板出力会变成多少（和 _board_total 同一套计算，所见即所得）
+func _drag_preview(t: int) -> String:
+	var now := _board_total(weapon)
+	var sl: Array = weapon.slots.duplicate()
+	if String(drag["src"]) == "slot":
+		var from := int(drag["from"])
+		var tmp = sl[from]
+		sl[from] = sl[t]
+		sl[t] = tmp
+	else:
+		sl[t] = _new_module(String(drag["mid"]))
+	var after := _board_total_slots(sl, weapon)
+	var d := after - now
+	var pct := 0.0 if now <= 0.0 else d / now * 100.0
+	return "整板出力 %.1f → %.1f   (%s%.0f%%)" % [now, after, "+" if d >= 0.0 else "", pct]
+
+
+func _board_total_slots(sl: Array, w = null) -> float:
+	var ww: Dictionary = weapon if w == null else w
+	var total := 0.0
+	for v in _slot_out(sl, ww):
+		total += float(v)
+	return total
+
+
+func _drag_drop(mp: Vector2) -> void:
+	var t := _slot_at(mp)
+	var src := String(drag["src"])
+	var from := int(drag["from"])
+	var mid := String(drag["mid"])
+	var over_recycle := recycle_btn != null and recycle_btn.get_global_rect().has_point(get_global_mouse_position())
+	if t >= 0:
+		if src == "inv":
+			_place_at(t, mid)
+		else:
+			_swap_slots(from, t)
+	elif src == "slot" and (over_recycle or _over_inv_area(mp)):
+		_uninstall(from)
+	_refresh_build()
+
+
+func _over_inv_area(mp: Vector2) -> bool:
+	if tab != 0 or tab_body == null:
+		return false
+	return Rect2(tab_body.position, Vector2(430, 340)).has_point(mp)
+
+
+func _swap_slots(a: int, b: int) -> void:
+	if a == b or a < 0 or b < 0:
+		return
+	var sl: Array = weapon["slots"]
+	var pl: Array = weapon["plan"]
+	if a >= sl.size() or b >= sl.size():
+		return
+	var m = sl[a]
+	var p = pl[a]
+	sl[a] = sl[b]
+	pl[a] = pl[b]
+	sl[b] = m
+	pl[b] = p
+
+
+## 没拖动就松手 = 普通点击：交给原有的格子点击逻辑（空格子补料等）
+func _drag_click_fallback() -> void:
+	if String(drag["src"]) == "slot":
+		var i := int(drag["from"])
+		if String(weapon.plan[i]) != "" and weapon.slots[i] == null:
+			_refill(i)
+			_refresh_build()
+
+
+func _drag_clear() -> void:
+	if drag_layer != null:
+		drag_layer.visible = false
+	if drag_hl != null:
+		drag_hl.visible = false
+	if drag_hint != null:
+		drag_hint.text = ""
+
+
 func _on_slot_input(event: InputEvent, i: int) -> void:
 	if not (event as InputEventMouseButton).pressed:
 		return
