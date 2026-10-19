@@ -20,6 +20,8 @@ const ModDB := preload("res://scripts/data/modules_db.gd")
 const WeaponDB := preload("res://scripts/data/weapons_db.gd")
 const EnemyDB := preload("res://scripts/data/enemies_db.gd")
 const BuffDB := preload("res://scripts/data/buffs_db.gd")
+const Inventory := preload("res://scripts/systems/inventory.gd")
+const Board := preload("res://scripts/systems/board.gd")
 
 ## 模块目录 + 配方 + 合成装置造价（scripts/data/modules_db.gd）
 const MODULES := ModDB.MODULES
@@ -90,7 +92,8 @@ var weapon: Dictionary = {}
 var sel := 0
 ## 构筑屏里当前选中的配方（MOD_ORDER 下标），[Q]/[E] 切换
 var recipe_sel := 0
-var inventory := {}
+## 模块库存（逻辑在 scripts/systems/inventory.gd）
+var inv := Inventory.new()
 ## 升级三选一：buffs[id] = 层数；offer = 本次 4 张卡；picking = 正在选卡（暂停战斗）
 var buffs := {}
 var offer: Array = []
@@ -1665,28 +1668,12 @@ func _ensure_weapon() -> void:
 ## 相邻 = 网格曼哈顿距离 1
 func _neighbors(i: int, w = null) -> Array:
 	var ww: Dictionary = weapon if w == null else w
-	var out: Array = []
-	var a: Vector2i = ww["layout"][i]
-	for j in (ww["layout"] as Array).size():
-		if j == i:
-			continue
-		var b: Vector2i = ww["layout"][j]
-		if absi(a.x - b.x) + absi(a.y - b.y) == 1:
-			out.append(j)
-	return out
+	return Board.neighbors(ww["layout"], i)
 
 
 ## 半径 r 内（曼哈顿距离 ≤ r）的所有槽位
 func _within(i: int, r: int) -> Array:
-	var out: Array = []
-	var a: Vector2i = weapon.layout[i]
-	for j in weapon.layout.size():
-		if j == i:
-			continue
-		var b: Vector2i = weapon.layout[j]
-		if absi(a.x - b.x) + absi(a.y - b.y) <= r:
-			out.append(j)
-	return out
+	return Board.within(weapon["layout"], i, r)
 
 
 ## 每个槽位这次的「出力」。
@@ -2464,6 +2451,12 @@ func _fmt_time(t: float) -> String:
 func _ids_all() -> Array:
 	return ["base"] + MOD_ORDER
 
+## 构筑屏里切换「当前配方」([Q]/[E])，并立刻重画右栏
+func _cycle_recipe(d: int) -> void:
+	recipe_sel = posmod(recipe_sel + d, MOD_ORDER.size())
+	_refresh_build()
+
+
 
 func _inv_str() -> String:
 	var parts: Array = []
@@ -2473,29 +2466,22 @@ func _inv_str() -> String:
 	return " ".join(parts)
 
 
-## ---- 库存：按模块 id 计数（同阶不同配方是不同的东西，不能再按 tier 合并）----
+## ---- 库存：真实逻辑在 scripts/systems/inventory.gd，这里只留薄封装，
+##      免得 192 个调用点全部改名（R2 之后会继续把调用点直接改成 inv.xxx）----
 func _inv(mid: String) -> int:
-	return int(inventory.get(mid, 0))
+	return inv.of(mid)
 
 
 func _add_inv(mid: String, n: int) -> void:
-	inventory[mid] = maxi(0, _inv(mid) + n)
+	inv.add(mid, n)
 
 
 func _take_inv(mid: String, n: int) -> void:
-	inventory[mid] = maxi(0, _inv(mid) - n)
-
-
-func _cycle_recipe(d: int) -> void:
-	recipe_sel = posmod(recipe_sel + d, MOD_ORDER.size())
-	_refresh_build()
+	inv.take(mid, n)
 
 
 func _inv_total() -> int:
-	var n := 0
-	for k in inventory:
-		n += int(inventory[k])
-	return n
+	return inv.total()
 
 
 func _all_total() -> int:
@@ -2503,11 +2489,7 @@ func _all_total() -> int:
 
 
 func _inv_tier(t: int) -> int:
-	var n := 0
-	for k in inventory:
-		if int(MODULES[k]["tier"]) == t:
-			n += int(inventory[k])
-	return n
+	return inv.of_tier(t)
 
 
 ## 某阶在「库存 + 板面」里的总量（配方按阶吃料：特化件也算同阶任意模块）
@@ -2569,11 +2551,7 @@ func _board_total(w = null) -> float:
 
 ## 库存里还有货的 id
 func _stocked_ids() -> Array:
-	var out: Array = []
-	for k in _ids_all():
-		if _inv(k) > 0:
-			out.append(k)
-	return out
+	return inv.stocked_ids()
 
 
 ## DEBUG
@@ -2972,14 +2950,10 @@ func try_craft(mid: String = "", idx: int = -1) -> bool:
 
 ## 从库存里取走一个指定阶的模块，返回它的 id（取不到返回 ""）
 func _take_one_of_tier(t: int) -> String:
-	var best := ""
+	var best := inv.richest_of_tier(t)
 	var best_n := 0
-	for k in _ids_all():
-		if int(MODULES[k]["tier"]) != t:
-			continue
-		if _inv(k) > best_n:
-			best_n = _inv(k)
-			best = String(k)
+	if best != "":
+		best_n = _inv(best)
 	if best == "":
 		return ""
 	_add_inv(best, -1)
