@@ -2969,13 +2969,100 @@ func _slot_tip_data(i: int) -> Dictionary:
 	return {"title": title, "lines": lines, "color": col}
 
 
+## buff 卡的悬浮说明（plan-v5 §2.2「升级四选一卡片」）
+## 文案全部从 BUFFS 的字段拼，不手写：品质/类别/当前级/下一级效果/满级提示
+func _buff_tip_data(id: String) -> Dictionary:
+	if not BUFFS.has(id):
+		return {"title": id, "lines": []}
+	var d: Dictionary = BUFFS[id]
+	var lv := _bl(id)
+	var mx := int(d.get("max", 0))
+	var cat := String(d.get("cat", ""))
+	var rar := String(d.get("rar", "white"))
+	var cat_s := String({"atk": "攻击", "eco": "经济", "sur": "生存"}.get(cat, cat))
+	var col := Color(0.62, 0.86, 1.0) if rar == "blue" else (Color(1.0, 0.84, 0.35) if rar == "gold" else Color(0.82, 0.84, 0.90))
+	var lines: Array = []
+	lines.append("[color=#9fb2c9]%s类 buff · 当前 Lv%d / 上限 Lv%d[/color]" % [cat_s, lv, mx])
+	if lv >= mx:
+		lines.append("[color=#ff6b5e]已经满级：抽到会换成别的卡[/color]")
+	else:
+		lines.append("[color=#ffd76a]下一级：%s[/color]" % String(d.get("desc", "")))
+	lines.append("[color=#8fa0b8]每次升级从同类 buff 里抽，层数叠加不衰减[/color]")
+	return {"title": "%s  Lv%d→%d" % [String(d.get("name", id)), lv, mini(lv + 1, mx)], "lines": lines, "color": col}
+
+
+## 配方卡的悬浮说明：模块效果 + 合成消耗 + 前置条件（unlock 时讲解锁条件）
+func _recipe_tip_data(mid: String, unlock := false) -> Dictionary:
+	var d: Dictionary = MODULES[mid]
+	var t := int(d["tier"])
+	var lines: Array = []
+	lines.append("第 %d 阶 · 出力 %.1f · 寿命 %d 次" % [t, float(d["rate"]), int(d.get("uses", 0))])
+	for s in _mod_effects(mid):
+		lines.append("[color=#9fe3c8]%s[/color]" % String(s))
+	var b := String(d.get("bind", ""))
+	if b != "":
+		lines.append("[color=#ffd479]只对 %s 生效（合成前要有这把武器）[/color]" % String(WEAPONS[b]["name"]))
+	if unlock:
+		lines.append("[color=#9fe3c8]选它 = 解锁这个配方，之后能反复合成[/color]")
+	lines.append("合成消耗：%d 个第 %d 阶模块 · 约 %.0f 秒" % [
+		int(CRAFT_COST[t]), t - 1, float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))])
+	var st := recipe_state(mid)
+	lines.append("[color=#9fb2c9]%s[/color]" % String(st["state"]))
+	return {"title": "配方 · %s%s" % [String(d["name"]), "（解锁）" if unlock else ""], "lines": lines, "color": Color(0.55, 0.95, 0.72)}
+
+
+## 宝箱武器卡的悬浮说明（plan-v5 §2.2「宝箱武器卡」）：逐项数值 + 与当前武器的差
+func _chest_tip_data(i: int) -> Dictionary:
+	if i < 0 or i >= chest_offer.size():
+		return {"title": "", "lines": []}
+	var w: Dictionary = chest_offer[i]
+	var q := int(w["quality"])
+	var wd: Dictionary = WEAPONS[w["id"]]
+	var col := _qcol(q)
+	var lines: Array = []
+	lines.append("%d 槽 · 评分 %.2f / %.2f（只在同类型武器之间比）" % [
+		(w["slots"] as Array).size(), float(w["score"]), float(w["p0"]) * float(QM[3])])
+	lines.append("射程 %d · 间隔 %.2fs · 目标 %s" % [
+		int(w["range"]), float(w["interval"]), "全部" if int(w["targets"]) < 0 else str(int(w["targets"]))])
+	lines.append("基础 %.2f · 倍率 %.2f" % [float(w["base"]), float(w["mul"])])
+	if w.has("blast"):
+		lines.append("爆炸半径 %d" % int(w["blast"]))
+	if w.has("ramp_max"):
+		lines.append("连击上限 %.0f%%" % (100.0 * float(w["ramp_max"])))
+	var note := String(wd.get("note", ""))
+	if note != "":
+		lines.append("[color=#9fb2c9]%s[/color]" % note)
+	# 与当前武器逐项对比（dr 里只放真的有变化的字段）
+	if not weapons.is_empty() and weapon is Dictionary:
+		var dr: Dictionary = w["dr"]
+		var bits: Array = []
+		if dr.has("range"):
+			bits.append("射程 %+d%%" % roundi(100.0 * float(dr["range"])))
+		if dr.has("interval"):
+			bits.append("间隔 %+d%%" % roundi(100.0 * float(dr["interval"])))
+		if dr.has("base"):
+			bits.append("基础 %+d%%" % roundi(100.0 * float(dr["base"])))
+		if dr.has("targets"):
+			bits.append("目标 +1")
+		if dr.has("blast"):
+			bits.append("爆炸 %+d%%" % roundi(100.0 * float(dr["blast"])))
+		if dr.has("ramp_max"):
+			bits.append("连击上限 %+d%%" % roundi(100.0 * float(dr["ramp_max"])))
+		var cur := "当前：%s %s" % [String(QUALITY_NAME[int(weapon["quality"])]), String(WEAPONS[weapon["id"]]["name"])]
+		if bits.is_empty():
+			lines.append("[color=#ffd479]%s · 数值完全一致[/color]" % cur)
+		else:
+			lines.append("[color=#ffd479]%s · 对比 %s[/color]" % ["、".join(bits), cur])
+	lines.append("[color=#8fa0b8]选它会进背包；背包满时先选一把旧的替换[/color]")
+	return {"title": "%s  %s" % [String(QUALITY_NAME[q]), String(wd["name"])], "lines": lines, "color": col}
+
+
 ## 销毁提示节流：3 秒内只弹一次，免得连续拆卸刷屏
 func _toast_destroy(what := "已销毁") -> void:
 	if destroy_toast_cd > 0.0:
 		return
 	destroy_toast_cd = 3.0
 	_toast("%s · 寿命不返还" % what)
-
 
 # ============================================================================
 # 8. 库存
@@ -3691,7 +3778,7 @@ func _rebuild_tab_recipe() -> void:
 		_tab_row(y, "%s   %d×%d阶   %.0fs   %s" % [
 			String(d["name"]), int(st["cost"]), t - 1, sec, String(st["state"])
 		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "合成",
-			_craft_from_tab.bind(mid), ok, String(st["state"]))
+			_craft_from_tab.bind(mid), ok, String(st["state"]), "", Callable(), _recipe_tip_data.bind(mid))
 		y += 34.0
 		if y > 300.0:
 			break
@@ -4319,6 +4406,12 @@ func _paint_offer() -> void:
 		btn.add_theme_stylebox_override("focus", sh)
 		pick_root.add_child(btn)
 		btn.pressed.connect(_take_card.bind(i))
+		# 悬浮说明（plan-v5 §2.2「升级四选一卡片」）：buff 卡讲下一级，配方卡讲消耗与前置
+		var cid := String(card["id"])
+		if String(card["kind"]) == "buff":
+			_bind_tip(btn, _buff_tip_data.bind(cid))
+		else:
+			_bind_tip(btn, _recipe_tip_data.bind(cid, bool(card.get("unlock", false))))
 
 
 ## 关掉最上层的界面。返回 true 表示这次输入被消费掉了。
@@ -4531,6 +4624,7 @@ func _paint_chest() -> void:
 		btn.add_theme_stylebox_override("pressed", sh)
 		btn.add_theme_stylebox_override("focus", sh)
 		btn.pressed.connect(_take_card.bind(i))
+		_bind_tip(btn, _chest_tip_data.bind(i))
 		pick_root.add_child(btn)
 
 		var head := _label(btn, Vector2(14, 10), 19, qc)
