@@ -269,6 +269,21 @@ var hud_fill: Label = null
 var save_btn: Button = null
 var revert_btn: Button = null
 var save_tween: Tween = null
+## 悬浮说明（plan-v5 §2）：一个轻量浮层，悬停 0.25s 才出，跟随鼠标
+const TIP_W := 300.0
+const TIP_DELAY := 0.25
+var tip_layer: CanvasLayer = null
+var tip_root: Panel = null
+var tip_title: Label = null
+var tip_body: RichTextLabel = null
+var tip_hover: Control = null
+var tip_owner: Control = null
+var tip_cb := Callable()
+var tip_wait := 0.0
+## 手持提示（plan-v5 §1.3 第 2 条）：跟着鼠标走的「手上：X ×N」
+var hand_lbl: Label = null
+## 销毁提示节流（plan-v5 §4 第 6 条：最多每 3 秒一次，防刷屏）
+var destroy_toast_cd := 0.0
 var slot_rects: Array = []
 var slot_panels: Array = []
 var inv_rows: Array = []
@@ -478,6 +493,9 @@ func _pass() -> void:
 
 func _process(delta: float) -> void:
 	_perf_tick(delta)
+	_tip_update(delta)
+	_hand_update()
+	destroy_toast_cd = maxf(0.0, destroy_toast_cd - delta)
 	if enemy_renderer != null:
 		enemy_renderer.queue_redraw()
 	# 选卡界面会把整棵树暂停，elapsed 不再推进 —— 快进和截图都必须先跳出这个状态，
@@ -873,10 +891,10 @@ func _make_hud() -> void:
 	board_root.position = Vector2(100, 185)
 	build_root.add_child(board_root)
 
-	# 卸载区：把电路板上的模块拖到这里 = 卸下退回库存（见 docs/plan-v3.md §1）
+	# 卸载区：把电路板上的模块拖到这里 = 卸下并销毁（plan-v5 §4：拆卸不返还，防「拆下再装」白嫖寿命）
 	recycle_btn = UIKit.button("⌫ 拖到此处卸下", Vector2(150, 40), UIKit.C_RED, 14)
 	recycle_btn.position = Vector2(330, 640)
-	recycle_btn.tooltip_text = "把电路板上的模块拖进来：卸下并退回库存，同时清空这一格的方案"
+	recycle_btn.tooltip_text = "把电路板上的模块拖进来：卸下即销毁（寿命不返还），同时清空这一格的草稿方案"
 	build_root.add_child(recycle_btn)
 
 	# 烧空自动补料开关（plan-v5 §1.2/§1.4）：只影响「烧空后从库存补同 id」，
@@ -960,6 +978,9 @@ func _make_hud() -> void:
 
 	# 控制台要压在 flash 之上：打开时它就是最上层
 	_make_console(layer)
+
+	# 悬浮说明浮层（plan-v5 §2）：独立 CanvasLayer，压在所有 UI 之上、不参与鼠标
+	_make_tip()
 
 
 
@@ -1063,7 +1084,12 @@ func _input(event: InputEvent) -> void:
 			_use_weapon(idx)
 			_pass()
 	elif k == KEY_ESCAPE and build_root.visible:
-		_toggle_build()
+		# 手持模块时 Esc 先放下手持，再按一次才关构筑屏（plan-v5 §1.3 第 3 条）
+		if hand_mid != "":
+			hand_mid = ""
+			_refresh_build()
+		else:
+			_toggle_build()
 
 
 func _toggle_build() -> void:
@@ -1075,6 +1101,7 @@ func _toggle_build() -> void:
 	if hud_fill != null:
 		hud_fill.visible = (not build_root.visible) and (not auto_fill)
 	wpanel.visible = not build_root.visible
+	_tip_hide()
 	if build_root.visible:
 		_refresh_build()
 
@@ -2522,6 +2549,8 @@ func _on_slot_input(event: InputEvent, i: int) -> void:
 
 
 ## 把库存里的 mid 放进第 i 格，并把这一格的**草稿**方案改成它（保存后才影响补料）
+## 覆盖安装时旧模块**销毁**、不退回库存（plan-v5 §4 第 2 条）；
+## 库存里还有同一个模块就继续拿在手上，可以连着点好几格（§1.3）。
 func _place_at(i: int, mid: String) -> bool:
 	var sl: Array = weapon["slots"]
 	if i < 0 or i >= sl.size() or not MODULES.has(mid) or _inv(mid) <= 0:
@@ -2529,20 +2558,20 @@ func _place_at(i: int, mid: String) -> bool:
 		return false
 	_add_inv(mid, -1)
 	if sl[i] != null:
-		_add_inv(String(sl[i]["id"]), 1)  # 原有的退回库存，等于覆盖
+		_toast_destroy("覆盖：旧的%s已销毁" % String(MODULES[String(sl[i]["id"])]["name"]))
 	sl[i] = _new_module(mid)
 	_set_plan_draft(weapon, i, mid)
-	hand_mid = ""
+	hand_mid = mid if _inv(mid) > 0 else ""
 	return true
 
 
-## 卸下第 i 格：模块退回库存，草稿方案清空（生效方案要保存才变）
+## 卸下第 i 格：模块**销毁**（plan-v5 §4 第 1 条：拆下不返还，否则等于白嫖重置寿命），草稿方案清空
 func _uninstall(i: int) -> void:
 	var sl: Array = weapon["slots"]
 	if i < 0 or i >= sl.size():
 		return
 	if sl[i] != null:
-		_add_inv(String(sl[i]["id"]), 1)
+		_toast_destroy("%s 已销毁" % String(MODULES[String(sl[i]["id"])]["name"]))
 	sl[i] = null
 	_set_plan_draft(weapon, i, "")
 
@@ -2702,26 +2731,248 @@ func _missing_cells(w = null) -> Array:
 	return out
 
 
-func _slot_tip(i: int) -> String:
-	var parts: Array = ["槽 %d" % (i + 1)]
+
+# ============================================================================
+# 7.5 悬浮说明（plan-v5 §2）
+# ============================================================================
+## 轻量 tooltip：一个 Panel + 标题 + RichTextLabel，不走系统 tooltip（系统 tooltip 无法控制位置/延迟/多行颜色）。
+func _make_tip() -> void:
+	tip_layer = CanvasLayer.new()
+	tip_layer.layer = 20
+	tip_layer.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(tip_layer)
+	tip_root = Panel.new()
+	tip_root.visible = false
+	tip_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.04, 0.06, 0.10, 0.96)
+	sb.border_color = Color(0.40, 0.54, 0.78, 0.85)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(6)
+	tip_root.add_theme_stylebox_override("panel", sb)
+	tip_layer.add_child(tip_root)
+	tip_title = Label.new()
+	tip_title.position = Vector2(10, 7)
+	tip_title.size = Vector2(TIP_W, 20)
+	tip_title.add_theme_font_size_override("font_size", 15)
+	tip_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tip_root.add_child(tip_title)
+	tip_body = RichTextLabel.new()
+	tip_body.position = Vector2(10, 30)
+	tip_body.size = Vector2(TIP_W, 10)
+	tip_body.bbcode_enabled = true
+	tip_body.fit_content = true
+	tip_body.scroll_active = false
+	tip_body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tip_body.add_theme_font_size_override("normal_font_size", 13)
+	tip_body.add_theme_color_override("default_color", Color(0.80, 0.86, 0.95))
+	tip_root.add_child(tip_body)
+
+	hand_lbl = Label.new()
+	hand_lbl.visible = false
+	hand_lbl.add_theme_font_size_override("font_size", 14)
+	hand_lbl.add_theme_color_override("font_color", UIKit.C_GOLD)
+	hand_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	hand_lbl.add_theme_constant_override("outline_size", 4)
+	hand_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tip_layer.add_child(hand_lbl)
+
+
+## 手持提示跟随鼠标；只要手上有模块、又没在拖拽，就显示「手上：X ×N」
+func _hand_update() -> void:
+	if hand_lbl == null:
+		return
+	var vis := hand_mid != "" and build_root != null and build_root.visible and not bool(drag.get("active", false))
+	if not vis:
+		hand_lbl.visible = false
+		return
+	hand_lbl.text = "手上：%s ×%d（点格子放下 · Esc 放下）" % [String(MODULES[hand_mid]["name"]), _inv(hand_mid)]
+	hand_lbl.visible = true
+	var mp := get_viewport().get_mouse_position()
+	hand_lbl.position = Vector2(round(mp.x + 18.0), round(mp.y + 14.0))
+
+
+## 挂悬浮说明：provider 返回 {title:String, lines:Array, color:Color}
+func _bind_tip(ctrl: Control, provider: Callable) -> void:
+	if ctrl == null:
+		return
+	# IGNORE 的控件收不到 mouse_entered：改成 PASS（照样能收到悬停，又不挡下面按钮的点击）
+	if ctrl.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+		ctrl.mouse_filter = Control.MOUSE_FILTER_PASS
+	ctrl.mouse_entered.connect(_tip_on.bind(ctrl, provider))
+	ctrl.mouse_exited.connect(_tip_off.bind(ctrl))
+
+
+func _tip_on(ctrl: Control, provider: Callable) -> void:
+	tip_hover = ctrl
+	tip_cb = provider
+	tip_wait = TIP_DELAY
+
+
+func _tip_off(ctrl: Control) -> void:
+	if tip_hover == ctrl:
+		tip_hover = null
+		tip_cb = Callable()
+	if tip_owner == ctrl:
+		_tip_hide()
+
+
+## 每帧：还在悬停就更新位置；延迟到了就弹出来
+func _tip_update(delta: float) -> void:
+	if tip_root == null:
+		return
+	# 板面/标签页会整块重建，旧的悬停控件可能已经 queue_free：先清掉，免得访问已释放对象
+	if tip_hover != null and not is_instance_valid(tip_hover):
+		tip_hover = null
+		tip_cb = Callable()
+	if tip_owner != null and not is_instance_valid(tip_owner):
+		tip_owner = null
+		tip_root.visible = false
+	if tip_hover == null:
+		return
+	if tip_owner == tip_hover and tip_root.visible:
+		_tip_place()
+		return
+	tip_wait -= delta
+	if tip_wait > 0.0:
+		return
+	_tip_show(tip_hover, tip_cb)
+
+
+func _tip_show(ctrl: Control, provider: Callable) -> void:
+	if not provider.is_valid():
+		return
+	var data: Dictionary = provider.call()
+	var lines: Array = data.get("lines", [])
+	tip_title.text = String(data.get("title", ""))
+	tip_title.add_theme_color_override("font_color", data.get("color", UIKit.C_TEXT))
+	tip_title.visible = tip_title.text != ""
+	tip_body.text = "\n".join(lines)
+	var top := 30.0 if tip_title.visible else 8.0
+	tip_body.position = Vector2(10, top)
+	# RichTextLabel 的重排要等下一帧，先用行数估一个高度兜底，避免第一帧闪一个细条
+	var h := float(tip_body.get_content_height())
+	if h <= 1.0:
+		h = maxf(19.0, float(lines.size()) * 19.0)
+	tip_body.size = Vector2(TIP_W, h)
+	tip_root.size = Vector2(TIP_W + 20.0, top + h + 10.0)
+	tip_owner = ctrl
+	tip_root.visible = true
+	_tip_place()
+
+
+func _tip_hide() -> void:
+	tip_owner = null
+	tip_hover = null
+	tip_cb = Callable()
+	if tip_root != null:
+		tip_root.visible = false
+
+
+## 跟随鼠标 +（16, 18），右边/下边放不下就翻到另一侧，最后夹在屏幕内
+func _tip_place() -> void:
+	if tip_root == null or not tip_root.visible:
+		return
+	var vp := get_viewport().get_visible_rect().size
+	var mp := get_viewport().get_mouse_position()
+	var p := mp + Vector2(16, 18)
+	if p.x + tip_root.size.x > vp.x - 8.0:
+		p.x = mp.x - tip_root.size.x - 12.0
+	if p.y + tip_root.size.y > vp.y - 8.0:
+		p.y = mp.y - tip_root.size.y - 12.0
+	p.x = clampf(p.x, 6.0, maxf(6.0, vp.x - tip_root.size.x - 6.0))
+	p.y = clampf(p.y, 6.0, maxf(6.0, vp.y - tip_root.size.y - 6.0))
+	tip_root.position = Vector2(round(p.x), round(p.y))
+
+
+## 把一条结构化 effect 变成一句人话（plan-v5 §11.3）
+func _effect_text(e: Dictionary) -> String:
+	var k := String(e.get("k", ""))
+	var v := float(e.get("v", 0.0))
+	var n := int(e.get("n", 0))
+	match k:
+		"mul_add": return "单发倍率 +%d%%" % roundi(v * 100.0)
+		"mul": return "单发倍率 ×%.2f" % v
+		"iv": return "开火间隔 ×%.2f" % v
+		"burn": return "每次开火只烧 %.2f 次寿命" % v
+		"range": return "射程 +%.0f" % v
+		"targets": return "目标数 +%d" % int(v)
+		"pierce": return "穿透 +%d" % int(v)
+		"elite": return "对精英/磐石 +%d%%" % roundi(v * 100.0)
+		"blast": return "爆炸半径 +%.0f" % v
+		"ramp_cap": return "镭射倍率上限 +%d%%" % roundi(v * 100.0)
+		"blade": return "环绕刃半径 +%.0f" % v
+		"recycle": return "开火时 %d%% 概率给相邻模块 +%d 次寿命" % [roundi(float(e.get("p", 0.0)) * 100.0), n]
+		"combo": return "连击每层 +%d%%，最多 %d 层（满层 +%d%%）" % [roundi(v * 100.0), n, roundi(v * float(n) * 100.0)]
+		"mirror": return "加法：镜像相邻低阶模块的出力"
+		"boost": return "给相邻模块 +%.1f 出力（自身不产出）" % v
+		"reson": return "相邻同类型模块出力 +%d%%" % roundi(v * 100.0)
+	return ""
+
+
+func _mod_effects(mid: String) -> Array:
+	var out: Array = []
+	for e in MODULES[mid].get("effect", []):
+		var s := _effect_text(e)
+		if s != "":
+			out.append(s)
+	return out
+
+
+## 库存一行的悬浮说明（plan-v5 §2.2 第 1 行）
+func _mod_tip_data(mid: String) -> Dictionary:
+	var d: Dictionary = MODULES[mid]
+	var lines: Array = []
+	lines.append("第 %d 阶 · 出力 %.1f · 寿命 %d 次" % [int(d["tier"]), float(d["rate"]), int(d.get("uses", 0))])
+	for s in _mod_effects(mid):
+		lines.append("[color=#9fe3c8]%s[/color]" % String(s))
+	var b := String(d.get("bind", ""))
+	if b != "":
+		lines.append("[color=#ffd479]只对 %s 生效[/color]" % String(WEAPONS[b]["name"]))
+	else:
+		lines.append("通用模块：任何武器板上都生效")
+	lines.append("库存 %d" % _inv(mid))
+	return {"title": "%s（%s）" % [String(d["name"]), "特化" if b != "" else "通用"], "lines": lines, "color": d["color"]}
+
+
+## 槽位的悬浮说明（plan-v5 §2.2 第 2 行）：寿命 / 出力 / 邻居加成 / 方案
+func _slot_tip_data(i: int) -> Dictionary:
+	var col := Color(0.55, 0.62, 0.72)
+	var title := "槽 %d · 空" % (i + 1)
+	var lines: Array = []
 	var m = weapon.slots[i]
 	if m != null:
-		var d: Dictionary = MODULES[String(m["id"])]
-		parts.append("%s · %d 阶 · 出力 %.1f · 剩余 %d/%d" % [
-			String(d["name"]), int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
+		var mid := String(m["id"])
+		var d: Dictionary = MODULES[mid]
+		col = d["color"]
+		title = "槽 %d · %s" % [i + 1, String(d["name"])]
+		lines.append("第 %d 阶 · 出力 %.1f · 剩余 %d/%d 次" % [int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
+		for s in _mod_effects(mid):
+			lines.append("[color=#9fe3c8]%s[/color]" % String(s))
+		var out_v := _slot_out(null, weapon)
+		if i < out_v.size():
+			lines.append("实际出力 %.1f" % float(out_v[i]))
+		if int(d["tier"]) >= 2:
+			lines.append("相邻加成见板面连线（增幅/加法/共振）")
 	else:
-		parts.append("空")
+		lines.append("空槽：左键装入手里的模块，或按方案手动补料")
 	var want := _plan_saved_at(weapon, i)
 	if want != "":
-		parts.append("方案：%s%s" % [String(MODULES[want]["name"]),
+		lines.append("方案：%s%s" % [String(MODULES[want]["name"]),
 			"" if _inv(want) > 0 else ("（库存缺料，攒够自动补）" if auto_fill else "（库存缺料：点这一格手动补，或开自动补料）")])
 	var draft := _plan_draft_at(weapon, i)
 	if draft != want:
-		parts.append("草稿：%s —— 未保存，保存后才会按它补料" % ("空" if draft == "" else String(MODULES[draft]["name"])))
-	parts.append("左键：装入手里的模块 / 手动补料　　右键：卸下")
-	return "\n".join(parts)
+		lines.append("[color=#ffd479]草稿：%s —— 未保存，保存后才会按它补料[/color]" % ("空" if draft == "" else String(MODULES[draft]["name"])))
+	lines.append("[color=#8fa0b8]左键：装入手里的模块 / 手动补料　　右键：卸下（销毁）[/color]")
+	return {"title": title, "lines": lines, "color": col}
 
 
+## 销毁提示节流：3 秒内只弹一次，免得连续拆卸刷屏
+func _toast_destroy(what := "已销毁") -> void:
+	if destroy_toast_cd > 0.0:
+		return
+	destroy_toast_cd = 3.0
+	_toast("%s · 寿命不返还" % what)
 
 
 # ============================================================================
@@ -3332,7 +3583,7 @@ func _rebuild_tab() -> void:
 		_rebuild_tab_device()
 
 
-func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, enabled := true, tip := "", btn2 := "", cb2 := Callable()) -> void:
+func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, enabled := true, tip := "", btn2 := "", cb2 := Callable(), tip_data := Callable()) -> void:
 	var chip := ColorRect.new()
 	chip.color = col
 	chip.position = Vector2(0, y + 8)
@@ -3341,6 +3592,8 @@ func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, ena
 	tab_body.add_child(chip)
 	var l := _label(tab_body, Vector2(20, y + 4), 15, UIKit.C_TEXT)
 	l.text = text
+	if tip_data.is_valid():
+		_bind_tip(l, tip_data)
 	if btn2 != "":
 		var b2 := UIKit.button(btn2, Vector2(58, 28), UIKit.C_GOLD, 14)
 		b2.position = Vector2(456, y)
@@ -3377,7 +3630,8 @@ func _rebuild_tab_inv() -> void:
 		_tab_row(y, "%s  ×%d      %d 阶    出力 %.1f    寿命 %d" % [
 			String(d["name"]), n, int(d["tier"]), float(d["rate"]), int(d["uses"])
 		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "装入",
-			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格", "拿起", _pick_up.bind(mid))
+			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格", "拿起", _pick_up.bind(mid),
+			_mod_tip_data.bind(mid))
 		# 拖拽命中用：tab_body 局部坐标下的整行矩形（右侧按钮区会被 _over_inv_area 排除）
 		inv_rows.append({'mid': mid, 'rect': Rect2(tab_body.position + Vector2(0, y), Vector2(360, 34))})
 		y += 34.0
@@ -3651,10 +3905,13 @@ func _rebuild_board() -> void:
 			# 草稿和生效方案不一致：金色细边提示「保存后才会按它补料」（plan-v5 §1.5 第 4 条）
 			sb.border_color = Color(UIKit.C_GOLD.r, UIKit.C_GOLD.g, UIKit.C_GOLD.b, 0.75)
 			sb.set_border_width_all(2)
+		if m == null and hand_mid != "" and want == "":
+			# 手持模块时把空格点亮一点：可放 / 不可放一眼能分辨（plan-v5 §1.3 第 2 条）
+			sb.bg_color = Color(0.30, 0.46, 0.34, 0.22)
 		panel.add_theme_stylebox_override("panel", sb)
 		panel.mouse_filter = Control.MOUSE_FILTER_STOP
 		panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		panel.tooltip_text = _slot_tip(i)
+		_bind_tip(panel, _slot_tip_data.bind(i))
 		panel.gui_input.connect(_on_slot_input.bind(i))
 		board_root.add_child(panel)
 		# 拖拽命中用：build_root 局部坐标下的格子矩形（board_root 是 build_root 的子节点）
@@ -3842,7 +4099,7 @@ func _drag_highlight(mp: Vector2) -> void:
 		drag_hint.add_theme_color_override("font_color", UIKit.C_GREEN if ok else UIKit.C_RED)
 	elif over_recycle and String(drag["src"]) == "slot":
 		drag_hl.visible = false
-		drag_hint.text = "松手卸下：模块退回库存，这一格的方案也会清空"
+		drag_hint.text = "松手卸下：模块销毁（寿命不返还），这一格的草稿方案也会清空"
 		drag_hint.add_theme_color_override("font_color", UIKit.C_RED)
 	else:
 		drag_hl.visible = false
