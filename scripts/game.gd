@@ -30,6 +30,7 @@ const EnemyDB := preload("res://scripts/data/enemies_db.gd")
 const BuffDB := preload("res://scripts/data/buffs_db.gd")
 const Inventory := preload("res://scripts/systems/inventory.gd")
 const Board := preload("res://scripts/systems/board.gd")
+const Perf := preload("res://scripts/systems/perf.gd")
 
 ## 模块目录 + 配方 + 合成装置造价（scripts/data/modules_db.gd）
 const MODULES := ModDB.MODULES
@@ -248,6 +249,14 @@ var pending_chest := 0
 var frame_ms := 0.0
 var frame_ms_max := 0.0
 var enemy_ms := 0.0
+# 四段帧耗时（docs/plan-v4.md §4.1）：AI / 绘制 / 战斗 / 其它，指数平滑后给 F3 面板
+var ai_ms := 0.0
+var draw_ms := 0.0
+var combat_ms := 0.0
+var other_ms := 0.0
+var wall_ms := 0.0
+var _perf_last := 0
+var _perf_report := 0.0
 var roll_test := false
 var swarm_test := false
 var ws_done := false
@@ -260,6 +269,7 @@ var shot_bot := false
 var ff := 0.0
 ## 电路板规则自检：godot --headless --path . -- boardtest
 var boardtest := false
+var perftest := false
 var demo_board := false
 var bt_set := false
 var bt_print := 0.0
@@ -289,6 +299,8 @@ func _ready() -> void:
 			shot_at = float(a.substr(7))
 		elif a == "boardtest":
 			boardtest = true
+		elif a == "perftest":
+			perftest = true
 		elif a == "demoboard":
 			boardtest = true
 			demo_board = true
@@ -407,6 +419,7 @@ func _pass() -> void:
 
 
 func _process(delta: float) -> void:
+	_perf_tick(delta)
 	# 选卡界面会把整棵树暂停，elapsed 不再推进 —— 快进和截图都必须先跳出这个状态，
 	# 否则会永远停在「等 elapsed 到 ff / shotat」上（表现为界面卡死）
 	if picking:
@@ -586,9 +599,13 @@ func _physics_process(delta: float) -> void:
 	if autoplan:
 		_auto_plan_all()
 		_auto_plan_fix(delta)
+	var c0 := Time.get_ticks_usec()
 	_fire(delta)
 	_contact(delta)
+	Perf.combat_usec += Time.get_ticks_usec() - c0
 	_hud_tick(delta)
+	if perftest:
+		_perftest_step(delta)
 	if playtest:
 		_playtest_step(delta)
 	elif shot_bot:
@@ -727,13 +744,13 @@ func _make_hud() -> void:
 	# F3 调试面板（默认关）
 	dbg_root = Control.new()
 	dbg_root.position = Vector2(836, 76)
-	dbg_root.size = Vector2(424, 160)
+	dbg_root.size = Vector2(424, 190)
 	dbg_root.visible = dbg_on
 	dbg_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dbg_root.process_mode = Node.PROCESS_MODE_ALWAYS
 	layer.add_child(dbg_root)
 	var dbg_bg := Panel.new()
-	dbg_bg.size = Vector2(424, 160)
+	dbg_bg.size = Vector2(424, 190)
 	dbg_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var dbgsb := StyleBoxFlat.new()
 	dbgsb.bg_color = Color(0.03, 0.05, 0.09, 0.82)
@@ -4213,6 +4230,41 @@ func _pt_log() -> void:
 	])
 
 
+## 读上一帧敌人 AI / 绘制 / 战斗的累加值，算出四段耗时（docs/plan-v4.md §4.1）。
+## 读数取「上一帧 _process 到这一帧 _process」的墙钟差，其它 = 总时长 - 三段。
+func _perf_tick(_delta: float) -> void:
+	var now := Time.get_ticks_usec()
+	if _perf_last > 0:
+		var total := float(now - _perf_last) / 1000.0
+		var ai := float(Perf.ai_usec) / 1000.0
+		var dr := float(Perf.draw_usec) / 1000.0
+		var cb := float(Perf.combat_usec) / 1000.0
+		wall_ms = lerpf(wall_ms, total, 0.2)
+		ai_ms = lerpf(ai_ms, ai, 0.2)
+		draw_ms = lerpf(draw_ms, dr, 0.2)
+		combat_ms = lerpf(combat_ms, cb, 0.2)
+		other_ms = lerpf(other_ms, maxf(0.0, total - ai - dr - cb), 0.2)
+	_perf_last = now
+	Perf.reset()
+
+
+## 性能压测（V4 测量用）：每秒打印一次四段耗时，到 pt 秒退出。例：
+## `--path . --resolution 1280x720 -- perftest "cheat=god,wave=25" pt=25`
+func _perftest_step(delta: float) -> void:
+	pt_t += delta
+	if pt_t - _perf_report < 1.0:
+		return
+	_perf_report = pt_t
+	var n := get_tree().get_nodes_in_group("enemy").size()
+	print("PERF t=%2d fps=%3d enemies=%3d wall=%.1f ai=%.2f draw=%.2f combat=%.2f other=%.2f" % [
+		int(pt_t), int(Engine.get_frames_per_second()), n,
+		wall_ms, ai_ms, draw_ms, combat_ms, other_ms])
+	if pt_t >= (20.0 if pt_limit <= 0.0 else pt_limit):
+		print("PERF end enemies=%d wall=%.1f ai=%.2f draw=%.2f combat=%.2f other=%.2f" % [
+			n, wall_ms, ai_ms, draw_ms, combat_ms, other_ms])
+		get_tree().quit()
+
+
 ## 调试统计：FPS / 敌人数 / 可见敌人数 / 帧耗时。
 ## 关闭 F3 面板时仍然维护常驻的那一小段（可见数 O(n) 遍历只在 0.25s 一次）
 func _update_debug(delta: float) -> void:
@@ -4253,6 +4305,7 @@ func _refresh_dbg_panel(enemy_total: int) -> void:
 			_spawn_rate() * _wave_hp() * _plan_avg_mult(), cur_actual_dps(),
 			"%.0f%%" % (100.0 * _spawn_rate() * _wave_hp() * _plan_avg_mult() / maxf(cur_actual_dps(), 1.0))],
 		"敌人统计耗时 %.2fms" % enemy_ms,
+		"AI %.2f  绘制 %.2f  战斗 %.2f  其它 %.2f ms  帧墙 %.1f" % [ai_ms, draw_ms, combat_ms, other_ms, wall_ms],
 		"波次 %d   时间 %s   种子 %d   击杀 %d" % [wave, _fmt_time(elapsed), absi(seed_used) % 1000000000, kills_total],
 	])
 

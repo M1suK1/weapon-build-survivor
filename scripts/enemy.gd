@@ -8,6 +8,8 @@ extends Node2D
 ##   shooter—— 保持 240~320 距离放风筝，每 2.6s 抬手 0.35s 后打一发子弹
 ##   charger—— 距玩家 ≤420 时蓄力 0.9s（画红线）→ 780px/s 冲刺 0.35s → 硬直 1.1s
 
+const Perf := preload("res://scripts/systems/perf.gd")
+
 const SHOOT_MIN := 140.0
 const SHOOT_MAX := 190.0
 const SHOOT_CD := 3.2
@@ -58,6 +60,12 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	var t0 := Time.get_ticks_usec()
+	_step(delta)
+	Perf.ai_usec += Time.get_ticks_usec() - t0
+
+
+func _step(delta: float) -> void:
 	hit = maxf(0.0, hit - delta)
 	var p = get_tree().get_first_node_in_group("player")
 	if p == null:
@@ -142,6 +150,12 @@ func _fire_bullet() -> void:
 
 
 func _draw() -> void:
+	var t0 := Time.get_ticks_usec()
+	_draw_body()
+	Perf.draw_usec += Time.get_ticks_usec() - t0
+
+
+func _draw_body() -> void:
 	var frac := clampf(hp / maxf(max_hp, 0.001), 0.0, 1.0)
 	var body := body_color.lerp(Color(1.0, 0.86, 0.55), 1.0 - frac)
 	if hit > 0.0:

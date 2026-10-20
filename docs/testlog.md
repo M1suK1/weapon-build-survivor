@@ -73,3 +73,15 @@
 - 目的：左下角升级按钮的三态（金呼吸 + 红点 / 灰 + 进度 / 选卡时隐藏）、点击等同 `U`
 - 关键输出：`UPTEST start inv=2 cost=3 level=1`、`UPTEST fail level=1 picking=false`、`UPTEST ok level=2 picking=true paused=true`、`UPTEST after level=2 picking=false paused=false`
 - 结论：材料不足只抖不升；成功后立刻弹四选一（树暂停），选完恢复；`_refresh_hud` 末尾统一刷按钮，`_open_pick` / `_close_pick` 也各补一次，避免选卡期间按钮还挂着。截图 `docs/screenshots/v4-upgrade.png`、`v4-upgrade-on.png`。
+
+## plan-v4 V4 四段耗时（测量）
+
+- 命令：`-- perftest "cheat=god,wave=25" pt=22`（窗口模式，1280x720；`perftest` 是新增的压测出口，不算控制台命令）
+- 目的：按 plan-v4 §4.1 把帧耗时拆成 AI / 绘制 / 战斗 / 其它，先量基线再决定优化力度
+- 关键输出（指数平滑后的毫秒，`帧墙` = 相邻 `_process` 墙钟差）：
+  - 300 只：`wall=12.1 ai=0.31 draw=3.05 combat=0.19 other=8.60`（≈83 FPS）
+  - 447 只：`wall=17.8 ai=0.60 draw=7.13 combat=0.24 other=9.81`（≈56 FPS）
+  - 527 只：`wall=56.0 ai=1.95 draw=24.54 combat=0.90 other=28.64`
+  - 564 只：`wall=153.3 ai=5.77 draw=69.18 combat=0.60 other=77.77`（≈6.5 FPS）
+- 结论：AI / 战斗都不是瓶颈（合计 <7ms）；**绘制 + `其它`（每个敌人一个 CanvasItem 的重绘/合批开销）占 95%**，且随数量超线性恶化 —— §4.2 的「集中渲染 + 屏外剔除」是对的方向。另外 `enemies=564 > MAX_ENEMIES=560`，说明 bulwark 走 `_spawn_enemy_at` 绕过了上限（V6 删它时一并消失）。
+- 截图：`docs/screenshots/v4-perf.png`（F3 面板新增「AI / 绘制 / 战斗 / 其它 / 帧墙」一行）。
