@@ -3,6 +3,10 @@
 *.translation
 export_credentials.cfg
 
+# Godot 4.7 跑 --check-only / 截图时会顺手生成这些，不提交
+*.uid
+*.png.import
+
 # 本地工具链（不提交引擎本体）
 .tools/
 

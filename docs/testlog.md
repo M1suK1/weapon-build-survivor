@@ -1,9 +1,19 @@
-# 测试日志
+﻿# 测试日志
 
 每条记录四行：**命令 / 目的 / 关键输出 / 结论**。跑完即写，避免「这个数是怎么来的」回想不起来。
 机器可读的一对 `[TEST] start …` / `[TEST] end …` 行由游戏自己打印，见 `docs/reference.md` §9.2。
 
 ---
+
+## 2026-10-20 · v6 静态校验（P1–P12）
+
+- **命令**：`cmd /c ".\.tools\godot\Godot_v4.7.2-stable_win64.exe --headless --path . --check-only --script res://scripts/game.gd & echo EXIT=%ERRORLEVEL%"`（其余脚本逐个同式）
+- **目的**：P1–P12 全部改完之后做静态校验。本轮**按用户要求不跑运行时测试**（不用 `playtest` / `boardtest` / 截图），行为留给人工复核。
+- **关键输出**：`Godot Engine v4.7.2.stable` + `EXIT=0`，无 `Parse Error`；`_check_data()` 的 `DATA OK  buff=100  modules=24` 只在运行时打印，本轮未跑。
+- **结论**：静态通过。待人工手测：升级卡可选、ESC/右键不抢、自动升级只扣料、装置背包与升级、板面 `输出 X/Ys` 与蓄能条、激光环全屏、冲锋枪 360、敌人血量上调、构筑屏不压字。
+
+---
+
 
 ## 2026-10-18 · U1 坐标自检（uitest）
 
