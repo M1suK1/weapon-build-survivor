@@ -181,3 +181,16 @@
 - 自测：`boardtest` → `power=100.0`；`playtest bot pt=180` → `t=180 wave=5 lvl=21 rcp=10 dev=3/3`（配方随升级上升、装置不再空转）；`pt=300` → `t=300 wave=8 lvl=27 kills=771 dps=22.8 need=21.2 inv=390 dead=false`
 - 截图：`docs/screenshots/v9-recipe-locked.png`（Lv1 配方面板 0 条 + 20 个未解锁）、`v9-card.png`（第 4 张「配方 · 贯穿弹（解锁）」）
 - 说明：`cheat=level` / 控制台 `level` 只改等级、不再解锁配方（行为变化）；要看配方让 bot 跑一局或手动按 U
+## plan-v4 V10 文档同步
+
+- 对照代码改了 `README.md` / `docs/reference.md` / `docs/design.md` / `docs/plan-v4.md` 的过期内容：
+  - `README.md:7` 的「plan-v2 v2.6 尚未实现」换成 v4 已实施；状态表补「重装变种 brute / 开发控制台 / 左下角升级按钮」三行；「16 个可解锁配方」改 20 个并说明解锁方式；操作表补控制台键与「↑ 升级」按钮
+  - 数值表：同屏上限 560 → 400（重装另算最多 +50）；配方解锁行整行换成「开局全锁，升级四选一第 4 张逐个解锁」
+  - 敌人表：bulwark 行删掉，换成 brute；charger 行补「锁向 + 0.15s 预备帧 + 线段判定」
+  - 波次段补「主导 + 三种陪衬，每 6 只至少 1 只非主导」；开发工具段补「wave 跳波后 shotat 必须大于 (N−1)×40」的坑；新增「开发控制台」小节（14 条命令 + 暂停集合 + F5–F9 已删）
+  - 已知问题：同屏硬 cap 240 → 400（可超编 450）；补「brute 抽到 shooter 会风筝」
+  - `docs/reference.md`：§2.1 敌人表补 brute、§2.2 波次表改成主导+陪衬权重、同屏上限 400、§3.4 解锁表整段重写（不再有等级）、§8 测试表补 `perftest` / `shotconsole`、§9 作弊码 `level=` 说明与 F5–F9 热键表删掉换成控制台、`[TEST] end` 样例补 `dash=3/11`
+  - `docs/design.md`：配方解锁行标注「已改，下表为改版前标定」
+  - `docs/plan-v4.md`：状态行改「已实施（V1–V10 全部落地）」+ §8 表加 commit 列
+- 截图清单（本批新增/重拍）：`v4-console.png`、`v4-upgrade.png`、`v4-upgrade-on.png`、`v4-perf.png`、`v5-render.png`、`v5-crowd.png`、`v6-brute.png`、`v6-brute-dbg.png`、`v7-wave.png`、`v8-dash.png`、`v9-recipe-locked.png`、`v9-card.png`
+- 全量回归：`--check-only` exit 0；`boardtest` → `power=100.0`；`playtest bot pt=300` → `t=300 wave=8 lvl=27 kills=771 dps=22.8 need=21.2 inv=390 dead=false`；`-- perftest "cheat=god,wave=25"` → 400 只 `draw=3.69` / `wall≈10ms`
