@@ -531,22 +531,21 @@ func _ready() -> void:
 		start_id = start_force
 	weapons.append(_make_weapon(start_id, 3))
 	_use_weapon(0)
-	for i in weapon.slots.size():
-		weapon.slots[i] = _new_module("base")
-		# 开局满板基础模块，方案也一起登记；烧完补不补看 auto_fill（人类默认手动，见 plan-v5 §1.2）
-		weapon.plan_draft[i] = "base"
-	# 开局草稿 = 生效：否则一进构筑屏就显示「方案未保存」（plan-v5 §1.5 边界第 3 条）
-	_sync_plan(weapon)
-	_add_inv("base", 2)
+	# 开局给空模板（plan-v6 §4）：板面全空、方案也空，玩家自己决定装什么。
+	# 只发 3 个基础模块当起步材料（bot/playtest 同样），够装 3 格或升半级
+	_add_inv("base", 3)
+
+	if plan_missing_demo:
+		for i in weapon.slots.size():
+			weapon.plan_draft[i] = "reson"
+		weapon.plan_draft[0] = "base"
+		_sync_plan(weapon)
 	devices.append(_new_device())
 	_make_player()
 	_make_enemy_renderer()
 	_make_hud()
 	if plan_missing_demo:
-		for i in weapon.slots.size():
-			weapon.slots[i] = null
-			weapon.plan_draft[i] = "reson"
-		_sync_plan(weapon)
+		_refresh_build()
 	if cheat_arg != "":
 		_apply_cheats(cheat_arg)
 	# bot / playtest 默认把所有装置设成自动，等价于旧版「装置一直在干活」的行为
