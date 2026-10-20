@@ -2598,15 +2598,6 @@ func _shot_power() -> float:
 	return _shot_power_of(weapon)
 
 
-## 某阶在「库存 + 板面」里的总量（配方按阶吃料：特化件也算同阶任意模块）
-func _count_tier(t: int) -> int:
-	var n := _inv_tier(t)
-	for m in weapon.slots:
-		if m != null and int(m["tier"]) == t:
-			n += 1
-	return n
-
-
 ## 从槽位里取该阶中寿命最少的模块（顺手把快报废的先花掉）
 func _take_from_slots(t: int) -> bool:
 	var idx := -1
@@ -3386,10 +3377,6 @@ func _all_total() -> int:
 	return _inv_total() + _count_filled()
 
 
-func _inv_tier(t: int) -> int:
-	return inv.of_tier(t)
-
-
 ## 库存里还有货的 id
 func _stocked_ids() -> Array:
 	return inv.stocked_ids()
@@ -4077,7 +4064,12 @@ func _refresh_build() -> void:
 			if not fname.has(fam):
 				fams.append(fam)
 				fname[fam] = String(b["fam_name"])
+		var shown := 0
 		for fam2 in fams:
+			if shown >= 8:
+				info.append("buff  …还有 %d 族（F3 面板里看全）" % (fams.size() - shown))
+				break
+			shown += 1
 			var cells: Array = []
 			for q in BUFF_TIERS:
 				var lv := _buff_lv(String(fam2), String(q))
@@ -4719,6 +4711,7 @@ func _drag_drop(mp: Vector2) -> void:
 	if t >= 0:
 		if src == "inv":
 			_place_at(t, mid)
+			hand_mid = ""  # 拖拽是一次性搬运，不进入「手持连放」状态
 		else:
 			_swap_slots(from, t)
 	elif src == "slot" and (over_recycle or _over_inv_area(mp)):

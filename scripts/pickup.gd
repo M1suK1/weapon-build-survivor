@@ -6,10 +6,13 @@ var tier := 1
 var age := 0.0
 var velocity := Vector2.ZERO
 var collected := false
+## 缓存的 game 引用（吸附半径要读「磁场」buff，别每帧查一次 tree）
+var game: Node = null
 
 
 func _ready() -> void:
 	velocity = Vector2.from_angle(randf() * TAU) * randf_range(30.0, 70.0)
+	game = get_tree().get_first_node_in_group("game")
 
 
 func _physics_process(delta: float) -> void:
@@ -21,10 +24,9 @@ func _physics_process(delta: float) -> void:
 	var to_p: Vector2 = p.position - position
 	var dist: float = to_p.length()
 	# 吸附半径吃「磁场」buff（plan-v5 §9.3 pickup 族）
-	var g0 = get_tree().get_first_node_in_group("game")
 	var magnet := 320.0
-	if g0 != null and g0.has_method("pickup_radius"):
-		magnet = float(g0.pickup_radius())
+	if game != null and game.has_method("pickup_radius"):
+		magnet = float(game.pickup_radius())
 	if age > 0.3 and (dist < magnet or age > 1.8):
 		velocity = velocity.lerp(to_p.normalized() * 460.0, 1.0 - exp(-7.0 * delta))
 	position += velocity * delta
