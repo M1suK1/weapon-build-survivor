@@ -29,38 +29,38 @@
 ##   mirror / boost{v} / reson{v} 走网络结算，不是「武器修正」
 const MODULES := {
 	# --- 网络主干（4 阶单轨，base → add → amp → reson）---
-	"base":     {"name": "基础",   "tier": 1, "rate": 1.0,  "uses": 45.0,  "cls": "flat",   "fam": "net",     "prev": "",        "color": Color(0.56, 0.70, 1.0),  "effect": []},
-	"add":      {"name": "加法",   "tier": 2, "rate": 3.0,  "uses": 60.0,  "cls": "mirror", "fam": "net",     "prev": "base",    "color": Color(0.49, 0.94, 0.66),  "effect": [{"k": "mirror"}]},
-	"amp":      {"name": "增幅",   "tier": 3, "rate": 0.0,  "uses": 120.0, "cls": "boost",  "fam": "net",     "prev": "add",     "color": Color(0.36, 0.88, 0.82),  "effect": [{"k": "boost", "v": 5.0}], "boost": 5.0},
-	"reson":    {"name": "共振",   "tier": 4, "rate": 27.0, "uses": 100.0, "cls": "reson",  "fam": "net",     "prev": "amp",     "color": Color(1.0, 0.56, 0.64),   "effect": [{"k": "reson", "v": 0.5}]},
+	"base":     {"name": "基础",   "tier": 1, "rate": 1.0,  "out_iv": 1.0,  "uses": 45.0,  "cls": "flat",   "fam": "net",     "prev": "",        "color": Color(0.56, 0.70, 1.0),  "effect": []},
+	"add":      {"name": "加法",   "tier": 2, "rate": 3.0,  "out_iv": 1.0,  "uses": 60.0,  "cls": "mirror", "fam": "net",     "prev": "base",    "color": Color(0.49, 0.94, 0.66),  "effect": [{"k": "mirror"}]},
+	"amp":      {"name": "增幅",   "tier": 3, "rate": 0.0,  "out_iv": 1.0,  "uses": 120.0, "cls": "boost",  "fam": "net",     "prev": "add",     "color": Color(0.36, 0.88, 0.82),  "effect": [{"k": "boost", "v": 5.0}], "boost": 5.0},
+	"reson":    {"name": "共振",   "tier": 4, "rate": 27.0, "out_iv": 1.0, "uses": 100.0, "cls": "reson",  "fam": "net",     "prev": "amp",     "color": Color(1.0, 0.56, 0.64),   "effect": [{"k": "reson", "v": 0.5}]},
 	# --- 锐化族：单发倍率（plan-v5 §11.1 把旧的 edge + overload 补成三阶链）---
-	"edge":     {"name": "锋锐刃", "tier": 2, "rate": 2.0,  "uses": 40.0,  "cls": "flat",   "fam": "edge",    "prev": "base",    "color": Color(0.86, 0.90, 0.98),  "effect": [{"k": "mul_add", "v": 0.08}]},
-	"surge":    {"name": "过载核", "tier": 3, "rate": 6.0,  "uses": 60.0,  "cls": "flat",   "fam": "edge",    "prev": "edge",    "color": Color(1.0, 0.78, 0.52),   "effect": [{"k": "mul", "v": 1.12}]},
-	"overload": {"name": "超载核", "tier": 4, "rate": 14.0, "uses": 70.0,  "cls": "flat",   "fam": "edge",    "prev": "surge",   "color": Color(1.0, 0.52, 0.42),   "effect": [{"k": "mul", "v": 1.15}, {"k": "mul_add", "v": 0.08}]},
+	"edge":     {"name": "锋锐刃", "tier": 2, "rate": 2.8,  "out_iv": 1.4,  "uses": 40.0,  "cls": "flat",   "fam": "edge",    "prev": "base",    "color": Color(0.86, 0.90, 0.98),  "effect": [{"k": "mul_add", "v": 0.08}]},
+	"surge":    {"name": "过载核", "tier": 3, "rate": 8.4,  "out_iv": 1.4,  "uses": 60.0,  "cls": "flat",   "fam": "edge",    "prev": "edge",    "color": Color(1.0, 0.78, 0.52),   "effect": [{"k": "mul", "v": 1.12}]},
+	"overload": {"name": "超载核", "tier": 4, "rate": 19.6, "out_iv": 1.4, "uses": 70.0,  "cls": "flat",   "fam": "edge",    "prev": "surge",   "color": Color(1.0, 0.52, 0.42),   "effect": [{"k": "mul", "v": 1.15}, {"k": "mul_add", "v": 0.08}]},
 	# --- 冷却族：开火间隔 ---
-	"calib":    {"name": "校准镜", "tier": 2, "rate": 1.0,  "uses": 45.0,  "cls": "flat",   "fam": "cool",    "prev": "base",    "color": Color(0.78, 0.86, 0.98),  "effect": [{"k": "iv", "v": 0.96}]},
-	"coolant":  {"name": "冷却片", "tier": 3, "rate": 3.0,  "uses": 60.0,  "cls": "flat",   "fam": "cool",    "prev": "calib",   "color": Color(0.56, 0.86, 0.94),  "effect": [{"k": "iv", "v": 0.92}]},
-	"cryo":     {"name": "液冷核", "tier": 4, "rate": 9.0,  "uses": 80.0,  "cls": "flat",   "fam": "cool",    "prev": "coolant", "color": Color(0.44, 0.96, 1.0),   "effect": [{"k": "iv", "v": 0.86}]},
+	"calib":    {"name": "校准镜", "tier": 2, "rate": 0.6,  "out_iv": 0.6,  "uses": 45.0,  "cls": "flat",   "fam": "cool",    "prev": "base",    "color": Color(0.78, 0.86, 0.98),  "effect": [{"k": "iv", "v": 0.96}]},
+	"coolant":  {"name": "冷却片", "tier": 3, "rate": 1.8,  "out_iv": 0.6,  "uses": 60.0,  "cls": "flat",   "fam": "cool",    "prev": "calib",   "color": Color(0.56, 0.86, 0.94),  "effect": [{"k": "iv", "v": 0.92}]},
+	"cryo":     {"name": "液冷核", "tier": 4, "rate": 5.4,  "out_iv": 0.6,  "uses": 80.0,  "cls": "flat",   "fam": "cool",    "prev": "coolant", "color": Color(0.44, 0.96, 1.0),   "effect": [{"k": "iv", "v": 0.86}]},
 	# --- 弹链族：每次开火的寿命消耗（越低越耐用）---
-	"light":    {"name": "轻量片", "tier": 2, "rate": 1.5,  "uses": 90.0,  "cls": "flat",   "fam": "belt",    "prev": "base",    "color": Color(0.72, 0.92, 0.86),  "effect": [{"k": "burn", "v": 0.60}]},
-	"belt":     {"name": "节能链", "tier": 3, "rate": 2.5,  "uses": 85.0,  "cls": "flat",   "fam": "belt",    "prev": "light",   "color": Color(0.98, 0.84, 0.50),  "effect": [{"k": "burn", "v": 0.45}]},
-	"feed":     {"name": "供弹核", "tier": 4, "rate": 8.0,  "uses": 80.0,  "cls": "flat",   "fam": "belt",    "prev": "belt",    "color": Color(1.0, 0.94, 0.62),   "effect": [{"k": "burn", "v": 0.30}]},
+	"light":    {"name": "轻量片", "tier": 2, "rate": 3.0,  "out_iv": 2.0,  "uses": 90.0,  "cls": "flat",   "fam": "belt",    "prev": "base",    "color": Color(0.72, 0.92, 0.86),  "effect": [{"k": "burn", "v": 0.60}]},
+	"belt":     {"name": "节能链", "tier": 3, "rate": 5.0,  "out_iv": 2.0,  "uses": 85.0,  "cls": "flat",   "fam": "belt",    "prev": "light",   "color": Color(0.98, 0.84, 0.50),  "effect": [{"k": "burn", "v": 0.45}]},
+	"feed":     {"name": "供弹核", "tier": 4, "rate": 16.0, "out_iv": 2.0,  "uses": 80.0,  "cls": "flat",   "fam": "belt",    "prev": "belt",    "color": Color(1.0, 0.94, 0.62),   "effect": [{"k": "burn", "v": 0.30}]},
 	# --- 穿甲族：贯穿 + 精英伤害 ---
-	"pierce":   {"name": "贯穿弹", "tier": 2, "rate": 3.0,  "uses": 50.0,  "cls": "flat",   "fam": "pierce",  "prev": "base",    "color": Color(1.0, 0.86, 0.60),   "effect": [{"k": "pierce", "v": 1}]},
-	"breaker":  {"name": "破甲锥", "tier": 3, "rate": 5.0,  "uses": 55.0,  "cls": "flat",   "fam": "pierce",  "prev": "pierce",  "color": Color(0.90, 0.62, 0.42),  "effect": [{"k": "pierce", "v": 1}, {"k": "elite", "v": 0.15}]},
-	"pierce_x": {"name": "贯穿核", "tier": 4, "rate": 12.0, "uses": 70.0,  "cls": "flat",   "fam": "pierce",  "prev": "breaker", "color": Color(1.0, 0.70, 0.36),   "effect": [{"k": "pierce", "v": 2}, {"k": "elite", "v": 0.25}]},
+	"pierce":   {"name": "贯穿弹", "tier": 2, "rate": 3.6,  "out_iv": 1.2,  "uses": 50.0,  "cls": "flat",   "fam": "pierce",  "prev": "base",    "color": Color(1.0, 0.86, 0.60),   "effect": [{"k": "pierce", "v": 1}]},
+	"breaker":  {"name": "破甲锥", "tier": 3, "rate": 6.0,  "out_iv": 1.2,  "uses": 55.0,  "cls": "flat",   "fam": "pierce",  "prev": "pierce",  "color": Color(0.90, 0.62, 0.42),  "effect": [{"k": "pierce", "v": 1}, {"k": "elite", "v": 0.15}]},
+	"pierce_x": {"name": "贯穿核", "tier": 4, "rate": 14.4, "out_iv": 1.2, "uses": 70.0,  "cls": "flat",   "fam": "pierce",  "prev": "breaker", "color": Color(1.0, 0.70, 0.36),   "effect": [{"k": "pierce", "v": 2}, {"k": "elite", "v": 0.25}]},
 	# --- 覆盖族：射程与目标数 ---
-	"extend":   {"name": "增程器", "tier": 2, "rate": 1.0,  "uses": 50.0,  "cls": "flat",   "fam": "cover",   "prev": "base",    "color": Color(0.60, 0.82, 1.0),   "effect": [{"k": "range", "v": 25.0}]},
-	"multi":    {"name": "多膛组", "tier": 3, "rate": 5.0,  "uses": 55.0,  "cls": "flat",   "fam": "cover",   "prev": "extend",  "color": Color(0.90, 0.78, 1.0),   "effect": [{"k": "targets", "v": 1}]},
-	"spread":   {"name": "扩散核", "tier": 4, "rate": 11.0, "uses": 70.0,  "cls": "flat",   "fam": "cover",   "prev": "multi",   "color": Color(1.0, 0.70, 0.54),   "effect": [{"k": "targets", "v": 1}, {"k": "range", "v": 40.0}]},
+	"extend":   {"name": "增程器", "tier": 2, "rate": 1.0,  "out_iv": 1.0,  "uses": 50.0,  "cls": "flat",   "fam": "cover",   "prev": "base",    "color": Color(0.60, 0.82, 1.0),   "effect": [{"k": "range", "v": 25.0}]},
+	"multi":    {"name": "多膛组", "tier": 3, "rate": 5.0,  "out_iv": 1.0,  "uses": 55.0,  "cls": "flat",   "fam": "cover",   "prev": "extend",  "color": Color(0.90, 0.78, 1.0),   "effect": [{"k": "targets", "v": 1}]},
+	"spread":   {"name": "扩散核", "tier": 4, "rate": 11.0, "out_iv": 1.0, "uses": 70.0,  "cls": "flat",   "fam": "cover",   "prev": "multi",   "color": Color(1.0, 0.70, 0.54),   "effect": [{"k": "targets", "v": 1}, {"k": "range", "v": 40.0}]},
 	# --- 维持族：回收寿命 + 连击 ---
-	"recycle":  {"name": "回收片", "tier": 2, "rate": 2.0,  "uses": 80.0,  "cls": "flat",   "fam": "sustain", "prev": "base",    "color": Color(0.66, 0.90, 0.62),  "effect": [{"k": "recycle", "p": 0.18, "n": 3}]},
-	"tempo":    {"name": "时序核", "tier": 3, "rate": 4.0,  "uses": 75.0,  "cls": "flat",   "fam": "sustain", "prev": "recycle", "color": Color(0.86, 0.74, 1.0),   "effect": [{"k": "combo", "v": 0.03, "n": 10}]},
-	"cycle":    {"name": "循环核", "tier": 4, "rate": 10.0, "uses": 90.0,  "cls": "flat",   "fam": "sustain", "prev": "tempo",   "color": Color(0.74, 0.98, 0.70),  "effect": [{"k": "combo", "v": 0.04, "n": 10}, {"k": "recycle", "p": 0.25, "n": 5}]},
+	"recycle":  {"name": "回收片", "tier": 2, "rate": 3.0,  "out_iv": 1.5,  "uses": 80.0,  "cls": "flat",   "fam": "sustain", "prev": "base",    "color": Color(0.66, 0.90, 0.62),  "effect": [{"k": "recycle", "p": 0.18, "n": 3}]},
+	"tempo":    {"name": "时序核", "tier": 3, "rate": 6.0,  "out_iv": 1.5,  "uses": 75.0,  "cls": "flat",   "fam": "sustain", "prev": "recycle", "color": Color(0.86, 0.74, 1.0),   "effect": [{"k": "combo", "v": 0.03, "n": 10}]},
+	"cycle":    {"name": "循环核", "tier": 4, "rate": 15.0, "out_iv": 1.5, "uses": 90.0,  "cls": "flat",   "fam": "sustain", "prev": "tempo",   "color": Color(0.74, 0.98, 0.70),  "effect": [{"k": "combo", "v": 0.04, "n": 10}, {"k": "recycle", "p": 0.25, "n": 5}]},
 	# --- 特化叶（4 阶、绑一把枪，换的是玩法不是数字）---
-	"focus":    {"name": "聚焦环", "tier": 4, "rate": 14.0, "uses": 80.0,  "cls": "flat",   "fam": "spec",    "prev": "spread",  "color": Color(0.70, 0.94, 1.0),   "effect": [{"k": "ramp_cap", "v": 1.80}], "bind": "laser"},
-	"charge":   {"name": "集束装药","tier": 4, "rate": 12.0, "uses": 80.0,  "cls": "flat",   "fam": "spec",    "prev": "cryo",    "color": Color(1.0, 0.60, 0.36),   "effect": [{"k": "blast", "v": 40.0}], "bind": "grenade"},
-	"blade":    {"name": "长刃",   "tier": 4, "rate": 12.0, "uses": 80.0,  "cls": "flat",   "fam": "spec",    "prev": "feed",    "color": Color(0.92, 0.86, 0.70),  "effect": [{"k": "blade", "v": 25.0}], "bind": "blade"},
+	"focus":    {"name": "聚焦环", "tier": 4, "rate": 33.6, "out_iv": 2.4, "uses": 80.0,  "cls": "flat",   "fam": "spec",    "prev": "spread",  "color": Color(0.70, 0.94, 1.0),   "effect": [{"k": "ramp_cap", "v": 1.80}], "bind": "laser"},
+	"charge":   {"name": "集束装药","tier": 4, "rate": 28.8, "out_iv": 2.4, "uses": 80.0,  "cls": "flat",   "fam": "spec",    "prev": "cryo",    "color": Color(1.0, 0.60, 0.36),   "effect": [{"k": "blast", "v": 40.0}], "bind": "grenade"},
+	"blade":    {"name": "长刃",   "tier": 4, "rate": 28.8, "out_iv": 2.4, "uses": 80.0,  "cls": "flat",   "fam": "spec",    "prev": "feed",    "color": Color(0.92, 0.86, 0.70),  "effect": [{"k": "blade", "v": 25.0}], "bind": "blade"},
 }
 
 ## 配方消耗（plan-v5 §11.4 会按族改：T2 = 3×base，T3/T4 = 2×同族上一阶）

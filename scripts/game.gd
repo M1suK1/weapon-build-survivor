@@ -800,6 +800,12 @@ func _hud_tick(delta: float) -> void:
 			blast_fx.remove_at(i)
 	for w in weapons:
 		w["blade_ph"] = float(w.get("blade_ph", 0.0)) + delta * BLADE_SPIN
+		# 模块蓄能（plan-v6 §7.1）：每格按自己的 out_iv 攒产出，上限 1（这一炮最多吃满一次）
+		for m in (w["slots"] as Array):
+			if m == null:
+				continue
+			var oiv := float(MODULES[String(m["id"])].get("out_iv", 1.0))
+			m["acc"] = minf(1.0, float(m.get("acc", 1.0)) + delta / maxf(oiv, 0.05))
 	queue_redraw()
 	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
 	if fmod(elapsed, 0.1) < delta:
@@ -1327,6 +1333,10 @@ func _fire(delta: float) -> void:
 			dmg *= 1.0 + cbon * float(int(w["combo"]))
 		# 消耗次数：每次开火每个模块 -1（与目标数无关 → 高射速 = 高消耗）
 		_burn_slots(w, float(mo["burn"]))
+		# 蓄能清零：这一炮已经把攒下的产出发掉了（plan-v6 §7.1 第 3 步）
+		for m in (w["slots"] as Array):
+			if m != null:
+				m["acc"] = 0.0
 		var hits := float(targets.size())
 		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / maxf(1.0, hits)
 		# 榴弹炮：主目标吃满，不叠多目标折扣（溅射在下面单独结算）
@@ -1988,8 +1998,8 @@ func _weapon_dps(w: Dictionary) -> float:
 		hits = float(maxi(1, _count_in_range(rng_d)))
 	elif t > 1:
 		hits = float(mini(t, maxi(1, _count_in_range(rng_d))))
-	var per := _shot_power_of(w) * (1.0 + 0.1 * (hits - 1.0)) / hits
-	return per * hits / (float(w["interval"]) * float(mo["iv"]))
+	var per := _shot_power_steady(w) * (1.0 + 0.1 * (hits - 1.0))
+	return per
 
 
 ## 理论 DPS 与 _weapon_dps 同义（v2.6 起不再假设空槽填满：那是「未来」不是「现在」）
@@ -2582,7 +2592,8 @@ func _auto_plan_fix(delta: float) -> void:
 func _new_module(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15) * (1.0 + _buff_sum("uses"))
-	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u}
+	# acc = 蓄能进度 0–1（plan-v6 §7.1 模型 S）：每帧按 delta/out_iv 涨，开火时按 acc 结算并清零
+	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u, "acc": 1.0}
 
 
 ## 相邻 = 网格曼哈顿距离 1
@@ -2599,7 +2610,7 @@ func _within(i: int, r: int) -> Array:
 ## 每个槽位这次的「输出」。
 ## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
 ## cls 决定行为；绑定武器的特化件在这个层面就是普通 flat（效果在 _weapon_mods 里生效）
-func _slot_out(slots = null, w = null) -> Array:
+func _slot_out(slots = null, w = null, use_acc := true) -> Array:
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = (ww["slots"] as Array) if slots == null else slots
 	var base: Array = []
@@ -2639,6 +2650,13 @@ func _slot_out(slots = null, w = null) -> Array:
 		for j in _neighbors(i, ww):
 			if sl[j] != null and _cls(sl[j]) != "boost":
 				out[j] = float(out[j]) + b
+	# 自走账本（plan-v6 §7.1）：每格按自己的蓄能进度结算，快枪每炮吃不满但开炮更频繁
+	if use_acc:
+		for i in sl.size():
+			var m = sl[i]
+			if m == null:
+				continue
+			out[i] = float(out[i]) * clampf(float(m.get("acc", 1.0)), 0.0, 1.0)
 	return out
 
 
@@ -2749,12 +2767,46 @@ func _take_tier(t: int, n: int, prefer_slots: bool = false) -> void:
 		left -= 1
 
 
-## 整板输出（不含武器基础值，只用于互相比较）
+## 整板输出（不含武器基础值，只用于互相比较）。
+## 用稳态口径 `rate/out_iv`（plan-v6 §7.3）：蓄能进度在 0–1 之间跳，拿它比较会让
+## 自动补料的判断随开火相位乱抖
 func _board_total(w = null) -> float:
 	var s := 0.0
-	for v in _slot_out(null, w):
+	for v in _slot_rate_out(w):
 		s += v
 	return s
+
+
+## 每格每秒输出（稳态）：per-shot 值 ÷ max(武器间隔, 模块 out_iv)
+## 快枪吃不满自己的蓄能（上限 1 次/炮），慢枪则每次吃满 —— 这一条就是 plan-v6 §7.1 的全部数学
+func _slot_rate_out(w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	var sl: Array = ww["slots"]
+	var per := _slot_out(null, ww, false)
+	var mo := _weapon_mods(ww)
+	var iv := maxf(float(ww["interval"]) * float(mo["iv"]), 0.02)
+	var out: Array = []
+	out.resize(per.size())
+	for i in per.size():
+		var m = sl[i]
+		if m == null:
+			out[i] = 0.0
+			continue
+		var oiv := float(MODULES[String(m["id"])].get("out_iv", 1.0))
+		out[i] = float(per[i]) / maxf(iv, oiv)
+	return out
+
+
+## 稳态每秒输出（含武器基础值与全部倍率），显示与「理论 DPS」都用它
+func _shot_power_steady(w = null) -> float:
+	var ww: Dictionary = weapon if w == null else w
+	var mo := _weapon_mods(ww)
+	var k := float(ww["mul"]) * float(mo["mul"]) * (1.0 + float(mo["mul_add"]))
+	var iv := maxf(float(ww["interval"]) * float(mo["iv"]), 0.02)
+	var s := float(ww["base"]) / iv
+	for v in _slot_rate_out(ww):
+		s += float(v)
+	return s * k
 
 
 ## 补料：按这一格的方案（没有方案时按整板增益）从库存补一个模块。
@@ -3285,7 +3337,7 @@ func _mod_effects(mid: String) -> Array:
 func _mod_tip_data(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var lines: Array = []
-	lines.append("第 %d 阶 · 输出 %.1f · 寿命 %d 次" % [int(d["tier"]), float(d["rate"]), int(d.get("uses", 0))])
+	lines.append("第 %d 阶 · 输出 %.1f/%.1fs · 寿命 %d 次" % [int(d["tier"]), float(d["rate"]), float(d.get("out_iv", 1.0)), int(d.get("uses", 0))])
 	for s in _mod_effects(mid):
 		lines.append("[color=#9fe3c8]%s[/color]" % String(s))
 	var b := String(d.get("bind", ""))
@@ -3308,12 +3360,13 @@ func _slot_tip_data(i: int) -> Dictionary:
 		var d: Dictionary = MODULES[mid]
 		col = d["color"]
 		title = "槽 %d · %s" % [i + 1, String(d["name"])]
-		lines.append("第 %d 阶 · 输出 %.1f · 剩余 %d/%d 次" % [int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
+		lines.append("第 %d 阶 · 输出 %.1f/%.1fs · 剩余 %d/%d 次" % [int(d["tier"]), float(d["rate"]), float(d.get("out_iv", 1.0)), int(m["left"]), int(m["max"])])
 		for s in _mod_effects(mid):
 			lines.append("[color=#9fe3c8]%s[/color]" % String(s))
-		var out_v := _slot_out(null, weapon)
-		if i < out_v.size():
-			lines.append("实际输出 %.1f" % float(out_v[i]))
+		var rate_v := _slot_rate_out(weapon)
+		if i < rate_v.size():
+			lines.append("本武器里 %.2f/s（蓄能 %d%%）" % [
+				float(rate_v[i]), roundi(clampf(float(m.get("acc", 1.0)), 0.0, 1.0) * 100.0)])
 		if int(d["tier"]) >= 2:
 			lines.append("相邻加成见板面连线（增幅/加法/共振）")
 	else:
@@ -3355,7 +3408,7 @@ func _recipe_tip_data(mid: String, unlock := false) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var t := int(d["tier"])
 	var lines: Array = []
-	lines.append("第 %d 阶 · 输出 %.1f · 寿命 %d 次" % [t, float(d["rate"]), int(d.get("uses", 0))])
+	lines.append("第 %d 阶 · 输出 %.1f/%.1fs · 寿命 %d 次" % [t, float(d["rate"]), float(d.get("out_iv", 1.0)), int(d.get("uses", 0))])
 	for s in _mod_effects(mid):
 		lines.append("[color=#9fe3c8]%s[/color]" % String(s))
 	var b := String(d.get("bind", ""))
@@ -4412,8 +4465,8 @@ func _rebuild_tab_inv() -> void:
 		if y >= 340.0:
 			rest += 1
 			continue
-		_tab_row(y, "%s  ×%d      %d 阶    输出 %.1f    寿命 %d" % [
-			String(d["name"]), n, int(d["tier"]), float(d["rate"]), int(d["uses"])
+		_tab_row(y, "%s  ×%d      %d 阶    输出 %.1f/%.1fs    寿命 %d" % [
+			String(d["name"]), n, int(d["tier"]), float(d["rate"]), float(d.get("out_iv", 1.0)), int(d["uses"])
 		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "装入",
 			_install_from_inv.bind(mid), true, "装到当前武器输出增益最大的那一格", "拿起", _pick_up.bind(mid),
 			_mod_tip_data.bind(mid))
@@ -4786,10 +4839,10 @@ func _rebuild_board() -> void:
 		panel.add_child(name_l)
 
 		var out_l := Label.new()
-		out_l.position = Vector2(0, 31)
-		out_l.size = Vector2(cell, 22)
+		out_l.position = Vector2(0, 30)
+		out_l.size = Vector2(cell, 20)
 		out_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		out_l.add_theme_font_size_override("font_size", 15)
+		out_l.add_theme_font_size_override("font_size", 13)
 		out_l.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
 		out_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		if m == null:
@@ -4803,8 +4856,25 @@ func _rebuild_board() -> void:
 					fed += 1
 			out_l.text = "→%.0f×%d" % [float(MODULES[String(m["id"])]["boost"]), fed]
 		else:
-			out_l.text = "%.1f" % float(out[i])
+			# 输出 X/Xs（plan-v6 §6.2/§7.3）：rate 与它自己的产出间隔
+			var oiv := float(MODULES[String(m["id"])].get("out_iv", 1.0))
+			out_l.text = "%.1f/%.1fs" % [float(MODULES[String(m["id"])]["rate"]), oiv]
 		panel.add_child(out_l)
+
+		# 蓄能进度条（plan-v6 §7.3 最后一条）：一眼看出慢重件与快碎件的节奏差
+		if m != null and _cls(m) != "boost":
+			var bar_bg := ColorRect.new()
+			bar_bg.color = Color(0.18, 0.21, 0.28)
+			bar_bg.position = Vector2(9, 66)
+			bar_bg.size = Vector2(cell - 18, 4)
+			bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			panel.add_child(bar_bg)
+			var bar := ColorRect.new()
+			bar.color = Color(UIKit.C_GOLD.r, UIKit.C_GOLD.g, UIKit.C_GOLD.b, 0.85)
+			bar.position = Vector2(9, 66)
+			bar.size = Vector2((cell - 18) * clampf(float(m.get("acc", 1.0)), 0.0, 1.0), 4)
+			bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			panel.add_child(bar)
 
 		var use_l := Label.new()
 		use_l.position = Vector2(0, 53)
@@ -4974,9 +5044,17 @@ func _drag_preview(t: int) -> String:
 
 func _board_total_slots(sl: Array, w = null) -> float:
 	var ww: Dictionary = weapon if w == null else w
+	# 预览也不吃蓄能进度（plan-v6 §7.3）：否则拖拽时的数字会跟着开火相位跳
+	var per := _slot_out(sl, ww, false)
+	var mo := _weapon_mods(ww)
+	var iv := maxf(float(ww["interval"]) * float(mo["iv"]), 0.02)
 	var total := 0.0
-	for v in _slot_out(sl, ww):
-		total += float(v)
+	for i in per.size():
+		var m = sl[i]
+		if m == null:
+			continue
+		var oiv := float(MODULES[String(m["id"])].get("out_iv", 1.0))
+		total += float(per[i]) / maxf(iv, oiv)
 	return total
 
 
