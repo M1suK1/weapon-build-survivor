@@ -1048,7 +1048,7 @@ func _make_hud() -> void:
 	build_legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	build_legend.add_theme_font_size_override("font_size", 13)
 	build_legend.add_theme_color_override("font_color", Color(0.52, 0.60, 0.74))
-	build_legend.text = "左键放模块 ｜ 右键：格子里=卸下销毁，别处=返回 ｜ 拖拽：板内互换保留寿命，拖到「卸下」= 销毁\n金色细边 = 草稿没保存，点「保存方案」才生效"
+	build_legend.text = "左键放模块 ｜ 右键：已装格=卸下销毁，空格=放下手持，空白=收回手持/返回 ｜ 拖拽：板内互换保留寿命，拖到「卸下」= 销毁\n金色细边 = 草稿没保存，点「保存方案」才生效"
 	build_root.add_child(build_legend)
 
 	# 底部提示行（不压按钮，plan-v6 §8.2）
@@ -1290,7 +1290,9 @@ func _on_esc() -> bool:
 	return false
 
 
-## 右键的唯一入口（plan-v6 §2.2）：槽位 = 卸下；拖拽中 = 取消；其它位置 = 返回上一层
+## 右键的唯一入口（plan-v6 §2.2 / plan-v7 §3）：
+##   已装格 = 卸下（销毁）；空格子且手上有模块 = 放下；空白处且手上有模块 = 收回库存；
+##   空手时空白处 = 返回上一层；拖拽中 = 取消拖拽
 func _on_right_click(mb: InputEventMouseButton) -> bool:
 	if console_open:
 		return false
@@ -1305,6 +1307,14 @@ func _on_right_click(mb: InputEventMouseButton) -> bool:
 		var i := _slot_at(mp)
 		if i >= 0:
 			_on_slot_input(mb, i)
+			return true
+		if hand_mid != "":
+			# 右键点空白：手上的模块收回库存（plan-v7 §3 第 3 条）
+			var n := _inv(hand_mid)
+			_add_inv(hand_mid, 1)
+			_toast("已放回库存：%s ×%d" % [String(MODULES[hand_mid]["name"]), n + 1])
+			hand_mid = ""
+			_refresh_build()
 			return true
 	if _close_topmost():
 		return true
@@ -2989,7 +2999,11 @@ func _on_slot_input(event: InputEvent, i: int) -> void:
 		return
 	var mb := event as InputEventMouseButton
 	if mb.button_index == MOUSE_BUTTON_RIGHT:
-		_uninstall(i)
+		# 空格子 + 手上有模块 = 放下（plan-v7 §3 第 2 条）；否则就是卸下
+		if (weapon["slots"] as Array)[i] == null and hand_mid != "":
+			_place_at(i, hand_mid)
+		else:
+			_uninstall(i)
 		_refresh_build()
 		return
 	if mb.button_index != MOUSE_BUTTON_LEFT:
@@ -3434,7 +3448,7 @@ func _slot_tip_data(i: int) -> Dictionary:
 	var draft := _plan_draft_at(weapon, i)
 	if draft != want:
 		lines.append("[color=#ffd479]草稿：%s —— 未保存，保存后才会按它补料[/color]" % ("空" if draft == "" else String(MODULES[draft]["name"])))
-	lines.append("[color=#8fa0b8]左键：装入手里的模块 / 手动补料　　右键：卸下（销毁）[/color]")
+	lines.append("[color=#8fa0b8]左键：装入手里的模块 / 手动补料　　右键：卸下（销毁）/ 空格放下手持 / 空白收回[/color]")
 	return {"title": title, "lines": lines, "color": col}
 
 
