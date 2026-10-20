@@ -3644,7 +3644,7 @@ func _stocked_ids() -> Array:
 # 9. 合成与装置
 # ============================================================================
 func _new_device() -> Dictionary:
-	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": [], "lv": 1}
+	return {"kind": "", "left": 0.0, "total": 0.0, "auto": true, "paid": [], "lv": 1}
 
 
 ## 本次扩容要多少个模块：按「已经扩过几次」算价格（50 → 110 → 242 → 532）
@@ -3726,7 +3726,7 @@ func buy_device() -> bool:
 	_take_inv("base", cost)
 	var nd := _new_device()
 	# bot / playtest 里新装置默认开机自动，否则平衡测试会因为「装置没人管」而失真
-	nd["auto"] = (playtest or bot) and not no_auto_craft
+	nd["auto"] = not no_auto_craft  # plan-v7 D4：新装置默认开机自动，玩家可手动关
 	devices.append(nd)
 	return true
 
@@ -4710,7 +4710,7 @@ func _rebuild_tab_buff() -> void:
 			var chip := ColorRect.new()
 			chip.color = Color(d2["color"])
 			chip.position = Vector2(0, y + 6)
-			chip.size = Vector2(8, 18)
+			chip.size = Vector2(8, 32)
 			chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			tab_body.add_child(chip)
 			var l := _label(tab_body, Vector2(14, y), 14, Color(0.84, 0.89, 0.96))
@@ -4719,7 +4719,25 @@ func _rebuild_tab_buff() -> void:
 				int(b["lv"]), int(d2["max"])]
 			l.mouse_filter = Control.MOUSE_FILTER_PASS
 			_bind_tip(l, _buff_tip_data.bind(String(b["id"])))
-			y += 26.0
+			# 第二行：主效果（+ 副效果），让 Buff 一栏本身就能看出收益差异（plan-v7 §4）
+			var sub := _label(tab_body, Vector2(14, y + 17), 12, UIKit.C_DIM)
+			var fxl: Array = d2.get("fx", [])
+			var txt2 := ""
+			for j in fxl.size():
+				var e: Dictionary = fxl[j]
+				if j > 0:
+					txt2 += " · 副 "
+				txt2 += BuffDB.fx_text(String(e["k"]), float(e["v"]))
+			var thr2 := int(d2.get("thr", 0))
+			if txt2 == "":
+				sub.text = ""
+			elif thr2 > 0:
+				sub.text = "Lv%d 起 %s" % [thr2, txt2]
+			else:
+				sub.text = "每级 " + txt2
+			sub.mouse_filter = Control.MOUSE_FILTER_PASS
+			_bind_tip(sub, _buff_tip_data.bind(String(b["id"])))
+			y += 40.0
 	var foot := _label(tab_body, Vector2(0, y + 4), 12, UIKit.C_DIM)
 	foot.text = "共 %d 条变体 · 悬浮看下一级效果" % bl.size()
 
