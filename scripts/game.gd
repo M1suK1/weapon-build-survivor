@@ -998,7 +998,6 @@ func _make_hud() -> void:
 
 	pick_root = Control.new()
 	pick_root.set_anchors_preset(Control.PRESET_FULL_RECT)
-	pick_root.size = Vector2(1280, 720)
 	pick_root.mouse_filter = Control.MOUSE_FILTER_STOP
 	# 选卡面板默认隐藏：以前这里常驻一层 0.86 的暗色，导致整局画面都像被暂停
 	pick_root.visible = false
@@ -3635,6 +3634,7 @@ func take_from_bag(i: int) -> void:
 		return
 	_add_inv(String(device_bag[i]), 1)
 	device_bag.remove_at(i)
+	_refresh_build()
 
 
 ## 这台装置升下一级要多少模块（1→2 30、→3 60、→4 120、→5 240）
@@ -3733,7 +3733,7 @@ func _craft_tick(delta: float) -> void:
 		var k := String(d["kind"])
 		# 装置背包满：停工等玩家来取（进度冻在 0，不丢产物、不重复扣料）
 		if _bag_full():
-			d["left"] = 0.01 if _bag_full() else 0.0
+			d["left"] = 0.01
 			continue
 		d["kind"] = ""
 		d["left"] = 0.0
