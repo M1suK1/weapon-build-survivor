@@ -5119,7 +5119,7 @@ func _paint_chest() -> void:
 		var oc := _qcol(int(ow["quality"]))
 		var chip := Panel.new()
 		chip.position = Vector2(bx, 584)
-		chip.size = Vector2(150, 34)
+		chip.size = Vector2(118, 34)
 		var csb := StyleBoxFlat.new()
 		csb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
 		csb.border_color = oc
@@ -5128,13 +5128,13 @@ func _paint_chest() -> void:
 		csb.set_corner_radius_all(6)
 		chip.add_theme_stylebox_override("panel", csb)
 		pick_root.add_child(chip)
-		var cl := _label(chip, Vector2(12, 6), 14, oc)
-		cl.text = "%d槽 %s%s" % [(ow["slots"] as Array).size(),
-			String(WEAPONS[ow["id"]]["name"]), " ▸" if wi == sel else ""]
+		var cl := _label(chip, Vector2(12, 7), 13, oc)
+		cl.text = "%d槽·%s%s" % [(ow["slots"] as Array).size(),
+			String(WEAPONS[ow["id"]]["name"]), "▸" if wi == sel else ""]
 		if full:
-			_label(chip, Vector2(110, 9), 11, Color(1.0, 0.55, 0.45)).text = "替换"
+			_label(chip, Vector2(84, 10), 10, Color(1.0, 0.55, 0.45)).text = "替换"
 		_bind_tip(chip, _weapon_tip_data.bind(wi))
-		bx += 158.0
+		bx += 122.0
 	var ab := UIKit.button("放弃并换模块（0）", Vector2(200, 40), UIKit.C_GOLD, 15)
 	ab.position = Vector2(900, 596)
 	ab.tooltip_text = "按最好那张卡的品质折算：2 + 品质 个模块，直接进库存（wave ≥ 12 一半换成加法）"
