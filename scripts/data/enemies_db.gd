@@ -1,7 +1,7 @@
 extends RefCounted
 ## 敌人与刷怪数据表（纯数据，零逻辑）。
 ##
-## 谁在用：`scripts/game.gd` 的刷怪 / 波次 / 编队 / 精英 / bulwark / 掉落，
+## 谁在用：`scripts/game.gd` 的刷怪 / 波次 / 编队 / 精英 / 重装变种 / 掉落，
 ## 以及 `scripts/enemy.gd`（只读 `hp_mult` / `speed` / `radius` / `color` 这类字段）。
 ## 规则文档：`docs/reference.md` §2。
 
@@ -49,9 +49,24 @@ const ENEMY_KINDS := {
 	"shooter": {"speed": 70.0, "hp_mult": 1.71, "radius": 12.0, "color": Color(0.62, 0.86, 1.00)},
 	# 精英血量是手设的 9.0（不套公式：它靠冲刺而非堆血量制造威胁）
 	"charger": {"speed": 78.0, "hp_mult": 9.00, "radius": 20.0, "color": Color(1.00, 0.36, 0.42)},
-	# bulwark：慢速高血量「墙」，专在玩家前方生成逼走位（docs/plan-v3.md §3）
-	"bulwark": {"speed": 46.0, "hp_mult": 4.20, "radius": 22.0, "color": Color(0.44, 0.72, 0.62)},
 }
+
+## 重装变种（docs/plan-v4.md §3）：不给新种类，只给现有种类打 `variant = "brute"` 标记。
+## 规则一句话：**只放大血量 ×8，速度/半径/伤害全都不动**，靠「打不死、堵路」施压。
+## 模板白名单只放慢速怪 —— `runner`(205) 与 `charger`(78 但冲刺 780) 从源头不进池，
+## 保证不会生成高速重装个体；生成时再查一次 `base_speed > BRUTE_MAX_SPEED` 兜底。
+const BRUTE_TEMPLATES := ["flood", "rock", "shooter"]
+const BRUTE_MAX_SPEED := 120.0
+const BRUTE_HP_MULT := 8.0
+## 单发上限 = 最大血量的 20% → 任何武器都至少要 5 发才杀得掉（§3.3）
+const BRUTE_HIT_RATIO := 0.20
+const BRUTE_MIN_WAVE := 3
+const BRUTE_INTERVAL := 20.0
+const BRUTE_GROUP_MIN := 2
+const BRUTE_GROUP_MAX := 4
+const BRUTE_CAP := 50
+const BRUTE_TINT := Color(0.72, 0.22, 0.42)
+const BRUTE_TINT_WEIGHT := 0.55
 
 ## 波次编成：coeff = 总血量预算系数（1.0 = 涌潮基准），kinds = 相对权重。
 ## 每 5 波循环一次，所以玩家能从「这波怪变多了/变硬了」读出编成变化。

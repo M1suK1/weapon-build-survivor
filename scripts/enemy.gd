@@ -37,8 +37,12 @@ var hold_bias := 0.0
 var _g: Node = null
 var facing := Vector2.RIGHT
 var age := 0.0
-## 出生预兆：>0 时冻结不动、只画半透明轮廓 + 收缩圆环（bulwark 用）
+## 出生预兆：>0 时冻结不动、只画半透明轮廓 + 收缩圆环（给精英冲刺的预备帧用）
 var telegraph := 0.0
+## 变种标记（docs/plan-v4.md §3.2）："" = 普通怪，"brute" = 重装（血量 ×8、单发上限 20%）
+var variant := ""
+## 单次命中上限：>0 时任何一次命中最多打掉这么多血（重装「至少 5 发」的硬保证）
+var hit_cap := 0.0
 
 ## 通用计时
 var shoot_t := 0.0

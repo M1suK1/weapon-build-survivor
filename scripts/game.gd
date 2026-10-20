@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 游戏主控制器（编排层）。
 ##
 ## 职责：创建场景节点、跑主循环（刷怪 → 合成 → 开火 → 接触伤害 → HUD）、
@@ -76,6 +76,17 @@ const ELITE_FIRST_WAVE := EnemyDB.ELITE_FIRST_WAVE
 const ELITE_EVERY := EnemyDB.ELITE_EVERY
 const ELITE_MAX := EnemyDB.ELITE_MAX
 const SHOOTER_MAX := EnemyDB.SHOOTER_MAX
+const BRUTE_TEMPLATES := EnemyDB.BRUTE_TEMPLATES
+const BRUTE_MAX_SPEED := EnemyDB.BRUTE_MAX_SPEED
+const BRUTE_HP_MULT := EnemyDB.BRUTE_HP_MULT
+const BRUTE_HIT_RATIO := EnemyDB.BRUTE_HIT_RATIO
+const BRUTE_MIN_WAVE := EnemyDB.BRUTE_MIN_WAVE
+const BRUTE_INTERVAL := EnemyDB.BRUTE_INTERVAL
+const BRUTE_GROUP_MIN := EnemyDB.BRUTE_GROUP_MIN
+const BRUTE_GROUP_MAX := EnemyDB.BRUTE_GROUP_MAX
+const BRUTE_CAP := EnemyDB.BRUTE_CAP
+const BRUTE_TINT := EnemyDB.BRUTE_TINT
+const BRUTE_TINT_WEIGHT := EnemyDB.BRUTE_TINT_WEIGHT
 
 ## 升级四选一的 buff 池（scripts/data/buffs_db.gd）
 const BUFFS := BuffDB.BUFFS
@@ -179,6 +190,8 @@ var pick_delay := 0.0
 var pick_wait := 0.0
 var start_force := ""
 var hud_stat: Label = null
+## 状态栏右侧的「重装 N」小标（docs/plan-v4.md §3.4）
+var hud_brute: Label = null
 var dbg_root: Control = null
 var dbg_text: Label = null
 var dbg_on := false
@@ -190,10 +203,12 @@ var uitest := false
 var uitest_step := 0
 var drag_test := false
 var drag_demo := false
-# --- bulwark（前方撞墙怪）---
-var bulwark_t := 10.0
-var last_move_dir := Vector2.RIGHT
-var prev_ppos := Vector2.ZERO
+# --- 重装变种（高血量变种，docs/plan-v4.md §3）---
+var brute_t := BRUTE_INTERVAL
+var variant_n := {}
+## 同屏重装数量（HUD / 调试用）
+func _count_variant(v: String) -> int:
+	return int(variant_n.get(v, 0))
 var dt_step := 0
 var tab := 0
 var tab_bar: Control = null
@@ -596,14 +611,8 @@ func _physics_process(delta: float) -> void:
 	if wave != prev_wave:
 		_on_wave_start()
 	_bot_move(delta)
-	# 记录玩家真实移动方向：bulwark 要生成在「玩家正在走的方向」前面堵路
-	if player != null:
-		var dp := player.position - prev_ppos
-		if dp.length() > 0.5:
-			last_move_dir = dp.normalized()
-		prev_ppos = player.position
 	_spawn(delta)
-	_tick_bulwark(delta)
+	_tick_brute(delta)
 	_craft_tick(delta)
 	if autoplan:
 		_auto_plan_all()
@@ -737,6 +746,9 @@ func _make_hud() -> void:
 	hud_status = _label(layer, Vector2(18, 14), 20, Color(0.95, 0.96, 1.0))
 	hud_ammo = _label(layer, Vector2(18, 44), 20, Color(0.7, 0.95, 0.85))
 	hud_stat = _label(layer, Vector2(742, 16), 16, Color(0.55, 0.6, 0.68))
+	# 重装计数（docs/plan-v4.md §3.4）：跟着状态栏文字的实际宽度排，>30 只变红
+	hud_brute = _label(layer, Vector2(600, 18), 18, Color(1.0, 0.72, 0.42))
+	hud_brute.visible = false
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
 	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   / 控制台   F3 调试   R 重开"
 
@@ -763,7 +775,7 @@ func _make_hud() -> void:
 	# F3 调试面板（默认关）
 	dbg_root = Control.new()
 	dbg_root.position = Vector2(836, 76)
-	dbg_root.size = Vector2(424, 190)
+	dbg_root.size = Vector2(424, 228)
 	dbg_root.visible = dbg_on
 	dbg_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dbg_root.process_mode = Node.PROCESS_MODE_ALWAYS
@@ -1066,12 +1078,7 @@ func _fire(delta: float) -> void:
 			var d: float = per
 			if float(mo["elite"]) > 0.0 and String(e.kind) in ["charger", "rock"]:
 				d *= 1.0 + float(mo["elite"])
-			# 实际打掉的血量（不超过剩余血量），否则溢出伤害会把实测 DPS 撑高
-			dealt += minf(d, maxf(float(e.hp), 0.0))
-			e.hp = float(e.hp) - d
-			e.hit = 0.18
-			if e.hp <= 0.0:
-				_kill(e)
+			dealt += _apply_hit(e, d)
 		# 贯穿：主目标身后 120px 内最近的敌人再吃 60%（贯穿弹每层多穿一个）
 		var pierce := int(mo["pierce"])
 		if pierce > 0:
@@ -1081,12 +1088,7 @@ func _fire(delta: float) -> void:
 			for e in extra:
 				if not is_instance_valid(e):
 					continue
-				var d2: float = per * 0.6
-				dealt += minf(d2, maxf(float(e.hp), 0.0))
-				e.hp = float(e.hp) - d2
-				e.hit = 0.18
-				if e.hp <= 0.0:
-					_kill(e)
+				dealt += _apply_hit(e, per * 0.6)
 		# 榴弹炮：命中点周围 (90 + blast) 内的其他敌人吃 60%
 		if String(w["id"]) == "grenade" and not targets.is_empty():
 			var c0: Vector2 = targets[0].position
@@ -1096,12 +1098,7 @@ func _fire(delta: float) -> void:
 					continue
 				if e.position.distance_to(c0) > br:
 					continue
-				var ds: float = dmg * 0.60
-				dealt += minf(ds, maxf(float(e.hp), 0.0))
-				e.hp = float(e.hp) - ds
-				e.hit = 0.18
-				if e.hp <= 0.0:
-					_kill(e)
+				dealt += _apply_hit(e, dmg * 0.60)
 			blast_fx.append({"p": c0, "r": br, "t": 0.18})
 		_log_damage(w, dealt)
 		_add_shot(targets, w)
@@ -1251,6 +1248,21 @@ func _spawn_pickup(pos: Vector2, mid: String) -> void:
 	p.mid = mid
 	p.tier = int(MODULES[mid]["tier"])
 	add_child(p)
+
+
+## 单次命中结算：唯一入口（直击 / 贯穿 / 溅射都走这里）。
+## 重装变种带 `hit_cap`（= max_hp × 20%），任何一次命中最多打掉这么多 —— 保证击杀下限 5 发（docs/plan-v4.md §3.3）。
+## 返回「实际打掉的血量」（不超过剩余血量），否则溢出伤害会把实测 DPS 撑高。
+func _apply_hit(e: Node2D, dmg: float) -> float:
+	var d := dmg
+	if float(e.hit_cap) > 0.0:
+		d = minf(d, float(e.hit_cap))
+	var dealt := minf(d, maxf(float(e.hp), 0.0))
+	e.hp = float(e.hp) - d
+	e.hit = 0.18
+	if e.hp <= 0.0:
+		_kill(e)
+	return dealt
 
 
 ## 单次伤害入口（子弹 / 精英冲撞）。接触伤害仍走 _contact 的持续扣血。
@@ -1746,6 +1758,9 @@ func _drop_enemy(e: Node) -> void:
 	enemies.erase(e)
 	var k := String(e.kind)
 	kind_n[k] = maxi(0, int(kind_n.get(k, 0)) - 1)
+	var v := String(e.variant)
+	if v != "":
+		variant_n[v] = maxi(0, int(variant_n.get(v, 0)) - 1)
 
 
 func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
@@ -1770,48 +1785,48 @@ func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
 	return e
 
 
-## 同屏 bulwark 数量
-func _count_bulwark() -> int:
-	return int(kind_n.get("bulwark", 0))
-
-
-## 每 16 秒在玩家「前进方向 ±50°」排一堵慢速高血量墙：往前走就会被撞上（docs/plan-v3.md §3.2）
-func _tick_bulwark(delta: float) -> void:
-	if wave >= 3:
-		bulwark_t -= delta
-		if bulwark_t <= 0.0:
-			bulwark_t = 16.0
-			_spawn_bulwark_arc()
-	_recycle_bulwark()
-
-
-func _spawn_bulwark_arc() -> void:
-	var cap := mini(14, 2 + int(wave / 4.0))
-	var n := mini(4, cap - _count_bulwark())
-	if n <= 0:
+## 重装变种刷新（docs/plan-v4.md §3.4）：wave ≥ 3 起每 20 秒一波 2–4 只，
+## 同屏上限 50、屏幕外生成、直线走向玩家、**不回收**（清不掉就一直堆成包围圈，逼玩家换位置）
+func _tick_brute(delta: float) -> void:
+	if wave < BRUTE_MIN_WAVE:
 		return
-	var dir := last_move_dir
-	if dir.length() < 0.1:
-		dir = Vector2.from_angle(rng.randf() * TAU)
-	var base_ang := dir.angle()
+	brute_t -= delta
+	if brute_t > 0.0:
+		return
+	brute_t = BRUTE_INTERVAL
+	var room := BRUTE_CAP - _count_variant("brute")
+	if room <= 0:
+		return
+	var n := mini(rng.randi_range(BRUTE_GROUP_MIN, BRUTE_GROUP_MAX), room)
+	# 不看 MAX_ENEMIES：重装是「超编」的压迫单位（上限 50 自己管），
+	# 否则后期刷怪把 400 占满后，重装会永远刷不出来（V6 实测踩到过）
 	for i in n:
-		var a := base_ang + lerpf(-0.87, 0.87, (float(i) + 0.5) / float(n))
-		var pos := player.position + Vector2.from_angle(a) * rng.randf_range(380.0, 460.0)
-		var e := _spawn_enemy_at(pos, "bulwark")
-		if e != null:
-			# 依次浮现 0.9s / 1.5s / 2.1s …，像一堵墙慢慢立起来
-			e.telegraph = 0.9 + 0.6 * float(i)
+		_spawn_brute()
 
 
-## 跑到玩家身后很远、又活得够久的 bulwark 直接回收，免得越积越多
-func _recycle_bulwark() -> void:
-	if int(elapsed * 2.0) % 4 != 0:
-		return
-	for e in enemies:
-		if String(e.kind) != "bulwark":
-			continue
-		if float(e.age) > 6.0 and (e.position - player.position).dot(last_move_dir) < -1600.0:
-			e.queue_free()
+## 抽一个慢速模板 → 屏幕外生成 → 只把血量放大 ×8（速度/半径/伤害都不动）
+func _spawn_brute() -> Node2D:
+	var pool: Array = []
+	for k in BRUTE_TEMPLATES:
+		# 兜底：以后改表把高速怪放进白名单也不会生成「高速重装」
+		if float(ENEMY_KINDS[k]["speed"]) <= BRUTE_MAX_SPEED:
+			pool.append(k)
+	if pool.is_empty():
+		return null
+	var tmpl := String(pool[rng.randi() % pool.size()])
+	var ang := rng.randf() * TAU
+	var pos: Vector2 = player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
+	var e := _spawn_enemy_at(pos, tmpl)
+	if e == null:
+		return null
+	e.variant = "brute"
+	e.hp_mult = float(ENEMY_KINDS[tmpl]["hp_mult"]) * BRUTE_HP_MULT
+	e.max_hp = _wave_hp() * float(e.hp_mult)
+	e.hp = e.max_hp
+	e.hit_cap = e.max_hp * BRUTE_HIT_RATIO
+	e.body_color = (ENEMY_KINDS[tmpl]["color"] as Color).lerp(BRUTE_TINT, BRUTE_TINT_WEIGHT)
+	variant_n["brute"] = int(variant_n.get("brute", 0)) + 1
+	return e
 
 
 
@@ -2862,6 +2877,24 @@ func _refresh_hud() -> void:
 		Color(0.7, 0.95, 0.85) if net >= 0.0 else Color(1.0, 0.55, 0.5))
 	_refresh_weapon_panel()
 	_refresh_up_btn()
+	_refresh_brute_badge()
+
+
+## 状态栏右侧「重装 N」：贴在状态文字后面，>30 只（同屏上限 50）变红提醒「该换位置了」
+func _refresh_brute_badge() -> void:
+	if hud_brute == null:
+		return
+	var n := _count_variant("brute")
+	hud_brute.visible = n > 0
+	if n <= 0:
+		return
+	hud_brute.text = "重装 %d" % n
+	var f := hud_status.get_theme_font("font")
+	var fs := hud_status.get_theme_font_size("font_size")
+	var w := f.get_string_size(hud_status.text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	hud_brute.position = Vector2(18.0 + w + 28.0, 18.0)
+	hud_brute.add_theme_color_override("font_color",
+		Color(1.0, 0.36, 0.32) if n > 30 else Color(1.0, 0.72, 0.42))
 
 
 ## 升级按钮三态：可升（金 + 呼吸 + 红点）/ 不可升（灰 + 进度）/ 选卡中（隐藏）
@@ -4243,13 +4276,13 @@ func _pt_log() -> void:
 	for i in (bw["plan"] as Array).size():
 		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
 			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f bw=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_bulwark(),
+		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"),
 	])
 
 
@@ -4320,6 +4353,8 @@ func _refresh_dbg_panel(enemy_total: int) -> void:
 	dbg_text.text = "\n".join([
 		"FPS %d   帧 %.1fms   峰 %.1fms" % [int(Engine.get_frames_per_second()), frame_ms, frame_ms_max],
 		"敌人 %d   可见 %d   上限 %d   刷怪 %.2f/s" % [enemy_total, vis_enemy, MAX_ENEMIES, _spawn_rate()],
+		"重装 %d/%d   单发上限 %.0f%%   模板 %s" % [
+			_count_variant("brute"), BRUTE_CAP, BRUTE_HIT_RATIO * 100.0, "/".join(BRUTE_TEMPLATES)],
 		"掉落 %d   子弹 %d   宝箱 %d" % [
 			get_tree().get_nodes_in_group("pickup").size(),
 			get_tree().get_nodes_in_group("bullet").size(),

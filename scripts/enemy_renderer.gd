@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 集中渲染：一个 CanvasItem 画完场上全部敌人（docs/plan-v4.md §4.2 A）。
 ## 敌人节点只跑逻辑、不再 `_draw` / `queue_redraw`；这里按世界坐标直接画，
 ## 并跳过镜头外的敌人（400 只时通常一半以上在屏外，白画纯属浪费）。
@@ -87,6 +87,10 @@ func _draw_one(e: Node2D) -> void:
 		draw_circle(Vector2.ZERO, r, body)
 		if kind == "rock":
 			draw_arc(Vector2.ZERO, r * 0.72, 0.0, TAU, 18, body.lightened(0.35), 2.5, true)
+
+	# 重装变种：2px 高亮描边，和普通怪一眼分开（形状/半径/速度都跟模板一致，只靠颜色区分）
+	if String(e.variant) == "brute":
+		draw_arc(Vector2.ZERO, r + 2.5, 0.0, TAU, 28, Color(1.0, 0.88, 0.94, 0.95), 2.0, true)
 
 	# 高密度 LOD：>220 只时不画纯装饰的小内点（每只 1 次 draw），
 	# 400 只时这一项就占约 3ms —— 画面此时已经是一团，内点看不出来（docs/plan-v4.md §4.3 draw≤4ms）

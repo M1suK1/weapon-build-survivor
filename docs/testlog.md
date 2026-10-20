@@ -106,3 +106,24 @@
 - **C（空间网格）未实施**：实测 `combat_ms` 稳定在 0.03~0.05ms（`_contact` 数到 6 只就 break，`_targets_in_range` 每次开火只跑一遍），网格收益低于测量噪声；等九武器长局里 combat 真的起来再做，避免为 0.05ms 加一套网格维护。
 - 自测：`boardtest` → `BOARD set out=[40.5, 45.5, 0.0, 1.0, 5.0, 6.0] power=100.0`；`playtest bot pt=300` → `[TEST] end reason=limit t=300 wave=8 lvl=26 kills=793 dps=23.5 need=11.9 weapons=3 inv=373 dead=false`（与 V4 前 `kills=799 dps=24.1 inv=347` 同量级）。
 - 截图：`docs/screenshots/v5-render.png`（同 seed 291927655 对照 V4 的 `v4-perf.png`：形状/颜色/血条一致）、`v5-crowd.png`（400 只密度）。
+
+## plan-v4 V6 删 bulwark / 重装变种 brute / hit_cap
+
+- 命令：`-- brutetest`（临时自检，验完删除）＋`--playtest bot pt=300`＋`-- boardtest`
+- 改动：
+  - 删 `ENEMY_KINDS["bulwark"]`、`bulwark_t/last_move_dir/prev_ppos`、`_tick_bulwark/_spawn_bulwark_arc/_count_bulwark/_recycle_bulwark`、`_pt_log` 的 `bw=`
+  - 新 `variant = "brute"`：模板只从 `flood(100)/rock(52)/shooter(70)` 抽（生成时再查 `base_speed <= 120` 兜底），**只把血量 ×8**，速度/半径/伤害全都不动
+  - `e.hit_cap = e.max_hp × 0.20`：所有命中走新的 `_apply_hit()` 单一入口（直击/贯穿/溅射同一套），保证至少 5 发；普通怪 `hit_cap == 0` 不受影响
+  - 生成：wave ≥ 3 起每 20 秒 2–4 只，同屏上限 50，屏幕外 1220–1400 随机角，直线走向玩家、不回收
+  - 颜色：模板色 `.lerp(Color(0.72,0.22,0.42), 0.55)` + 2px 近白描边（`enemy_renderer.gd`）
+  - HUD 状态栏右侧「重装 N」，>30 只变红；F3 面板加「重装 N/50 · 单发上限 20% · 模板 …」
+- 关键输出（临时自检 `BRUTETEST`）：
+  - `tmpl=shooter in_pool=true base_speed=70.0 brute_speed=72.10 normal_speed=72.10 hp=30.78 want_hp=30.78 hit_cap=6.16 ratio=0.200 radius=12.0 normal_radius=12.0`
+    → 与同波同模板的普通怪**速度/半径完全一致**，血量正好 ×8
+  - `cap dealt=6.16 want=6.16 hp_left=24.62 alive=true`：一发 999999 也只掉 20%
+  - `kills_in_hits=5`：连打上限正好 5 发死（10 倍伤害也是 5 发，已远超「≥5 发」的下界）
+  - `hud_visible=true hud_text=重装 1 count=1`；`tick count=50 max_base_speed=100.0 over_cap=false`（连续 60 次 20 秒刷新 = 20 分钟，稳定卡在 50、模板最快 100）
+- 生成上限的坑：重装**不看 `MAX_ENEMIES`**。第一版在 400 满员时 `break`，实测 wave 18 连一只重装都刷不出来；现在它是「超编」单位（50 自己管），总同屏可到 450。
+- 自测：`boardtest` → `power=100.0`；`playtest bot pt=300` → `t=300 wave=8 lvl=28 kills=781 dps=14.2 need=11.9 inv=473 dead=false`（V5 时 `dps=23.5`：重装吃掉大量伤害，符合「打不死、堵路」的定位）。
+- 截图：`docs/screenshots/v6-brute.png`（重装 3：玩家身边两个近白描边的大血牛）、`v6-brute-dbg.png`（F3 面板显示模板与上限）。
+- 待观察（plan §9 风险）：抽到 shooter 模板的重装会风筝，和「拦路」定位相反；先留池观察，不好就砍成 flood/rock。
