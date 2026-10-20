@@ -1129,10 +1129,10 @@ func _make_hud() -> void:
 	tab_bar = Control.new()
 	tab_bar.position = Vector2(632, 214)
 	build_root.add_child(tab_bar)
-	var tab_names := ["库存", "配方", "装置"]
-	for i in 3:
-		var tb := UIKit.button(tab_names[i], Vector2(96, 32), UIKit.C_BLUE, 15)
-		tb.position = Vector2(i * 104, 0)
+	var tab_names := ["库存", "配方", "装置", "Buff"]
+	for i in tab_names.size():
+		var tb := UIKit.button(String(tab_names[i]), Vector2(84, 32), UIKit.C_BLUE, 15)
+		tb.position = Vector2(i * 90, 0)
 		tb.pressed.connect(_set_tab.bind(i))
 		tab_bar.add_child(tb)
 		tab_btns.append(tb)
@@ -4018,7 +4018,7 @@ func _buff_list() -> Array:
 			continue
 		var d: Dictionary = BUFFS[id]
 		out.append({
-			"id": String(id), "fam_name": String(d["fam_name"]),
+			"id": String(id), "fam": String(d["fam"]), "fam_name": String(d["fam_name"]), "cap_lv": int(d.get("max", BUFF_MAX_LEVEL)),
 			"q": String(d["q"]), "tier": int(d["tier"]), "lv": lv,
 		})
 	out.sort_custom(func(a, b): return int(a["tier"]) > int(b["tier"]))
@@ -4344,15 +4344,14 @@ func _refresh_build() -> void:
 	build_top.text = "构筑（暂停中）"
 	lines.append("")
 	# 数值全部带满 buff（plan-v6 §10.6）：基础 → 当前，玩家能直接看到 buff 在涨
-	lines.append("武器  %s·%s·%d 槽    射程 %s    间隔 %s    目标 %s    单发 %s    当前 DPS %.1f" % [
+	lines.append("武器  %s·%s·%d 槽    射程 %s    间隔 %s    目标 %s" % [
 		str(WEAPONS[weapon["id"]]["name"]), QUALITY_NAME[int(weapon["quality"])],
 		(weapon["slots"] as Array).size(),
 		_eff_num(float(weapon["range"]), rng_now, "%.0f"),
 		_eff_num(float(weapon["interval"]), iv_now, "%.2f") + "s",
-		"全部" if int(weapon["targets"]) < 0 else _eff_num(float(weapon["targets"]), float(tg_now), "%.0f"),
-		_eff_num(float(weapon["base"]), _shot_power(), "%.1f"),
-		_weapon_dps(weapon)
+		"全部" if int(weapon["targets"]) < 0 else _eff_num(float(weapon["targets"]), float(tg_now), "%.0f")
 	])
+	lines.append("单发 %s    当前 DPS %.1f" % [_eff_num(float(weapon["base"]), _shot_power(), "%.1f"), _weapon_dps(weapon)])
 	if weapons.size() > 1:
 		var names: Array = []
 		for i in weapons.size():
@@ -4363,6 +4362,9 @@ func _refresh_build() -> void:
 			])
 		lines.append("切换   " + "   ".join(names) + "    1-9 选   F 开关")
 	build_text.text = "\n".join(lines)
+	# 先重建右栏：即使下面的数值区出错，标签页也不会跟着空掉
+	_rebuild_tab()
+	_highlight_tab()
 
 	var info: Array = []
 	var need := level_cost()
@@ -4411,8 +4413,6 @@ func _refresh_build() -> void:
 		info.append("缺料 %d 格：%s（%s）" % [miss.size(), " / ".join(mn),
 			"攒够会自动补" if auto_fill else "点格子手动补，或开自动补料"])
 	build_info.text = "\n".join(info)
-	_rebuild_tab()
-	_highlight_tab()
 
 
 func _set_tab(i: int) -> void:
@@ -4469,8 +4469,10 @@ func _rebuild_tab() -> void:
 		_rebuild_tab_inv()
 	elif tab == 1:
 		_rebuild_tab_recipe()
-	else:
+	elif tab == 2:
 		_rebuild_tab_device()
+	else:
+		_rebuild_tab_buff()
 
 
 func _tab_row(y: float, text: String, col: Color, btn: String, cb: Callable, enabled := true, tip := "", btn2 := "", cb2 := Callable(), tip_data := Callable()) -> void:
@@ -4689,6 +4691,47 @@ func _rebuild_tab_device() -> void:
 			_label(tab_body, Vector2(0, y + 24), 13, UIKit.C_RED).text = "基础模块不够：现有 %d，需要 %d" % [_inv("base"), cost]
 	else:
 		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
+
+## Buff 页：手上所有变体按类别分组，悬浮看当前/下一级效果（plan-v6 追加需求）
+func _rebuild_tab_buff() -> void:
+	var bl := _buff_list()
+	if bl.is_empty():
+		_label(tab_body, Vector2(0, 6), 15, UIKit.C_DIM).text = "还没有 buff：升级时三张同类卡同品质，挑一张"
+		return
+	var y := 0.0
+	for cat in ["atk", "eco", "sur"]:
+		var rows: Array = []
+		for b in bl:
+			var d: Dictionary = BUFFS[String(b["id"])]
+			if String(d["cat"]) == String(cat):
+				rows.append(b)
+		if rows.is_empty():
+			continue
+		if y > 0.0:
+			y += 6.0
+		var h := _label(tab_body, Vector2(0, y), 13, Color(0.52, 0.60, 0.74))
+		h.text = "— %s —" % String(BuffDB.CAT_NAME.get(String(cat), String(cat)))
+		y += 22.0
+		for b in rows:
+			if y >= 330.0:
+				_label(tab_body, Vector2(0, y + 2), 13, UIKit.C_DIM).text = "…还有更多（F3 面板里看全）"
+				return
+			var d2: Dictionary = BUFFS[String(b["id"])]
+			var chip := ColorRect.new()
+			chip.color = Color(d2["color"])
+			chip.position = Vector2(0, y + 6)
+			chip.size = Vector2(8, 18)
+			chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			tab_body.add_child(chip)
+			var l := _label(tab_body, Vector2(14, y), 14, Color(0.84, 0.89, 0.96))
+			l.text = "%s · %s   Lv%d/%d" % [
+				String(d2["fam_name"]), String(BUFF_TIER_NAME[String(d2["q"])]),
+				int(b["lv"]), int(d2["max"])]
+			l.mouse_filter = Control.MOUSE_FILTER_PASS
+			_bind_tip(l, _buff_tip_data.bind(String(b["id"])))
+			y += 26.0
+	var foot := _label(tab_body, Vector2(0, y + 4), 12, UIKit.C_DIM)
+	foot.text = "共 %d 条变体 · 悬浮看下一级效果" % bl.size()
 
 
 ## 装置页的两个小回调（按钮只接了无参函数）
