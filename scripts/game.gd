@@ -36,7 +36,6 @@ const Perf := preload("res://scripts/systems/perf.gd")
 const MODULES := ModDB.MODULES
 const CRAFT_COST := ModDB.CRAFT_COST
 const CRAFT_TIME := ModDB.CRAFT_TIME
-const CRAFT_UNLOCK := ModDB.CRAFT_UNLOCK
 const MOD_ORDER := ModDB.MOD_ORDER
 const CORE_ORDER := ModDB.CORE_ORDER
 const DEVICE_COST_BASE := ModDB.DEVICE_COST_BASE
@@ -119,6 +118,8 @@ var buffs := {}
 var offer: Array = []
 var picking := false
 var reroll_used := false
+## 本局已解锁的配方（mid → true）：开局全空，靠升级奖励第 4 张「解锁卡」逐个点亮
+var recipe_unlocked := {}
 var level := 1
 var hp := 100.0
 var max_hp := 100.0
@@ -147,6 +148,8 @@ var player: Node2D
 var hud_status: Label
 var hud_ammo: Label
 var hud_tip: Label
+var toast_lbl: Label = null
+var toast_tween: Tween = null
 var wpanel: Label
 var build_root: Control
 var pick_root: Control
@@ -608,7 +611,9 @@ func _physics_process(delta: float) -> void:
 	if picking:
 		pick_wait += delta
 		if pick_delay > 0.0 and pick_wait > pick_delay and not hold_pick:
-			_take_card(0)
+			# bot 自测：每两级拿一次第 4 张解锁卡，否则配方永远锁着（plan-v4 §7.2 第 10 条）
+			var want := 3 if (level % 2 == 0 and offer.size() >= 4 and bool(offer[3].get("unlock", false))) else 0
+			_take_card(want)
 		return
 	if dead or get_tree().paused:
 		return
@@ -758,6 +763,10 @@ func _make_hud() -> void:
 	hud_brute.visible = false
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
 	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   / 控制台   F3 调试   R 重开"
+
+	# 解锁提示（plan-v4 §7.2 第 4 条）：屏幕中上方飘一行，2 秒淡出
+	toast_lbl = _label(layer, Vector2(440, 108), 20, UIKit.C_GOLD)
+	toast_lbl.visible = false
 
 	wpanel = _label(layer, Vector2(18, 84), 17, Color(0.78, 0.86, 1.0))
 
@@ -2662,11 +2671,10 @@ func _craft_tick(delta: float) -> void:
 				try_craft("", devices.find(d))
 
 
-## 该配方当前能不能开：绑定武器、解锁等级、材料
+## 该配方当前能不能开：绑定武器、是否已解锁、材料
 func recipe_state(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var t := int(d["tier"])
-	var need_lv := int(CRAFT_UNLOCK.get(mid, 99))
 	var bind := String(d.get("bind", ""))
 	var has_bind := bind == ""
 	if bind != "":
@@ -2677,16 +2685,16 @@ func recipe_state(mid: String) -> Dictionary:
 	var have := _inv_tier(t - 1)
 	var st := "可合成"
 	var ok := true
-	if not has_bind:
+	if not recipe_unlocked.has(mid):
+		ok = false
+		st = "未解锁（升级时选配方卡）"
+	elif not has_bind:
 		ok = false
 		st = "需要%s" % String(WEAPONS[bind]["name"])
-	elif level < need_lv:
-		ok = false
-		st = "解锁于 Lv%d" % need_lv
 	elif have < cost:
 		ok = false
 		st = "需 %d 个 %d 阶料" % [cost, t - 1]
-	return {"ok": ok, "state": st, "cost": cost, "tier": t, "level": need_lv}
+	return {"ok": ok, "state": st, "cost": cost, "tier": t, "level": 0}
 
 
 ## 合成吃「库存」（槽位是工作区，绝不能被合成顺手拆掉）。
@@ -2857,26 +2865,21 @@ func _roll_offer() -> void:
 	offer.append(_roll_recipe_card())
 
 
-## 配方卡：从已解锁的配方里抽一个（特化配方只在拥有对应武器时进池）
+## 配方卡：抽一个「还没解锁」的配方（特化配方只在拥有对应武器时进池）。
+## 全解锁 / 没有匹配武器时退化成模块礼包（unlock=false），保证四选一永远 4 张。
 func _roll_recipe_card() -> Dictionary:
 	var pool: Array = []
 	for mid in MOD_ORDER:
+		if recipe_unlocked.has(mid):
+			continue
 		var d: Dictionary = MODULES[mid]
-		var bind := String(d.get("bind", ""))
-		if bind != "":
-			var has := false
-			for w in weapons:
-				if String(w["id"]) == bind:
-					has = true
-			if not has:
-				continue
-		if level < int(CRAFT_UNLOCK.get(mid, 99)) - 3:
+		if not _has_weapon_bind(String(d.get("bind", ""))):
 			continue
 		pool.append(mid)
 	if pool.is_empty():
-		pool = ["add"]
+		return {"kind": "recipe", "id": "add", "unlock": false}
 	var mid2: String = String(pool[rng.randi_range(0, pool.size() - 1)])
-	return {"kind": "recipe", "id": mid2}
+	return {"kind": "recipe", "id": mid2, "unlock": true}
 
 
 
@@ -3187,7 +3190,7 @@ func _rebuild_tab_recipe() -> void:
 		var t := int(d["tier"])
 		var sec := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
 		var ok := bool(st["ok"])
-		if String(st["state"]).begins_with("解锁"):
+		if String(st["state"]).begins_with("未解锁"):
 			locked += 1
 			continue
 		_tab_row(y, "%s   %d×%d阶   %.0fs   %s" % [
@@ -3198,9 +3201,9 @@ func _rebuild_tab_recipe() -> void:
 		if y > 300.0:
 			break
 	if y == 0.0:
-		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "还没有解锁任何配方（升级会解锁）"
+		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "还没有解锁任何配方（升级时选第 4 张配方卡）"
 	if locked > 0:
-		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "还有 %d 个配方未解锁（等级不够 / 没有对应武器）" % locked
+		_label(tab_body, Vector2(0, 32.0 if y == 0.0 else y + 6.0), 14, UIKit.C_DIM).text = "还有 %d 个配方没解锁（在升级奖励里选）" % locked
 
 
 func _rebuild_tab_device() -> void:
@@ -3296,7 +3299,7 @@ func _rebuild_device_pick() -> void:
 	for k in MOD_ORDER:
 		var mid := String(k)
 		var d: Dictionary = MODULES[mid]
-		if level < int(CRAFT_UNLOCK.get(mid, 99)) and not _has_weapon_bind(String(d.get("bind", ""))):
+		if not recipe_unlocked.has(mid):
 			continue
 		var st := recipe_state(mid)
 		var ok := bool(st["ok"])
@@ -3756,9 +3759,15 @@ func _paint_offer() -> void:
 			col = Color(0.62, 0.86, 1.0) if r == "blue" else (Color(1.0, 0.84, 0.35) if r == "gold" else Color(0.82, 0.84, 0.90))
 		else:
 			var d2: Dictionary = MODULES[String(card["id"])]
-			nm = "配方 · %s" % String(d2["name"])
-			ds = "立刻获得 1 个（%d 阶）" % int(d2["tier"])
-			col = Color(0.55, 0.95, 0.72)
+			if bool(card.get("unlock", false)):
+				var t2 := int(d2["tier"])
+				nm = "配方 · %s（解锁）" % String(d2["name"])
+				ds = "解锁后可合成 · 需 %d 个 %d 阶料" % [int(CRAFT_COST[t2]), t2 - 1]
+				col = Color(0.55, 0.95, 0.72)
+			else:
+				nm = "配方 · %s" % String(d2["name"])
+				ds = "立刻获得 1 个（%d 阶）" % int(d2["tier"])
+				col = Color(0.72, 0.86, 0.72)
 		var btn := Button.new()
 		btn.position = Vector2(x0 + float(i) * (w_card + gap), 200)
 		btn.size = Vector2(w_card, 210)
@@ -3857,10 +3866,28 @@ func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_
 		if id == "hp":
 			max_hp += 15.0
 			hp = minf(max_hp, hp + 15.0)
+	elif bool(card.get("unlock", false)):
+		recipe_unlocked[id] = true
+		_toast("解锁配方：%s" % String(MODULES[id]["name"]))
 	else:
 		_add_inv(id, 1 + int(level / 12))
 	_close_pick()
 	_refresh_hud()
+
+
+## 屏幕中上方飘一行提示（解锁配方等），1.2 秒后 0.8 秒淡出
+func _toast(msg: String) -> void:
+	if toast_lbl == null:
+		return
+	toast_lbl.text = msg
+	toast_lbl.visible = true
+	toast_lbl.modulate.a = 1.0
+	if toast_tween != null and toast_tween.is_valid():
+		toast_tween.kill()
+	toast_tween = create_tween()
+	toast_tween.tween_interval(1.2)
+	toast_tween.tween_property(toast_lbl, "modulate:a", 0.0, 0.8)
+	toast_tween.tween_callback(func() -> void: toast_lbl.visible = false)
 
 
 ## 把配方卡 reroll 成第 4 张 buff（每级一次）
@@ -4354,13 +4381,13 @@ func _pt_log() -> void:
 	for i in (bw["plan"] as Array).size():
 		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
 			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d kinds=f%d/r%d/rk%d/s%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"), _count_kind("flood"), _count_kind("runner"), _count_kind("rock"), _count_kind("shooter"),
+		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"), recipe_unlocked.size(), _count_kind("flood"), _count_kind("runner"), _count_kind("rock"), _count_kind("shooter"),
 	])
 
 

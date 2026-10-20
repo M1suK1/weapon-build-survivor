@@ -46,9 +46,7 @@ const MODULES := {
 ## 配方 = 2 个「低一阶」的任意模块（T2 吃 3 个基础）。时间按阶区分，特化件更慢。
 const CRAFT_COST := {2: 3, 3: 2, 4: 2}
 const CRAFT_TIME := {2: 5.0, 3: 10.0, 4: 18.0}
-const CRAFT_UNLOCK := {"add": 4, "amp": 8, "reson": 16, "edge": 5, "temper": 5, "light": 6, "extend": 7,
-	"calib": 9, "pierce": 11, "breaker": 12, "coolant": 13, "recycle": 14, "overload": 17, "tempo": 18,
-	"multi": 12, "belt": 12, "spread": 13, "focus": 20, "charge": 15, "blade": 15}
+## 配方不再按等级解锁：开局全部锁着，靠升级四选一的第 4 张「解锁卡」逐个解锁
 ## UI / 自动合成都按这个顺序遍历（不含 base：基础模块是原料，不是产物）
 const MOD_ORDER := ["add", "amp", "reson", "edge", "temper", "light", "extend", "calib", "pierce",
 	"breaker", "coolant", "recycle", "overload", "tempo", "multi", "belt", "spread", "focus", "charge", "blade"]

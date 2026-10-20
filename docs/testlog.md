@@ -161,3 +161,23 @@
   - `tries=1 hits=1 player_hp=76.0`：命中计数与伤害链打通（100 - 24 = 76）
 - 自测：`boardtest` → `power=100.0`；`playtest bot pt=300` → `t=300 wave=8 lvl=27 kills=771 dps=16.9 need=21.2 inv=387 dead=false dash=0/0`（精英只在 wave 4/10/16… 出现，本局唯一那只在远处就被清掉，所以计数为 0；要看计数得让精英接近玩家）
 - 截图：`docs/screenshots/v8-dash.png`（三只精英同时锁定：实线 + 端点圆点，方向已不追玩家）
+
+## plan-v4 V9 配方改由升级奖励直出
+
+- 命令：`-- rcptest`（临时自检，验完删除）＋`-- boardtest`＋`-- playtest bot pt=180/300`
+- 改动：
+  - 删 `CRAFT_UNLOCK`（`scripts/data/modules_db.gd` 与 `game.gd` 顶部 const）；`recipe_state()` 不再看等级，改判 `recipe_unlocked.has(mid)`（未解锁 → 「未解锁（升级时选配方卡）」，绑定武器/料不够两种状态保留）
+  - 新 `var recipe_unlocked := {}`（本局有效，开局空）；解卡只由升级四选一的第 4 张给
+  - `_roll_recipe_card()`：只抽未解锁且绑定武器在手的配方，返回 `{"kind":"recipe","id":mid,"unlock":true}`；池空回退 `{"id":"add","unlock":false}`（模块礼包，保证第 4 张不空）
+  - `_take_card()`：`unlock==true` → 记解锁 + `_toast("解锁配方：…")`（1.2s 后 0.8s 淡出，屏幕中上方），不再发模块；礼包卡仍 `_add_inv`
+  - 卡面：解锁卡「配方 · X（解锁）/ 解锁后可合成 · 需 N 个 T 阶料」；配方面板空态与计数文案改成「升级时选第 4 张配方卡」「还有 N 个配方没解锁（在升级奖励里选）」；装置选配方列表改 `not recipe_unlocked.has(mid)`
+  - bot：`level % 2 == 0` 且第 4 张是解锁卡时选第 4 张，否则第 1 张；`_pt_log` 加 `rcp=`
+- 关键输出（`RCPTEST`）：
+  - `before state=未解锁（升级时选配方卡） unlocked=0`
+  - `card kind=recipe id=recycle unlock=true` → `reroll id=coolant dup=false`（已解锁的不再进池）
+  - `after state=需 2 个 2 阶料 ok=false inv_base=32`（解锁后只差材料）
+  - `all_unlocked kind=recipe id=add unlock=false`（20 个全解锁后退化成礼包）
+  - `toast_visible=true text=RCPTEST toast`
+- 自测：`boardtest` → `power=100.0`；`playtest bot pt=180` → `t=180 wave=5 lvl=21 rcp=10 dev=3/3`（配方随升级上升、装置不再空转）；`pt=300` → `t=300 wave=8 lvl=27 kills=771 dps=22.8 need=21.2 inv=390 dead=false`
+- 截图：`docs/screenshots/v9-recipe-locked.png`（Lv1 配方面板 0 条 + 20 个未解锁）、`v9-card.png`（第 4 张「配方 · 贯穿弹（解锁）」）
+- 说明：`cheat=level` / 控制台 `level` 只改等级、不再解锁配方（行为变化）；要看配方让 bot 跑一局或手动按 U
