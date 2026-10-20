@@ -3786,7 +3786,10 @@ func _roll_quality() -> String:
 		total += float(w[q])
 	var r := rng.randf() * total
 	for q in BUFF_TIERS:
-		r -= float(w[q])
+		var wq := float(w[q])
+		if wq <= 0.0:
+			continue  # 权重为 0 的档位不能靠 "r == 0" 蒙进来
+		r -= wq
 		if r <= 0.0:
 			return String(q)
 	return "white"
