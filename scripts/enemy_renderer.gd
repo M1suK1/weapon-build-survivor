@@ -1,4 +1,4 @@
-﻿extends Node2D
+extends Node2D
 ## 集中渲染：一个 CanvasItem 画完场上全部敌人（docs/plan-v4.md §4.2 A）。
 ## 敌人节点只跑逻辑、不再 `_draw` / `queue_redraw`；这里按世界坐标直接画，
 ## 并跳过镜头外的敌人（400 只时通常一半以上在屏外，白画纯属浪费）。
@@ -70,7 +70,12 @@ func _draw_one(e: Node2D) -> void:
 			pts.append(Vector2.from_angle(TAU * i / 6.0 + e.hpth) * r)
 		draw_colored_polygon(pts, body)
 		draw_arc(Vector2.ZERO, r * 1.12, 0.0, TAU, 24, Color(1, 0.85, 0.4, 0.9), 2.5, true)
-		if e.windup > 0.0:
+		if e.locked:
+			# 方向已锁死：实线 + 端点圆点（和「还在瞄准」的虚线/渐亮线区分，plan §6.2）
+			var dd: Vector2 = e.dash_dir_locked
+			draw_line(Vector2.ZERO, dd * 620.0, Color(1.0, 0.38, 0.32, 0.92), 3.0)
+			draw_circle(dd * 620.0, 5.0, Color(1.0, 0.5, 0.42, 0.95))
+		elif e.windup > 0.0:
 			var k: float = 1.0 - e.windup / Enemy.CHARGE_WINDUP
 			draw_line(Vector2.ZERO, facing * 520.0, Color(1.0, 0.25, 0.25, 0.25 + 0.55 * k), 2.0 + 3.0 * k)
 		if e.stun > 0.0:

@@ -137,6 +137,9 @@ var last_chest_t := 0.0
 const REGEN_DELAY := 4.0
 const REGEN_RATE := 1.2
 var damage_credit := 0.0
+## 精英冲刺命中统计（[TEST] 输出，plan-v4 §6.3）
+var dash_tries := 0
+var dash_hits := 0
 var modules_from_damage := 0
 var rng := RandomNumberGenerator.new()
 
@@ -4130,9 +4133,17 @@ func _test_banner() -> void:
 func _test_end(reason: String) -> void:
 	if not (playtest or bot or shot_path != "" or cheat_arg != ""):
 		return
-	print("[TEST] end reason=%s t=%.0f wave=%d lvl=%d kills=%d dps=%.1f need=%.1f weapons=%d inv=%d dead=%s" % [
+	print("[TEST] end reason=%s t=%.0f wave=%d lvl=%d kills=%d dps=%.1f need=%.1f weapons=%d inv=%d dead=%s dash=%d/%d" % [
 		reason, elapsed, wave, level, kills_total, cur_actual_dps(),
-		_spawn_rate() * _wave_hp() * _plan_avg_mult(), weapons.size(), _inv_total(), str(dead)])
+		_spawn_rate() * _wave_hp() * _plan_avg_mult(), weapons.size(), _inv_total(), str(dead), dash_hits, dash_tries])
+
+
+func _on_dash_start() -> void:
+	dash_tries += 1
+
+
+func _on_dash_hit() -> void:
+	dash_hits += 1
 
 
 func _push_btn(p: Vector2, pressed: bool) -> void:

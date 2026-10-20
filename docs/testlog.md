@@ -144,3 +144,20 @@
 - 说明：§5.4 写的「主导占比 55%–75%」只适用三个主题波；混编按表就是 flood 40%，属设计而非偏差
 - 事故与恢复：删临时 `quotatest` 时用 `LastIndexOf` 找函数前的 banner，结果截到了 §16 控制台的 banner，把整个控制台分节删掉（4901 → 4472 行）。恢复办法：`git show HEAD:scripts/game.gd` 取出 §16 原样（428 行）追加回文件尾，再 parse/boardtest/playtest 全绿。教训：删追加的临时函数不要按 banner 定位，直接按 `func _run_xxx` 截到文件尾
 - 截图：`docs/screenshots/v7-wave.png`（波次名「涌潮（+混编）」+ 同屏 flood/runner/rock/shooter 四种造型）
+
+## plan-v4 V8 精英冲刺方向锁定
+
+- 命令：`-- dashtest`（临时自检，验完删除）＋`-- boardtest`＋`-- playtest bot pt=300`
+- 改动：
+  - `enemy.gd`：新增 `CHARGE_PREP := 0.15`；字段 `dash_dir_locked` / `locked` / `prep` / `dash_tried`
+  - `_charger_step()`：蓄力 0.9s 内 `dash_dir = facing`（红线跟着玩家）；蓄力结束瞬间 `dash_dir_locked = facing; locked = true; prep = 0.15; dash_t = CHARGE_TIME + CHARGE_PREP`；预备帧原地不动；冲刺只用 dash_dir_locked；结束/命中后 `locked = false`
+  - 命中判定从「每帧距离 < 30」改成线段判定 `_seg_hit()`（起点→终点线段到玩家距离 < 半径 + 12，780px/s 一帧跨 13px 也不会穿过去）
+  - `enemy_renderer.gd`：`locked` 时画 3px 实线 + 端点圆点（区别「还在瞄准」的渐亮线）
+  - `game.gd`：`dash_tries` / `dash_hits` + `_on_dash_start()` / `_on_dash_hit()`；`[TEST] end` 末尾加 `dash=命中/尝试`
+- 关键输出（`DASHTEST`）：
+  - `windup=0.75/0.55/0.35/0.15 locked=false dir=(-1,0) facing=(-1,0)`：蓄力期方向跟随
+  - `locked prep=0.15 … 0.00 pos=(109.615, 0)`：整个预备帧位置一次都没变（`moved during prep` 从未触发）
+  - `dash dir_locked=(-1,0) dash_t=0.50 seen_locked=true`：锁定后按锁死方向起步
+  - `tries=1 hits=1 player_hp=76.0`：命中计数与伤害链打通（100 - 24 = 76）
+- 自测：`boardtest` → `power=100.0`；`playtest bot pt=300` → `t=300 wave=8 lvl=27 kills=771 dps=16.9 need=21.2 inv=387 dead=false dash=0/0`（精英只在 wave 4/10/16… 出现，本局唯一那只在远处就被清掉，所以计数为 0；要看计数得让精英接近玩家）
+- 截图：`docs/screenshots/v8-dash.png`（三只精英同时锁定：实线 + 端点圆点，方向已不追玩家）

@@ -20,6 +20,7 @@ const CHARGE_SPEED := 780.0
 const CHARGE_TIME := 0.35
 const CHARGE_CD := 4.0
 const CHARGE_STUN := 1.1
+const CHARGE_PREP := 0.15
 const CHARGE_DAMAGE := 24.0
 
 var hp := 4.0
@@ -52,6 +53,12 @@ var charge_cd := 0.0
 var stun := 0.0
 var dash_dir := Vector2.RIGHT
 var dash_t := 0.0
+## 冲刺锁定（docs/plan-v4.md §6）：蓄力期间 dash_dir 跟随玩家，蓄力结束瞬间写死
+var dash_dir_locked := Vector2.RIGHT
+var locked := false
+## 锁定到真正起步之间的预备帧（秒），留出侧移窗口
+var prep := 0.0
+var dash_tried := false
 ## 屏外降频分桶（0..3）
 var _throttle_i := 0
 
@@ -101,29 +108,73 @@ func _charger_step(delta: float, p: Node2D, dist: float) -> void:
 	if stun > 0.0:
 		return
 	if dash_t > 0.0:
+		if prep > 0.0:
+			# 预备帧：原地不动，给玩家 0.15s 侧移（锁定到起步之间的公平窗口）
+			prep = maxf(0.0, prep - delta)
+			return
+		var from: Vector2 = position
 		dash_t -= delta
-		position += dash_dir * CHARGE_SPEED * delta
-		if p.position.distance_to(position) < 30.0:
+		position += dash_dir_locked * CHARGE_SPEED * delta
+		if not dash_tried and _seg_hit(p.position, from, position):
+			dash_tried = true
 			_try_dash_hit(p)
+		if dash_t <= 0.0:
+			locked = false
 		return
 	if windup > 0.0:
 		windup -= delta
+		# 蓄力期间红线跟着玩家（警告），结束瞬间锁死方向
+		dash_dir = facing
 		if windup <= 0.0:
-			dash_dir = facing
-			dash_t = CHARGE_TIME
+			dash_dir_locked = facing
+			locked = true
+			prep = CHARGE_PREP
+			dash_t = CHARGE_TIME + CHARGE_PREP
 			charge_cd = CHARGE_CD
+			dash_tried = false
+			_notify_dash_start()
 		return
 	if dist <= CHARGE_RANGE and charge_cd <= 0.0:
 		windup = CHARGE_WINDUP
+		locked = false
 		return
 	position += facing * speed * delta
 
 
+## 线段命中判定：冲刺一帧可能跨过玩家，按「起点→终点」线段算距离
+func _seg_hit(target: Vector2, from: Vector2, to: Vector2) -> bool:
+	var ab: Vector2 = to - from
+	var t := 0.0
+	if ab.length_squared() > 0.0001:
+		t = clampf((target - from).dot(ab) / ab.length_squared(), 0.0, 1.0)
+	return target.distance_to(from + ab * t) < radius + 12.0
+
+
 func _try_dash_hit(p: Node2D) -> void:
 	if p.has_method("take_hit"):
-		if p.take_hit(CHARGE_DAMAGE, dash_dir.normalized() * 420.0):
+		if p.take_hit(CHARGE_DAMAGE, dash_dir_locked.normalized() * 420.0):
 			dash_t = 0.0
+			locked = false
 			stun = CHARGE_STUN
+			_notify_dash_hit()
+
+
+func _game_node():
+	var game = _g if is_instance_valid(_g) else get_tree().get_first_node_in_group("game")
+	_g = game
+	return game
+
+
+func _notify_dash_start() -> void:
+	var g = _game_node()
+	if g != null and g.has_method("_on_dash_start"):
+		g._on_dash_start()
+
+
+func _notify_dash_hit() -> void:
+	var g = _game_node()
+	if g != null and g.has_method("_on_dash_hit"):
+		g._on_dash_hit()
 
 
 func _shooter_step(delta: float, dist: float) -> void:
