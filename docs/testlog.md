@@ -85,3 +85,24 @@
   - 564 只：`wall=153.3 ai=5.77 draw=69.18 combat=0.60 other=77.77`（≈6.5 FPS）
 - 结论：AI / 战斗都不是瓶颈（合计 <7ms）；**绘制 + `其它`（每个敌人一个 CanvasItem 的重绘/合批开销）占 95%**，且随数量超线性恶化 —— §4.2 的「集中渲染 + 屏外剔除」是对的方向。另外 `enemies=564 > MAX_ENEMIES=560`，说明 bulwark 走 `_spawn_enemy_at` 绕过了上限（V6 删它时一并消失）。
 - 截图：`docs/screenshots/v4-perf.png`（F3 面板新增「AI / 绘制 / 战斗 / 其它 / 帧墙」一行）。
+
+## plan-v4 V5 性能优化（集中渲染 / 屏外降频 / 数组计数 / 上限 400）
+
+- 命令：`-- perftest "cheat=god,wave=25" pt=25`（窗口 1280x720）＋`-- playtest bot pt=300`＋`-- boardtest`
+- 目的：把 V4 量到的「绘制 + 每个敌人一个 CanvasItem 的重绘开销」压下去，并把同屏上限直接改成 400
+- 改动：
+  - 新增 `scripts/enemy_renderer.gd`：单个 `Node2D` 在 `_draw()` 里遍历 `game.enemies` 画完全部敌人与血条，并跳过镜头外（视口外扩 48px）的敌人；`enemy.gd` 删掉 `_draw` / 全部 `queue_redraw`
+  - `enemy.gd`：距玩家 >1600 的敌人每 4 个物理帧才走一步，分桶用 `hpth` 派生（不额外消耗 rng，同 seed 可复现）
+  - `game.gd`：维护 `var enemies: Array` + `kind_n` 计数（`_spawn_enemy_at` 登记、`_kill` 与 `tree_exiting` 双保险移除）；`_count_kind` / `_count_bulwark` 改读计数；所有 `get_nodes_in_group("enemy")` 换成本数组；榴弹溅射改遍历 `enemies.duplicate()`（循环里会 `_kill`）
+  - `MAX_ENEMIES := 400`（`scripts/data/enemies_db.gd:21`），不做自适应
+  - 高密度 LOD：>220 只时不画纯装饰的小内点（每只 1 次 draw，400 只时约 3ms）
+- 关键输出（同一条 `PERF` 行：`enemies` = 场上总数，`drawn` = 镜头内实际画出的数量）：
+  - 295 只（drawn 88）：`wall=10.0 ai=0.22 draw=1.48 combat=0.18 other=8.08`（≈100 FPS，撞到引擎 100 上限）
+  - 373 只（drawn 147）：`wall=9.8 ai=0.23 draw=2.18 combat=0.10 other=7.24`
+  - 400 只（drawn 215）：`wall=9.8 ai=0.32 draw=2.24 combat=0.04 other=7.16`
+  - 400 只（drawn 400，全部挤在镜头内）：`wall=10.2 ai=0.27 draw=3.69 combat=0.05 other=6.18`（≈98 FPS）
+  - 对照 V4 基线：564 只 `wall=153.3 draw=69.18 other=77.77`（≈6.5 FPS）；447 只 `wall=17.8 draw=7.13`
+- 结论：`≤4ms` 达标（最坏 3.69ms），300/400 的 ≥55 / ≥45 FPS 都远超；`其它` 从 77.8ms 掉到 6~9ms，说明瓶颈确实是「每只敌人一个 CanvasItem」。`MAX_ENEMIES=400` 已生效（perftest 稳定 400，bulwark 额外 3~4 只绕过上限，V6 删它后归零）。
+- **C（空间网格）未实施**：实测 `combat_ms` 稳定在 0.03~0.05ms（`_contact` 数到 6 只就 break，`_targets_in_range` 每次开火只跑一遍），网格收益低于测量噪声；等九武器长局里 combat 真的起来再做，避免为 0.05ms 加一套网格维护。
+- 自测：`boardtest` → `BOARD set out=[40.5, 45.5, 0.0, 1.0, 5.0, 6.0] power=100.0`；`playtest bot pt=300` → `[TEST] end reason=limit t=300 wave=8 lvl=26 kills=793 dps=23.5 need=11.9 weapons=3 inv=373 dead=false`（与 V4 前 `kills=799 dps=24.1 inv=347` 同量级）。
+- 截图：`docs/screenshots/v5-render.png`（同 seed 291927655 对照 V4 的 `v4-perf.png`：形状/颜色/血条一致）、`v5-crowd.png`（400 只密度）。

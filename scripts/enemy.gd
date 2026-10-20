@@ -48,6 +48,8 @@ var charge_cd := 0.0
 var stun := 0.0
 var dash_dir := Vector2.RIGHT
 var dash_t := 0.0
+## 屏外降频分桶（0..3）
+var _throttle_i := 0
 
 
 func _ready() -> void:
@@ -57,6 +59,9 @@ func _ready() -> void:
 	orbit_dir = 1.0 if randf() < 0.5 else -1.0
 	# 每只怪站的距离不同，几十只才会围成一圈「有厚度」的包围圈，而不是挤成一个点
 	hold_bias = randf_range(0.0, 52.0)
+	# 屏外降频分桶（docs/plan-v4.md §4.2 B）：按桶错开，避免同一帧全更新。
+	# 用已有的 hpth 派生，不额外消耗 rng（同 seed 的刷怪/掉落序列保持可复现）
+	_throttle_i = int(hpth / TAU * 4.0) % 4
 
 
 func _physics_process(delta: float) -> void:
@@ -69,10 +74,12 @@ func _step(delta: float) -> void:
 	hit = maxf(0.0, hit - delta)
 	var p = get_tree().get_first_node_in_group("player")
 	if p == null:
-		queue_redraw()
 		return
 	var to_p: Vector2 = p.position - position
 	var dist := to_p.length()
+	# 远处（>1600）每 4 个物理帧才走一步：它们离屏、追上来之前不影响观感
+	if dist > 1600.0 and (Engine.get_physics_frames() + _throttle_i) % 4 != 0:
+		return
 	if dist > 1.0:
 		facing = to_p / dist
 
@@ -82,7 +89,6 @@ func _step(delta: float) -> void:
 		_shooter_step(delta, dist)
 	else:
 		position += facing * speed * delta
-	queue_redraw()
 
 
 func _charger_step(delta: float, p: Node2D, dist: float) -> void:
@@ -148,65 +154,3 @@ func _fire_bullet() -> void:
 	b.add_to_group("bullet")
 	game.add_child(b)
 
-
-func _draw() -> void:
-	var t0 := Time.get_ticks_usec()
-	_draw_body()
-	Perf.draw_usec += Time.get_ticks_usec() - t0
-
-
-func _draw_body() -> void:
-	var frac := clampf(hp / maxf(max_hp, 0.001), 0.0, 1.0)
-	var body := body_color.lerp(Color(1.0, 0.86, 0.55), 1.0 - frac)
-	if hit > 0.0:
-		body = body.lerp(Color(1, 1, 1), clampf(hit / 0.18, 0.0, 1.0) * 0.85)
-	var r := radius * (1.0 + hit * 0.6)
-
-	if telegraph > 0.0:
-		# 预兆：只画半透明轮廓 + 一圈收缩光环，玩家有 1~2 秒可以改方向
-		var a := 0.30 + 0.45 * clampf(1.0 - telegraph / 2.1, 0.0, 1.0)
-		draw_circle(Vector2.ZERO, r, Color(body_color.r, body_color.g, body_color.b, a * 0.45))
-		draw_arc(Vector2.ZERO, r + 4.0, 0.0, TAU, 24, Color(1.0, 0.35, 0.35, a), 2.5, true)
-		draw_arc(Vector2.ZERO, r * (1.0 + telegraph * 1.6), 0.0, TAU, 24,
-			Color(1.0, 0.5, 0.5, a * 0.7), 2.0, true)
-		return
-
-	if kind == "runner":
-		# 尖头三角：一眼能看出它冲得快
-		draw_colored_polygon(PackedVector2Array([
-			facing * r * 1.6,
-			facing.rotated(2.4) * r,
-			facing.rotated(-2.4) * r,
-		]), body)
-		draw_circle(Vector2.ZERO, r * 0.5, body.darkened(0.25))
-	elif kind == "charger":
-		# 六边形精英 + 蓄力时的红色瞄准线
-		var pts := PackedVector2Array()
-		for i in 6:
-			pts.append(Vector2.from_angle(TAU * i / 6.0 + hpth) * r)
-		draw_colored_polygon(pts, body)
-		draw_arc(Vector2.ZERO, r * 1.12, 0.0, TAU, 24, Color(1, 0.85, 0.4, 0.9), 2.5, true)
-		if windup > 0.0:
-			var k: float = 1.0 - windup / CHARGE_WINDUP
-			draw_line(Vector2.ZERO, facing * 520.0, Color(1.0, 0.25, 0.25, 0.25 + 0.55 * k), 2.0 + 3.0 * k)
-		if stun > 0.0:
-			draw_arc(Vector2.ZERO, r * 1.5, 0.0, TAU * (stun / CHARGE_STUN), 20, Color(0.5, 0.8, 1.0, 0.8), 2.0, true)
-	elif kind == "shooter":
-		var pts2 := PackedVector2Array()
-		for i in 3:
-			pts2.append(Vector2.from_angle(-PI * 0.5 + TAU * i / 3.0) * r)
-		draw_colored_polygon(pts2, body)
-		if windup > 0.0:
-			var k2: float = 1.0 - windup / SHOOT_WINDUP
-			draw_circle(facing * (r + 6.0), 3.0 + 4.0 * k2, Color(1.0, 0.9, 0.4, 0.9))
-	else:
-		draw_circle(Vector2.ZERO, r, body)
-		if kind == "rock":
-			draw_arc(Vector2.ZERO, r * 0.72, 0.0, TAU, 18, body.lightened(0.35), 2.5, true)
-
-	if kind != "charger" and kind != "shooter":
-		draw_circle(Vector2.from_angle(hpth) * radius * 0.45, radius * 0.3, Color(0.12, 0.04, 0.07, 0.55))
-	if frac < 0.999:
-		var w := radius * 2.2
-		draw_rect(Rect2(-w * 0.5, -radius - 8.0, w, 3.0), Color(0.0, 0.0, 0.0, 0.55))
-		draw_rect(Rect2(-w * 0.5, -radius - 8.0, w * frac, 3.0), Color(0.55, 1.0, 0.62))

@@ -257,6 +257,12 @@ var other_ms := 0.0
 var wall_ms := 0.0
 var _perf_last := 0
 var _perf_report := 0.0
+## 敌人列表与分类计数（docs/plan-v4.md §4.2 D）：生成时登记、死亡时移除，
+## 不再每帧 get_nodes_in_group("enemy") / 每次查询遍历全场。
+var enemies: Array = []
+var kind_n := {}
+## 集中渲染：所有敌人由这一个 Node2D 一次画完（§4.2 A）
+var enemy_renderer: Node2D = null
 var roll_test := false
 var swarm_test := false
 var ws_done := false
@@ -394,6 +400,7 @@ func _ready() -> void:
 	_add_inv("base", 2)
 	devices.append(_new_device())
 	_make_player()
+	_make_enemy_renderer()
 	_make_hud()
 	if plan_missing_demo:
 		for i in weapon.slots.size():
@@ -420,6 +427,8 @@ func _pass() -> void:
 
 func _process(delta: float) -> void:
 	_perf_tick(delta)
+	if enemy_renderer != null:
+		enemy_renderer.queue_redraw()
 	# 选卡界面会把整棵树暂停，elapsed 不再推进 —— 快进和截图都必须先跳出这个状态，
 	# 否则会永远停在「等 elapsed 到 ff / shotat」上（表现为界面卡死）
 	if picking:
@@ -679,6 +688,16 @@ func _fmt_time(t: float) -> String:
 # ============================================================================
 # 1. 场景与 HUD 构建
 # ============================================================================
+## 集中渲染器：作为较早的 game 子节点插入，层级仍保持「玩家 < 敌人 < 子弹/掉落」
+## 敌人自己不再绘制（docs/plan-v4.md §4.2 A）
+func _make_enemy_renderer() -> void:
+	enemy_renderer = Node2D.new()
+	enemy_renderer.set_script(load("res://scripts/enemy_renderer.gd"))
+	enemy_renderer.process_mode = Node.PROCESS_MODE_PAUSABLE
+	add_child(enemy_renderer)
+	enemy_renderer.game = self
+
+
 func _make_player() -> void:
 	player = Node2D.new()
 	player.set_script(load("res://scripts/player.gd"))
@@ -922,7 +941,7 @@ func _input(event: InputEvent) -> void:
 		dbg_on = not dbg_on
 		if dbg_root != null:
 			dbg_root.visible = dbg_on
-		_refresh_dbg_panel(get_tree().get_nodes_in_group("enemy").size())
+		_refresh_dbg_panel(enemies.size())
 		return
 	if picking:
 		if k >= KEY_1 and k <= KEY_4:
@@ -1072,7 +1091,7 @@ func _fire(delta: float) -> void:
 		if String(w["id"]) == "grenade" and not targets.is_empty():
 			var c0: Vector2 = targets[0].position
 			var br := float(w.get("blast", 90.0)) + float(mo["blast"])
-			for e in get_tree().get_nodes_in_group("enemy"):
+			for e in enemies.duplicate():
 				if not is_instance_valid(e) or e in targets:
 					continue
 				if e.position.distance_to(c0) > br:
@@ -1091,7 +1110,7 @@ func _fire(delta: float) -> void:
 ## 贯穿的追加目标：从中弹点沿弹道方向再往前 120px 内的最近敌人
 func _pierce_targets(from: Vector2, dir: Vector2, n: int, already: Array) -> Array:
 	var cand: Array = []
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if not is_instance_valid(e) or e in already:
 			continue
 		var rel: Vector2 = e.position - from
@@ -1116,7 +1135,7 @@ func _targets_for(w: Dictionary, r: float, n: int) -> Array:
 	if pref == "":
 		return _targets_in_range(r, n)
 	var cand: Array = []
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if not is_instance_valid(e):
 			continue
 		var d: float = e.position.distance_to(player.position)
@@ -1144,7 +1163,7 @@ func _targets_for(w: Dictionary, r: float, n: int) -> Array:
 
 func _targets_in_range(r: float, n: int) -> Array:
 	var cand: Array = []
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if not is_instance_valid(e):
 			continue
 		var d: float = e.position.distance_to(player.position)
@@ -1197,7 +1216,7 @@ func _draw() -> void:
 func _nearest_enemy(max_dist: float) -> Node2D:
 	var best: Node2D = null
 	var best_d := max_dist
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if not is_instance_valid(e):
 			continue
 		var d: float = e.position.distance_to(player.position)
@@ -1219,6 +1238,7 @@ func _kill(e: Node2D) -> void:
 		_spawn_pickup(e.position, "base")
 	if e.kind == "charger" and rng.randf() < 0.5:
 		_spawn_chest(e.position)
+	_drop_enemy(e)
 	e.queue_free()
 
 
@@ -1250,7 +1270,7 @@ func hurt_player(dmg: float, push: Vector2, src: String = "bullet") -> void:
 
 func _contact(delta: float) -> void:
 	var touching := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if not is_instance_valid(e):
 			continue
 		if e.position.distance_to(player.position) < 26.0:
@@ -1563,7 +1583,7 @@ func _actual_dps(w: Dictionary) -> float:
 
 func _count_in_range(r: float) -> int:
 	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if is_instance_valid(e) and e.position.distance_to(player.position) <= r:
 			n += 1
 	return n
@@ -1633,11 +1653,7 @@ func _pick_kind() -> String:
 
 
 func _count_kind(k: String) -> int:
-	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if is_instance_valid(e) and e.kind == k:
-			n += 1
-	return n
+	return int(kind_n.get(k, 0))
 
 
 ## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
@@ -1648,10 +1664,10 @@ func _on_wave_start() -> void:
 		return
 	if (wave - ELITE_FIRST_WAVE) % ELITE_EVERY != 0:
 		return
-	if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+	if enemies.size() >= MAX_ENEMIES:
 		return
 	var alive := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if is_instance_valid(e) and e.kind == "charger":
 			alive += 1
 	if alive >= ELITE_MAX:
@@ -1666,7 +1682,7 @@ func _spawn(delta: float) -> void:
 		_spawn_chest_random()
 	spawn_acc = minf(spawn_acc + delta * _spawn_rate(), 24.0)  # 卡顿后不要一口气吐出几百个
 	while spawn_acc >= 1.0:
-		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+		if enemies.size() >= MAX_ENEMIES:
 			spawn_acc = minf(spawn_acc, 6.0)
 			break
 		var pat: Dictionary = _pick_pattern()
@@ -1714,7 +1730,7 @@ func _emit_pattern(id: String, n: int) -> void:
 				pos = player.position + Vector2.from_angle(a3) * rad
 			_:
 				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
-		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+		if enemies.size() >= MAX_ENEMIES:
 			return
 		_spawn_enemy_at(pos)
 
@@ -1722,6 +1738,14 @@ func _emit_pattern(id: String, n: int) -> void:
 func _spawn_enemy(forced: String = "") -> void:
 	var ang: float = rng.randf() * TAU
 	_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX), forced)
+
+
+func _drop_enemy(e: Node) -> void:
+	if not enemies.has(e):
+		return
+	enemies.erase(e)
+	var k := String(e.kind)
+	kind_n[k] = maxi(0, int(kind_n.get(k, 0)) - 1)
 
 
 func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
@@ -1740,16 +1764,15 @@ func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
 	e.hp = e.max_hp
 	e.speed = float(kd["speed"]) * (1.0 + wave * 0.01)
 	add_child(e)
+	enemies.append(e)
+	kind_n[kind] = int(kind_n.get(kind, 0)) + 1
+	e.tree_exiting.connect(_drop_enemy.bind(e))
 	return e
 
 
 ## 同屏 bulwark 数量
 func _count_bulwark() -> int:
-	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
-		if String(e.kind) == "bulwark":
-			n += 1
-	return n
+	return int(kind_n.get("bulwark", 0))
 
 
 ## 每 16 秒在玩家「前进方向 ±50°」排一堵慢速高血量墙：往前走就会被撞上（docs/plan-v3.md §3.2）
@@ -1784,7 +1807,7 @@ func _spawn_bulwark_arc() -> void:
 func _recycle_bulwark() -> void:
 	if int(elapsed * 2.0) % 4 != 0:
 		return
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if String(e.kind) != "bulwark":
 			continue
 		if float(e.age) > 6.0 and (e.position - player.position).dot(last_move_dir) < -1600.0:
@@ -4168,7 +4191,7 @@ func _bot_move(delta: float) -> void:
 			if side == 0.0:
 				side = 1.0
 			push += b.dir.rotated(side * PI * 0.5) * (1.0 - d / 190.0) * 2.6
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if not is_instance_valid(e):
 			continue
 		var to_e: Vector2 = player.position - e.position
@@ -4226,7 +4249,7 @@ func _pt_log() -> void:
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		get_tree().get_nodes_in_group("enemy").size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_bulwark(),
+		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_bulwark(),
 	])
 
 
@@ -4255,9 +4278,10 @@ func _perftest_step(delta: float) -> void:
 	if pt_t - _perf_report < 1.0:
 		return
 	_perf_report = pt_t
-	var n := get_tree().get_nodes_in_group("enemy").size()
-	print("PERF t=%2d fps=%3d enemies=%3d wall=%.1f ai=%.2f draw=%.2f combat=%.2f other=%.2f" % [
-		int(pt_t), int(Engine.get_frames_per_second()), n,
+	var n := enemies.size()
+	var vis_draw := 0 if enemy_renderer == null else int(enemy_renderer.drawn)
+	print("PERF t=%2d fps=%3d enemies=%3d drawn=%3d wall=%.1f ai=%.2f draw=%.2f combat=%.2f other=%.2f" % [
+		int(pt_t), int(Engine.get_frames_per_second()), n, vis_draw,
 		wall_ms, ai_ms, draw_ms, combat_ms, other_ms])
 	if pt_t >= (20.0 if pt_limit <= 0.0 else pt_limit):
 		print("PERF end enemies=%d wall=%.1f ai=%.2f draw=%.2f combat=%.2f other=%.2f" % [
@@ -4274,7 +4298,6 @@ func _update_debug(delta: float) -> void:
 	if dbg_acc < 0.25:
 		return
 	dbg_acc = 0.0
-	var enemies := get_tree().get_nodes_in_group("enemy")
 	var t0 := Time.get_ticks_usec()
 	var ct: Transform2D = get_viewport().get_canvas_transform()
 	var vis := 0
@@ -4725,7 +4748,7 @@ func _cmd_kill(args: Array) -> String:
 	if not args.is_empty():
 		return "!kill 不带参数：清空场上全部敌人"
 	var n := 0
-	for e in get_tree().get_nodes_in_group("enemy"):
+	for e in enemies:
 		if is_instance_valid(e):
 			e.queue_free()
 			n += 1
@@ -4741,7 +4764,7 @@ func _cmd_spawn(args: Array) -> String:
 	var n := clampi(int(String(args[1])) if args.size() > 1 else 1, 1, 200)
 	var made := 0
 	for i in n:
-		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+		if enemies.size() >= MAX_ENEMIES:
 			break
 		var ang := rng.randf() * TAU
 		# 屏外生成：和正常刷怪同一个半径区间（docs/plan-v4.md §3.4）
@@ -4754,7 +4777,7 @@ func _cmd_fps(_args: Array) -> String:
 	dbg_on = not dbg_on
 	if dbg_root != null:
 		dbg_root.visible = dbg_on
-	_refresh_dbg_panel(get_tree().get_nodes_in_group("enemy").size())
+	_refresh_dbg_panel(enemies.size())
 	return "F3 调试面板 %s" % ("开" if dbg_on else "关")
 
 

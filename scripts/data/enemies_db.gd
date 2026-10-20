@@ -18,7 +18,7 @@ const HP_LATE_GROWTH := 1.045
 const SPAWN_BASE := 1.20
 const SPAWN_GROWTH := 1.190
 const SPAWN_CAP_MULT := 1.8
-const MAX_ENEMIES := 560
+const MAX_ENEMIES := 400
 
 ## 生成半径必须落在**镜头视野之外**：zoom 0.62 时半个屏幕是 1032×580，
 ## 对角约 1184，所以 >1200 才能保证任何角度都在屏幕外，让敌人「走」进来而不是凭空出现
