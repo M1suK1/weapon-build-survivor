@@ -97,11 +97,11 @@ const BUFF_MAX_LEVEL := BuffDB.MAX_LEVEL
 # ============================================================================
 # 留在本文件的调参（还没归属到某张表）
 # ============================================================================
-## 升级成本：前 10 级 3 × 1.18^(level−1)、之后换成 ×1.12（plan-v5 §3.2：Lv30 从 365 降到 125）
-const LEVEL_COST_BASE := 3.0
-const LEVEL_COST_GROWTH := 1.18
-const LEVEL_COST_SOFT := 10
-const LEVEL_COST_GROWTH_LATE := 1.12
+## 升级成本：前 8 级 6 × 1.25^(level−1)、之后 ×1.09（plan-v6 §3.2：前期不再一路连升）
+const LEVEL_COST_BASE := 6.0
+const LEVEL_COST_GROWTH := 1.25
+const LEVEL_COST_SOFT := 8
+const LEVEL_COST_GROWTH_LATE := 1.09
 ## 受击补偿：每损失这么多 HP 补 1 个模块（弹药系统的劣势补偿，挨打就回填）
 const DAMAGE_PER_MODULE := 8.0
 const FIRE_RANGE := 260.0
@@ -257,6 +257,11 @@ var noautoplan := false
 ## 合成出件、地上捡到、拆卸回退**不受这个开关影响**（前两个永远进库存，见 §1.2 第 1、2 条）。
 var auto_fill := false
 var noautofill := false
+## 自动升级（docs/plan-v6.md §3.3）：库存够就自动扣料升级；选卡仍由玩家在面板里点（D2-A）。
+## 人类默认关，bot / playtest 默认开。
+var auto_level := false
+var noautolevel := false
+var level_btn: Button = null
 var god := false
 var cheat_arg := ""
 var plan_fix_t := 0.0
@@ -456,6 +461,12 @@ func _ready() -> void:
 		elif a == "noautofill":
 			auto_fill = false
 			noautofill = true
+		elif a == "autolevel":
+			auto_level = true
+			noautolevel = false
+		elif a == "noautolevel":
+			auto_level = false
+			noautolevel = true
 		elif a.begins_with("tab="):
 			tab = int(a.substr(4))
 		elif a == "planmissing":
@@ -495,6 +506,9 @@ func _ready() -> void:
 	# 否则机器人只会看着模块烧光不补，回归曲线直接断掉
 	if (bot or playtest or autoplan) and not noautofill:
 		auto_fill = true
+	# 自动升级同理：机器人不会自己按 U，回归曲线要能自己往上走（plan-v6 §3.3）
+	if (bot or playtest or autoplan) and not noautolevel:
+		auto_level = true
 	if playtest:
 		# 无头模拟按实时速度跑太慢，放大时间步（步长变粗，数值平衡够用）
 		Engine.time_scale = 8.0
@@ -758,6 +772,10 @@ func _hud_tick(delta: float) -> void:
 	if elapsed - last_hit_t > REGEN_DELAY:
 		hp = minf(max_hp, hp + (REGEN_RATE + _buff_sum("regen")) * delta)
 	_tick_shield(delta)
+	# 自动升级（plan-v6 §3.3 D2-A）：只自动扣料，选卡面板照旧弹出来让玩家点。
+	# bot 自己有节流的升级逻辑（见 _bot_step），这里不再插一脚
+	if auto_level and not bot and not dead and not picking and not build_root.visible and _inv_total() >= level_cost():
+		try_level()
 	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
 	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else minf(flash_t * 0.9, 0.26))
 	if pulse_t > 0.0:
@@ -1012,6 +1030,12 @@ func _make_hud() -> void:
 	revert_btn.tooltip_text = "丢弃草稿：把每格的草稿改回生效方案。板面模块不动，只改方案。"
 	revert_btn.pressed.connect(_revert_plan)
 	build_root.add_child(revert_btn)
+
+	# 自动升级开关（plan-v6 §3.3）：库存够就自动扣料。选卡仍由玩家点，不替人做构筑决策
+	level_btn = UIKit.button("自动升级：关", Vector2(150, 40), UIKit.C_DIM, 14)
+	level_btn.position = Vector2(24, 640)
+	level_btn.pressed.connect(_toggle_auto_level)
+	build_root.add_child(level_btn)
 
 	# 拖拽层：幽灵 + 落点高亮 + 出力预览（全部 IGNORE，不抢鼠标）
 	drag_layer = Control.new()
@@ -4094,6 +4118,7 @@ func _refresh_build() -> void:
 	_rebuild_board()
 	_refresh_fill_btn()
 	_refresh_plan_btns()
+	_refresh_level_btn()
 	var lines: Array = []
 	lines.append("构筑（暂停中）      TAB / ESC / ← 返回　　右键：槽位=卸下，别处=返回")
 	lines.append("")
@@ -4119,8 +4144,9 @@ func _refresh_build() -> void:
 	var gap := maxi(0, need - _inv_total())
 	info.append("等级 %d  →  %d     需要 %d 个模块（库存 %d，距下一级还差 %d）" % [
 		level, level + 1, need, _inv_total(), gap])
-	info.append("曲线   Lv%d 要 %d · Lv%d 要 %d（10 级后从 ×1.18 放缓到 ×1.12）" % [
-		level + 1, _level_cost_at(level + 1), level + 2, _level_cost_at(level + 2)])
+	info.append("曲线   Lv%d 要 %d · Lv%d 要 %d（前 %d 级 ×%.2f，之后 ×%.2f）" % [
+		level + 1, _level_cost_at(level + 1), level + 2, _level_cost_at(level + 2),
+		LEVEL_COST_SOFT, LEVEL_COST_GROWTH, LEVEL_COST_GROWTH_LATE])
 	info.append("受击补偿 +%d     装置 %d 台（空闲 %d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
 		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
@@ -4188,6 +4214,23 @@ func _refresh_fill_btn() -> void:
 	fill_btn.text = "自动补料：开" if auto_fill else "自动补料：关"
 	fill_btn.tooltip_text = "开：模块烧空后自动从库存补同一个模块\n关：烧完就空着，格子显示半透明幽灵，攒够料自己点一下补\n只影响烧空补料 —— 合成产物、地上捡到的模块永远先进库存"
 	UIKit.tint_button(fill_btn, UIKit.C_GOLD if auto_fill else UIKit.C_DIM)
+
+
+## 自动升级开关（plan-v6 §3.3）
+func _toggle_auto_level() -> void:
+	auto_level = not auto_level
+	_refresh_level_btn()
+	_refresh_build()
+	_toast("自动升级：%s" % ("开" if auto_level else "关"))
+
+
+func _refresh_level_btn() -> void:
+	if level_btn == null:
+		return
+	level_btn.text = "自动升级：开" if auto_level else "自动升级：关"
+	var nxt := level_cost()
+	level_btn.tooltip_text = "开：库存 ≥ 下一级所需就自动扣料升级（每秒检查）\n关：自己按 U 升级\n选卡不会自动帮你选，面板照旧弹出来\n下一级要 %d 个模块，当前库存 %d" % [nxt, _inv_total()]
+	UIKit.tint_button(level_btn, UIKit.C_GOLD if auto_level else UIKit.C_DIM)
 
 
 ## 右栏标签页内容。每次重建（行数不大，重建比增量更新简单可靠）
