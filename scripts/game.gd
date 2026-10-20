@@ -391,15 +391,24 @@ func _check_data() -> void:
 	if BUFFS.size() != want:
 		push_error("buff 表不完整：%d 条，应为 %d 条（每族缺 per 字段会导致整表中断）" % [BUFFS.size(), want])
 		bad += 1
-	# 2) 纯次数族必须有 thr，连续量族必须有 per
+	# 2) 每条变体必须有非空 fx；int 族必须给 thr，其它族不能给 thr
 	for fam in BuffDB.FAMILIES:
 		var f: Dictionary = BuffDB.FAMILIES[fam]
-		if String(f.get("kind", "mul")) == "int" and not f.has("thr"):
-			push_error("buff 族 %s 是 int 型但没写 thr" % String(fam))
-			bad += 1
-		if String(f.get("kind", "mul")) != "int" and not f.has("per"):
-			push_error("buff 族 %s 缺 per 字段" % String(fam))
-			bad += 1
+		var is_int := String(f.get("kind", "mul")) == "int"
+		var grades: Dictionary = f.get("grades", {})
+		for q in BUFF_TIERS:
+			var g: Dictionary = grades.get(String(q), {})
+			var fx: Array = g.get("fx", [])
+			if fx.is_empty():
+				push_error("buff 族 %s 的 %s 档没有 fx（会导致卡面空白）" % [String(fam), String(q)])
+				bad += 1
+			for e in fx:
+				if not e.has("k") or not e.has("v"):
+					push_error("buff 族 %s 的 %s 档 fx 缺 k/v" % [String(fam), String(q)])
+					bad += 1
+			if is_int and int(g.get("thr", 0)) <= 0:
+				push_error("buff 族 %s 是 int 型，%s 档缺 thr" % [String(fam), String(q)])
+				bad += 1
 	# 3) 模块表：id 与顺序表一致、必填字段齐全
 	for mid in ModDB.MOD_ORDER:
 		var d: Dictionary = MODULES.get(mid, {})
@@ -1599,7 +1608,7 @@ func _blade_petal_bonus() -> int:
 
 ## 扇叶宽度：基础 0.50 弧度 + 金的附带加成（每级 +0.02）
 func _blade_arc() -> float:
-	return BLADE_PETAL_ARC + _buff_sum("petal")
+	return minf(0.95, BLADE_PETAL_ARC + _buff_sum("petal_arc"))
 
 
 ## 环绕刃的独立判定（plan-v5 §7.2）：每片扇叶是「半径 ±18、角度宽 0.5」的扇形环带，
@@ -2757,7 +2766,6 @@ func _weapon_mods(w: Dictionary) -> Dictionary:
 	mo["elite"] = float(mo["elite"]) + _buff_sum("elite")
 	if int(w["targets"]) > 0:
 		mo["targets"] = int(mo["targets"]) + _buff_int("target")
-		mo["mul"] = float(mo["mul"]) * (1.0 + _buff_sum("target"))
 	return mo
 
 
@@ -3464,10 +3472,22 @@ func _buff_tip_data(id: String) -> Dictionary:
 	var lines: Array = []
 	lines.append("[color=#9fb2c9]%s类 buff · 当前 Lv%d / 上限 Lv%d[/color]" % [
 		String(d.get("cat_name", "")), lv, mx])
+	# 主/副效果逐条列（plan-v7 §4.2：紫、金带邻族副效果）
+	var fxl: Array = d.get("fx", [])
+	for j in fxl.size():
+		var e: Dictionary = fxl[j]
+		var t := BuffDB.fx_text(String(e["k"]), float(e["v"]))
+		if j == 0:
+			lines.append("[color=#ffd76a]主效果：每级 %s[/color]" % t)
+		else:
+			lines.append("[color=#9fe3c8]副效果：每级 %s[/color]" % t)
+	var thr := int(d.get("thr", 0))
+	if thr > 0:
+		lines.append("[color=#9fb2c9]到 Lv%d 才生效，之后一直有[/color]" % thr)
 	if lv >= mx:
 		lines.append("[color=#ff6b5e]已经满级：抽到会换成别的卡[/color]")
 	else:
-		lines.append("[color=#ffd76a]下一级：%s[/color]" % String(d.get("desc", "")))
+		lines.append("[color=#9fb2c9]下一级：%s[/color]" % String(d.get("desc", "")))
 	lines.append("[color=#8fa0b8]同族 4 个品质各自独立升级，白/蓝/紫/金可同时持有[/color]")
 	var head := "· 满级" if lv >= mx else "Lv%d→%d" % [lv, mini(lv + 1, mx)]
 	return {"title": "%s  %s" % [String(d.get("name", id)), head], "lines": lines, "color": col}
@@ -3945,46 +3965,49 @@ func _buff_lv(fam: String, q: String) -> int:
 	return int(buffs.get(fam + "__" + q, 0))
 
 
-## 按族汇总「加法量」：Σ 等级 × 每级量。加法族（射程/破甲/掉落/减伤…）直接用它，
-## 读点在末尾统一夹取上限（§9.4：闪避 ≤0.50、减伤 ≤0.60、爆破 ≤0.80、回收 ≤0.60）。
-func _buff_sum(fam: String) -> float:
-	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
-	if f.is_empty():
-		return 0.0
-	var per: Dictionary = f.get("per", {})
+## 按效果键汇总「加法量」：遍历已持有变体的 fx，Σ 等级 × 每级量（plan-v7 §4.2）。
+## 整数族（带 thr）只走 _buff_int，这里跳过，免得「目标 +1」被当成 +1 点伤害。
+func _buff_sum(key: String) -> float:
 	var s := 0.0
-	for q in BUFF_TIERS:
-		s += float(_buff_lv(fam, String(q))) * float(per.get(q, 0.0))
+	for b in _buff_list():
+		var d: Dictionary = BUFFS[String(b["id"])]
+		if int(d.get("thr", 0)) > 0:
+			continue
+		var lv := float(int(b["lv"]))
+		for e in (d["fx"] as Array):
+			if String(e["k"]) == key:
+				s += float(e["v"]) * lv
 	return s
 
 
-## 按族汇总「乘法倍率」：Π (1+每级量)^等级，再按 cap 夹幅度
-func _buff_mul(fam: String) -> float:
-	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
-	if f.is_empty():
-		return 1.0
-	var per: Dictionary = f.get("per", {})
+## 按效果键汇总「乘法倍率」：Π (1+每级量)^等级，再按上限夹幅度
+func _buff_mul(key: String) -> float:
 	var m := 1.0
-	for q in BUFF_TIERS:
-		var lv := float(_buff_lv(fam, String(q)))
-		if lv > 0.0:
-			m *= pow(1.0 + float(per.get(q, 0.0)), lv)
-	var cap := float(f.get("cap", 1.0))
+	for b in _buff_list():
+		var d: Dictionary = BUFFS[String(b["id"])]
+		if int(d.get("thr", 0)) > 0:
+			continue
+		var lv := float(int(b["lv"]))
+		for e in (d["fx"] as Array):
+			if String(e["k"]) == key:
+				m *= pow(1.0 + float(e["v"]), lv)
+	var cap := float(BuffDB.CAPS.get(key, 1.0))
 	if m < 1.0:
 		return maxf(m, 1.0 - cap)
 	return minf(m, 1.0 + cap)
 
 
-## 整数族：某品质等级到阈值就 +1（穿透/目标/扇叶/弹射/护盾/复生）
-func _buff_int(fam: String) -> int:
-	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
-	if f.is_empty():
-		return 0
-	var thr: Dictionary = f.get("thr", {})
+## 整数族：变体等级到自己的阈值就 +v（穿透/目标/扇叶/弹射/护盾/复生）
+func _buff_int(key: String) -> int:
 	var n := 0
-	for q in BUFF_TIERS:
-		if float(_buff_lv(fam, String(q))) >= float(thr.get(q, 99)):
-			n += 1
+	for b in _buff_list():
+		var d: Dictionary = BUFFS[String(b["id"])]
+		var thr := int(d.get("thr", 0))
+		if thr <= 0 or int(b["lv"]) < thr:
+			continue
+		for e in (d["fx"] as Array):
+			if String(e["k"]) == key:
+				n += int(e["v"])
 	return n
 
 
@@ -5249,7 +5272,22 @@ func _paint_offer() -> void:
 			var lv := _bl(String(card["id"]))
 			var mx := int(d["max"])
 			nm = "%s  Lv%d→%d" % [String(d["name"]), lv, mini(lv + 1, mx)]
-			ds = "%s类 · %s" % [String(d["cat_name"]), String(d["desc"])]
+			# 主效果一行、副效果一行（plan-v7 §4.2：白/蓝单效果，紫/金带邻族副效果）
+			var fxl: Array = d["fx"]
+			var fx_main := ""
+			var fx_sub := ""
+			if not fxl.is_empty():
+				fx_main = BuffDB.fx_text(String(fxl[0]["k"]), float(fxl[0]["v"]))
+				for j in range(1, fxl.size()):
+					if fx_sub != "":
+						fx_sub += " · "
+					fx_sub += BuffDB.fx_text(String(fxl[j]["k"]), float(fxl[j]["v"]))
+			var thr0 := int(d.get("thr", 0))
+			ds = "%s类 · 每级 %s" % [String(d["cat_name"]), fx_main]
+			if thr0 > 0:
+				ds = "%s类 · Lv%d 起 %s" % [String(d["cat_name"]), thr0, fx_main]
+			if fx_sub != "":
+				ds += "\n副效果：每级 %s" % fx_sub
 			var c2: Color = d["color"]
 			col = c2
 		else:
@@ -5265,7 +5303,7 @@ func _paint_offer() -> void:
 				col = Color(0.72, 0.86, 0.72)
 		var btn := Button.new()
 		btn.position = Vector2(x0 + float(i) * (w_card + gap), 200)
-		btn.size = Vector2(w_card, 210)
+		btn.size = Vector2(w_card, 250)
 		btn.text = "%d   %s\n\n%s" % [i + 1, nm, ds]
 		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		btn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
