@@ -1319,9 +1319,8 @@ func _on_right_click(mb: InputEventMouseButton) -> bool:
 			return true
 		if hand_mid != "":
 			# 右键点空白：手上的模块收回库存（plan-v7 §3 第 3 条）
-			var n := _inv(hand_mid)
 			_add_inv(hand_mid, 1)
-			_toast("已放回库存：%s ×%d" % [String(MODULES[hand_mid]["name"]), n + 1])
+			_toast("已放回库存：%s（库存 %d）" % [String(MODULES[hand_mid]["name"]), _inv(hand_mid)])
 			hand_mid = ""
 			_refresh_build()
 			return true
@@ -3761,10 +3760,7 @@ func _craft_tick(delta: float) -> void:
 			_toast("合成完成：%s +1（库存 %d）" % [String(MODULES[k]["name"]), _inv(k)])
 		# 精炼 buff（refine 族）：按概率多出一个
 		if rng.randf() < minf(0.60, _buff_sum("refine")):
-			if autoplan or bot:
-				_add_inv(k, 1)
-			else:
-				_add_inv(k, 1)
+			_add_inv(k, 1)
 			_toast("精炼：多出 1 个%s" % String(MODULES[k]["name"]))
 		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
 		if bool(d.get("auto", false)):
