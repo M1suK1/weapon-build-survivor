@@ -112,6 +112,10 @@ const BLADE_PETAL_ARC := 0.50
 const BLADE_RING_TOL := 18.0
 const BLADE_HIT_CD := 0.25
 const BLADE_DMG_MULT := 0.45
+## 弹射（plan-v5 §8.1）：每跳找命中点 220px 内最近的、没在本链里的敌人，衰减按跳次固定
+const RICOCHET_RANGE := 220.0
+const RICOCHET_MAX := 4
+const RICOCHET_DECAY := [0.60, 0.45, 0.30, 0.20, 0.15]
 
 # ============================================================================
 # 状态
@@ -1150,7 +1154,9 @@ func _fire(delta: float) -> void:
 		if tg > 0:
 			tg += int(mo["targets"])
 		var targets := _targets_for(w, rng_d, tg)
-		if targets.is_empty():
+		var is_gren := String(w["id"]) == "grenade"
+		# 榴弹无目标也开火：沿朝向打出去照样炸（plan-v5 §8.2）
+		if targets.is_empty() and not is_gren:
 			w["fire_t"] = minf(float(w["fire_t"]), iv)
 			continue
 		w["fire_t"] = float(w["fire_t"]) - iv
@@ -1186,9 +1192,11 @@ func _fire(delta: float) -> void:
 			if float(mo["elite"]) > 0.0 and String(e.kind) in ["charger", "rock"]:
 				d *= 1.0 + float(mo["elite"])
 			dealt += _apply_hit(e, d)
+			# 弹射：直击命中后从命中点开始串（plan-v5 §8.1）
+			dealt += _ricochet_chain(w, e, d)
 		# 贯穿：主目标身后 120px 内最近的敌人再吃 60%（贯穿弹每层多穿一个）
 		var pierce := int(mo["pierce"])
-		if pierce > 0:
+		if pierce > 0 and not targets.is_empty():
 			var dir := player.position.direction_to(targets[0].position)
 			var from: Vector2 = targets[0].position
 			var extra := _pierce_targets(from, dir, pierce, targets)
@@ -1196,10 +1204,11 @@ func _fire(delta: float) -> void:
 				if not is_instance_valid(e):
 					continue
 				dealt += _apply_hit(e, per * 0.6)
-		# 榴弹炮：命中点周围 (90 + blast) 内的其他敌人吃 60%
-		if String(w["id"]) == "grenade" and not targets.is_empty():
-			var c0: Vector2 = targets[0].position
+		# 榴弹炮：命中点周围 (90 + blast) 内的其他敌人吃 60%；没目标也照炸（§8.2）
+		if is_gren:
 			var br := float(w.get("blast", 90.0)) + float(mo["blast"])
+			var c0: Vector2 = targets[0].position if not targets.is_empty() \
+				else player.position + _aim_dir() * rng_d
 			for e in enemies.duplicate():
 				if not is_instance_valid(e) or e in targets:
 					continue
@@ -1209,6 +1218,50 @@ func _fire(delta: float) -> void:
 			blast_fx.append({"p": c0, "r": br, "t": 0.18})
 		_log_damage(w, dealt)
 		_add_shot(targets, w)
+
+
+## 玩家朝向（榴弹没目标时沿这个方向打出去，plan-v5 §8.2）
+func _aim_dir() -> Vector2:
+	if player == null:
+		return Vector2.RIGHT
+	var d: Vector2 = player.facing
+	return d.normalized() if d.length() > 0.01 else Vector2.RIGHT
+
+
+## 弹射层数（plan-v5 §8.1：ricochet 族 4 条品质变体各 +1，上限 4；M12 接变体后改读 _buff_sum）
+func _ricochet_lv() -> int:
+	return clampi(int(buffs.get("ricochet", 0)), 0, RICOCHET_MAX)
+
+
+## 弹射：从命中点找 220px 内最近的、不在本次链里的敌人，吃「上一跳 × 衰减」
+## 只走 _apply_hit，不触发模块、不再触发弹射（plan-v5 §8.1）
+func _ricochet_chain(w: Dictionary, hit_e: Node2D, dmg: float) -> float:
+	var lv := _ricochet_lv()
+	if lv <= 0 or dmg <= 0.0:
+		return 0.0
+	var col: Color = Color(WEAPONS[w["id"]]["color"])
+	var visited: Array = [hit_e]
+	var at: Vector2 = hit_e.position
+	var cur := dmg
+	var dealt := 0.0
+	for step in lv:
+		var next: Node2D = null
+		var best := RICOCHET_RANGE
+		for e in enemies:
+			if not is_instance_valid(e) or e in visited:
+				continue
+			var d: float = at.distance_to(e.position)
+			if d <= best:
+				best = d
+				next = e
+		if next == null:
+			break
+		cur *= float(RICOCHET_DECAY[mini(step, RICOCHET_DECAY.size() - 1)])
+		visited.append(next)
+		dealt += _apply_hit(next, cur)
+		shots.append({"a": at, "b": next.position, "t": 0.15, "c": col})
+		at = next.position
+	return dealt
 
 
 ## 贯穿的追加目标：从中弹点沿弹道方向再往前 120px 内的最近敌人
