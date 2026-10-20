@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 游戏主控制器（编排层）。
 ##
 ## 职责：创建场景节点、跑主循环（刷怪 → 合成 → 开火 → 接触伤害 → HUD）、
@@ -206,6 +206,19 @@ var cheat_arg := ""
 var plan_fix_t := 0.0
 var dev_pick_for := -1
 var no_auto_craft := false
+
+# 暂停来源集合：build / pick / console 各自记一笔，最后一份解除时才真正暂停（docs/plan-v4.md §1.2）
+var pause_reasons := {}
+# `level +n` 连续选卡的待办数，关掉面板时自动弹下一张（docs/plan-v4.md §1.3）
+var pending_levels := 0
+# 开发控制台（docs/plan-v4.md §1）：输出 4 行 + 输入行，打开时独占键盘
+var console_root: Control = null
+var console_out: Label = null
+var console_input: LineEdit = null
+var console_lines: Array = []
+var console_hist: Array = []
+var console_hist_i := 0
+var console_open := false
 # --- 鼠标拖拽（构筑屏）---
 var drag := {}
 var drag_layer: Control = null
@@ -233,6 +246,8 @@ var ws_done := false
 var _cam_pos := Vector2.ZERO
 var _cam: Camera2D = null
 var shot_build := false
+# 截图工具：把控制台连同一次 help 的输出拍进去
+var shot_console := false
 var shot_bot := false
 var ff := 0.0
 ## 电路板规则自检：godot --headless --path . -- boardtest
@@ -273,6 +288,8 @@ func _ready() -> void:
 			dbg_on = true
 		elif a == "shotbuild":
 			shot_build = true
+		elif a == "shotconsole":
+			shot_console = true
 		elif a.begins_with("seed="):
 			seed_used = int(a.substr(5))
 		elif a.begins_with("start="):
@@ -428,6 +445,11 @@ func _process(delta: float) -> void:
 		_open_pick()
 	if shot_build and not build_root.visible:
 		_toggle_build()
+	if shot_console and not console_open:
+		# 截图工具：把控制台连同一次 help 的输出一起拍进去
+		_open_console()
+		_console_print("> help")
+		_console_print(_cmd_help([]))
 	if drag_demo and not dt_step:
 		dt_step = 1
 		await get_tree().process_frame
@@ -672,7 +694,7 @@ func _make_hud() -> void:
 	hud_ammo = _label(layer, Vector2(18, 44), 20, Color(0.7, 0.95, 0.85))
 	hud_stat = _label(layer, Vector2(742, 16), 16, Color(0.55, 0.6, 0.68))
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
-	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   F3 调试   R 重开"
+	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   / 控制台   F3 调试   R 重开"
 
 	wpanel = _label(layer, Vector2(18, 84), 17, Color(0.78, 0.86, 1.0))
 
@@ -797,6 +819,9 @@ func _make_hud() -> void:
 	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(flash)
 
+	# 控制台要压在 flash 之上：打开时它就是最上层
+	_make_console(layer)
+
 
 
 
@@ -804,6 +829,23 @@ func _make_hud() -> void:
 # 2. 输入
 # ============================================================================
 func _input(event: InputEvent) -> void:
+	# 控制台打开时独占键盘：除 Esc / ↑↓ 外全部交给输入行，其它快捷键一律不响应
+	if console_open:
+		if event is InputEventKey and event.pressed and not event.echo:
+			match event.keycode:
+				KEY_ESCAPE:
+					_close_console()
+					get_viewport().set_input_as_handled()
+					return
+				KEY_UP:
+					_console_hist_move(-1)
+					get_viewport().set_input_as_handled()
+					return
+				KEY_DOWN:
+					_console_hist_move(1)
+					get_viewport().set_input_as_handled()
+					return
+		return
 	# 拖拽优先：构筑屏里的按住-拖动-松开由这里独占（见 docs/plan-v3.md §1）
 	if build_root != null and build_root.visible and not dead:
 		if _drag_input(event):
@@ -823,8 +865,11 @@ func _input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
-	# 作弊键：F5 无敌 / F6 +100 基础 / F7 等级+5 / F8 时间+40s / F9 全套武器
-	if k >= KEY_F5 and k <= KEY_F9 and _cheat_key(k):
+	# 控制台开关：/ 或 ~ 或 `（docs/plan-v4.md §1）
+	if k == KEY_SLASH or k == KEY_ASCIITILDE or k == KEY_QUOTELEFT:
+		if not dead and not picking:
+			_open_console()
+			get_viewport().set_input_as_handled()
 		return
 	if k == KEY_F3:
 		dbg_on = not dbg_on
@@ -862,6 +907,7 @@ func _input(event: InputEvent) -> void:
 		if buy_device():
 			_pass()
 	elif k == KEY_R:
+		pause_reasons.clear()
 		get_tree().paused = false
 		get_tree().reload_current_scene()
 	elif k == KEY_F and weapons.size() > 0:
@@ -879,7 +925,7 @@ func _input(event: InputEvent) -> void:
 
 func _toggle_build() -> void:
 	build_root.visible = not build_root.visible
-	get_tree().paused = build_root.visible
+	_set_pause("build", build_root.visible)
 	hud_status.visible = not build_root.visible
 	hud_ammo.visible = not build_root.visible
 	hud_tip.visible = not build_root.visible
@@ -2598,10 +2644,32 @@ func try_level() -> bool:
 			left -= take
 	if left > 0:
 		return false
+	_gain_level()
+	return true
+
+
+## 升一级并弹四选一（不含材料扣除）。控制台的 level / level +n 走这里（docs/plan-v4.md §1.3）
+func _gain_level() -> void:
 	level += 1
 	_roll_offer()
 	_open_pick()
-	return true
+
+
+## 连升 n 级：级数立即 +n，选卡一张一张弹（关掉当前面板后弹下一张）
+func _gain_levels(n: int) -> void:
+	if n <= 0:
+		return
+	pending_levels += n
+	if not picking:
+		_next_pending_level()
+
+
+## 弹出待办里的下一张选卡；由 _close_pick 在上一次选完后接力
+func _next_pending_level() -> void:
+	if pending_levels <= 0:
+		return
+	pending_levels -= 1
+	_gain_level()
 
 
 ## buff 层数
@@ -3399,8 +3467,11 @@ func _drag_clear() -> void:
 # 14. 选卡界面（升级四选一 / 开箱四选一）
 # ============================================================================
 func _open_pick() -> void:
+	# 控制台与选卡不能叠着：打开选卡时先收控制台（命令输出留在历史里）
+	if console_open:
+		_close_console()
 	# 选卡时真的暂停整棵场景树：只靠 _physics_process 早退挡不住敌人自己的物理帧
-	get_tree().paused = true
+	_set_pause("pick", true)
 	# 两个全屏覆盖层不能同时开着：开选卡时先收起构筑屏，选完再放回来
 	var was_build: bool = build_root != null and build_root.visible
 	if was_build:
@@ -3483,6 +3554,9 @@ func _paint_offer() -> void:
 ## 关掉最上层的界面。返回 true 表示这次输入被消费掉了。
 ## 优先级：选卡 > 构筑。升级四选一不允许跳过（必须选一张），所以吞掉输入但不关面板。
 func _close_topmost() -> bool:
+	if console_open:
+		_close_console()
+		return true
 	if picking:
 		if pick_mode == "level":
 			return true
@@ -3516,8 +3590,12 @@ func _close_pick() -> void:
 	picking = false
 	if pick_root != null:
 		pick_root.visible = false
-	get_tree().paused = false
+	_set_pause("pick", false)
 	pick_mode = "level"
+	# 连升：上一张选完立刻弹下一张（_paint_offer 自己会清旧卡片），期间不重开构筑屏
+	if pending_levels > 0 and not dead:
+		_next_pending_level()
+		return
 	if pending_chest > 0 and not dead:
 		pending_chest -= 1
 		call_deferred("grant_chest")
@@ -3754,7 +3832,7 @@ func _paint_replace() -> void:
 # ============================================================================
 # --- 作弊码（debug 用） ---------------------------------------------------------
 # CLI: -- "cheat=rich,god,level,wave=15"（逗号分隔，可叠加）
-# 快捷键（任何时候）：F5 无敌开/关　F6 +100 基础　F7 等级 +5　F8 时间 +40s　F9 全套武器
+# 运行时请用控制台（/ 或 ` 打开，docs/plan-v4.md §1），F5–F9 快捷键已移除
 func _apply_cheats(spec: String) -> void:
 	for raw in spec.split(",", false):
 		var item := raw.strip_edges()
@@ -3806,29 +3884,6 @@ func _give_all_weapons() -> void:
 		var w := _make_weapon(String(id), 5)
 		weapons.append(w)
 	_refresh_hud()
-
-
-func _cheat_key(k: int) -> bool:
-	match k:
-		KEY_F5:
-			god = not god
-			print("[cheat] 无敌 %s" % ("开" if god else "关"))
-		KEY_F6:
-			_add_inv("base", 100)
-			print("[cheat] +100 基础模块（库存 %d）" % _inv("base"))
-		KEY_F7:
-			level += 5
-			print("[cheat] 等级 +5 → %d" % level)
-		KEY_F8:
-			elapsed += WAVE_SEC
-			print("[cheat] 时间 +40s（wave 自动推进）")
-		KEY_F9:
-			_give_all_weapons()
-			print("[cheat] 发全套武器，背包 %d" % weapons.size())
-		_:
-			return false
-	_pass()
-	return true
 
 
 # --- 测试日志 ---------------------------------------------------------------
@@ -4149,5 +4204,307 @@ func _run_rolltest(n: int = 300) -> void:
 				"倒挂" if bad == 1 else "-"])
 		print("")
 	print("总倒挂次数 %d（必须为 0）" % total_bad)
+
+
+# ============================================================================
+# 16. 开发控制台（docs/plan-v4.md §1）
+# ============================================================================
+## 面板：深色 + 青色边，位置避开左上 HUD 与右下弹药栏。
+## 打开时独占键盘（见 _input），关闭后一切照旧。
+func _make_console(parent: Node) -> void:
+	console_root = Control.new()
+	console_root.position = Vector2(230, 36)
+	console_root.size = Vector2(820, 260)
+	console_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	console_root.process_mode = Node.PROCESS_MODE_ALWAYS
+	console_root.visible = false
+	parent.add_child(console_root)
+
+	var panel := Panel.new()
+	panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.04, 0.05, 0.08, 0.96)
+	sb.border_color = Color(0.35, 0.80, 0.85, 0.9)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(8)
+	panel.add_theme_stylebox_override("panel", sb)
+	console_root.add_child(panel)
+
+	_label(console_root, Vector2(18, 9), 18, Color(0.62, 0.95, 1.0)).text = "控制台"
+	_label(console_root, Vector2(88, 13), 13, Color(0.55, 0.60, 0.68)).text = "help 看命令 · ↑↓ 历史 · Esc 关闭"
+
+	console_out = Label.new()
+	console_out.position = Vector2(18, 40)
+	console_out.size = Vector2(784, 156)
+	console_out.clip_text = true
+	console_out.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	console_out.add_theme_font_size_override("font_size", 14)
+	console_out.add_theme_color_override("font_color", Color(0.82, 0.90, 0.86))
+	console_root.add_child(console_out)
+
+	_label(console_root, Vector2(18, 210), 16, Color(0.62, 0.95, 1.0)).text = ">"
+	console_input = LineEdit.new()
+	console_input.position = Vector2(40, 202)
+	console_input.size = Vector2(762, 38)
+	console_input.add_theme_font_size_override("font_size", 16)
+	console_input.placeholder_text = "输入命令，回车执行（help）"
+	console_input.caret_blink = true
+	console_input.text_submitted.connect(_console_submit)
+	console_root.add_child(console_input)
+
+
+## 暂停来源：任何一个来源还在，树就保持暂停（避免关掉构筑屏时把选卡也一起解除）
+func _set_pause(key: String, on: bool) -> void:
+	if on:
+		pause_reasons[key] = true
+	else:
+		pause_reasons.erase(key)
+	get_tree().paused = not pause_reasons.is_empty()
+
+
+func _open_console() -> void:
+	if console_root == null or console_open or dead or picking:
+		return
+	console_open = true
+	console_root.visible = true
+	_set_pause("console", true)
+	console_input.text = ""
+	if console_lines.is_empty():
+		_console_print("输入 help 看命令（↑↓ 历史 · Esc 关闭）")
+	console_input.grab_focus.call_deferred()
+
+
+func _close_console() -> void:
+	if not console_open:
+		return
+	console_open = false
+	if console_root != null:
+		console_root.visible = false
+	if console_input != null:
+		console_input.release_focus()
+	_set_pause("console", false)
+
+
+func _console_submit(raw: String) -> void:
+	var line := raw.strip_edges()
+	if line.is_empty():
+		return
+	if console_hist.is_empty() or String(console_hist[console_hist.size() - 1]) != line:
+		console_hist.append(line)
+		if console_hist.size() > 50:
+			console_hist.pop_front()
+	console_hist_i = console_hist.size()
+	_console_print("> " + line)
+	_console_print(_console_run(line))
+	if console_input != null:
+		console_input.text = ""
+		console_input.caret_column = 0
+
+
+## ↑↓ 翻历史：下标停在 size 时表示「空输入」
+func _console_hist_move(d: int) -> void:
+	if console_hist.is_empty() or console_input == null:
+		return
+	console_hist_i = clampi(console_hist_i + d, 0, console_hist.size())
+	console_input.text = "" if console_hist_i >= console_hist.size() else String(console_hist[console_hist_i])
+	console_input.caret_column = console_input.text.length()
+
+
+## 只保留最近 4 行，避免 Label 越写越慢
+func _console_print(text: String) -> void:
+	if text == "":
+		return
+	for ln in text.split("\n"):
+		console_lines.append(String(ln))
+	while console_lines.size() > 4:
+		console_lines.pop_front()
+	if console_out != null:
+		console_out.text = "\n".join(console_lines)
+
+
+func _console_run(line: String) -> String:
+	var parts := line.split(" ", false)
+	if parts.is_empty():
+		return ""
+	var cmd := String(parts[0]).to_lower()
+	var args: Array = []
+	for i in range(1, parts.size()):
+		args.append(String(parts[i]))
+	match cmd:
+		"help": return _cmd_help(args)
+		"speed": return _cmd_speed(args)
+		"level": return _cmd_level(args)
+		"wave": return _cmd_wave(args)
+		"weapon": return _cmd_weapon(args)
+		"give": return _cmd_give(args)
+		"device": return _cmd_device(args)
+		"god": return _cmd_god(args)
+		"hp": return _cmd_hp(args)
+		"kill": return _cmd_kill(args)
+		"spawn": return _cmd_spawn(args)
+		"fps": return _cmd_fps(args)
+		"restart": return _cmd_restart(args)
+		"clear": return _cmd_clear(args)
+	return "未知命令：%s（输入 help 看命令）" % cmd
+
+
+func _cmd_help(_args: Array) -> String:
+	return "运行  speed <倍率> / level [+n|-n] / wave <n> / restart\n" \
+		+ "战斗  weapon <id> / give <模块|武器> [n] / device [n] / god / hp [n]\n" \
+		+ "敌人  kill all|area|<kind> [r] / spawn <kind> [n] / fps / clear / help"
+
+
+func _cmd_speed(args: Array) -> String:
+	if args.is_empty():
+		return "倍速 %.2f" % Engine.time_scale
+	var v := absf(String(args[0]).to_float())
+	if v <= 0.0:
+		return "倍速要是正数"
+	Engine.time_scale = clampf(v, 0.1, 8.0)
+	return "倍速 → %.2f" % Engine.time_scale
+
+
+func _cmd_level(args: Array) -> String:
+	if args.is_empty():
+		if try_level():
+			return "升级 → Lv%d" % level
+		return "材料不够：库存 %d / 需要 %d" % [_inv_total(), level_cost()]
+	var txt := String(args[0])
+	if txt.begins_with("+"):
+		var n := maxi(1, int(txt.substr(1)))
+		_gain_levels(n)
+		return "连升 %d 级（一张一张选）" % n
+	if txt.begins_with("-"):
+		level = maxi(0, level - maxi(1, int(txt.substr(1))))
+		return "等级 → %d" % level
+	level = maxi(level, int(txt))
+	return "等级 = %d" % level
+
+
+func _cmd_wave(args: Array) -> String:
+	if args.is_empty():
+		return "当前第 %d 波（%s）" % [wave, _fmt_time(elapsed)]
+	var n := maxi(1, int(String(args[0])))
+	elapsed = float(n - 1) * WAVE_SEC
+	wave = n
+	_on_wave_start()
+	return "跳到第 %d 波" % wave
+
+
+func _cmd_weapon(args: Array) -> String:
+	if args.is_empty():
+		var names: Array = []
+		for w in weapons:
+			names.append(String(w["id"]))
+		return "当前武器：" + (", ".join(names) if not names.is_empty() else "无")
+	var id := String(args[0])
+	for i in weapons.size():
+		if String(weapons[i]["id"]) == id:
+			_use_weapon(i)
+			return "切到 %s" % id
+	return "没有这把武器：%s" % id
+
+
+func _cmd_give(args: Array) -> String:
+	if args.is_empty():
+		return "用法：give <模块|武器> [数量]"
+	var id := String(args[0])
+	var n := maxi(1, int(String(args[1]))) if args.size() > 1 else 1
+	if MODULES.has(id):
+		_add_inv(id, n)
+		return "获得 %s ×%d（库存 %d）" % [id, n, _inv(id)]
+	if WEAPONS.has(id):
+		var added := 0
+		for i in n:
+			if _backpack_used() >= backpack_cap:
+				break
+			weapons.append(_make_weapon(id, 3))
+			added += 1
+		_refresh_hud()
+		return "获得武器 %s ×%d" % [id, added]
+	return "未知模块/武器：%s" % id
+
+
+func _cmd_device(args: Array) -> String:
+	var n := maxi(1, int(String(args[0]))) if not args.is_empty() else 1
+	var added := 0
+	for i in n:
+		if devices.size() >= DEVICE_MAX:
+			break
+		var nd := _new_device()
+		nd["auto"] = true
+		devices.append(nd)
+		added += 1
+	return "装置 +%d（共 %d/%d）" % [added, devices.size(), DEVICE_MAX]
+
+
+func _cmd_god(_args: Array) -> String:
+	god = not god
+	return "无敌 %s" % ("开" if god else "关")
+
+
+func _cmd_hp(args: Array) -> String:
+	var v := 9999.0 if args.is_empty() else maxf(1.0, String(args[0]).to_float())
+	max_hp = v
+	hp = max_hp
+	return "HP = %d / %d" % [int(hp), int(max_hp)]
+
+
+func _cmd_kill(args: Array) -> String:
+	var mode := "all" if args.is_empty() else String(args[0])
+	var r := 260.0
+	if args.size() > 1:
+		r = maxf(1.0, String(args[1]).to_float())
+	var hit := 0
+	for e in get_tree().get_nodes_in_group("enemy"):
+		if not is_instance_valid(e):
+			continue
+		var near: bool = player != null and e.position.distance_to(player.position) <= r
+		if mode == "all" or (mode == "area" and near) or e.kind == mode:
+			_kill(e)
+			hit += 1
+	return "清掉 %d 只敌人" % hit
+
+
+func _cmd_spawn(args: Array) -> String:
+	if args.is_empty():
+		var ks: Array = []
+		for k in ENEMY_KINDS:
+			ks.append(String(k))
+		return "用法：spawn <kind> [数量]（%s）" % ", ".join(ks)
+	var kind := String(args[0])
+	if not ENEMY_KINDS.has(kind):
+		return "未知敌人类型：%s" % kind
+	var n := clampi(int(String(args[1])) if args.size() > 1 else 1, 1, 200)
+	var made := 0
+	for i in n:
+		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
+			break
+		var ang := rng.randf() * TAU
+		_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(420.0, 520.0), kind)
+		made += 1
+	return "生成 %s ×%d" % [kind, made]
+
+
+func _cmd_fps(_args: Array) -> String:
+	return "FPS %d · 帧 %.1fms · 敌人 %d/%d · 倍速 %.2f" % [
+		int(Engine.get_frames_per_second()), frame_ms,
+		get_tree().get_nodes_in_group("enemy").size(), MAX_ENEMIES, Engine.time_scale]
+
+
+func _cmd_restart(_args: Array) -> String:
+	pause_reasons.clear()
+	get_tree().paused = false
+	get_tree().reload_current_scene.call_deferred()
+	return "重开"
+
+
+func _cmd_clear(_args: Array) -> String:
+	console_lines.clear()
+	if console_out != null:
+		console_out.text = ""
+	return ""
+
 
 
