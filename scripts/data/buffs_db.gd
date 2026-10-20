@@ -83,6 +83,12 @@ const FAMILIES := {
 		"per": {"white": 0.006, "blue": 0.008, "violet": 0.010, "gold": 0.013},
 		"cap": 0.60, "tpl": "连击每层 +%.1f%%",
 	},
+	# plan-v6 §9：激光环的 40s 固定间隔只能靠「减固定秒数」来救，乘法 buff 在 40s 上没手感
+	"laser_iv": {
+		"name": "激光充能", "cat": "atk", "kind": "add",
+		"per": {"white": -1.0, "blue": -1.2, "violet": -1.5, "gold": -2.0},
+		"cap": 24.0, "scale": 1.0, "tpl": "激光环固定间隔 -%.1fs",
+	},
 
 	# ---- 经济 ----
 	"drop": {

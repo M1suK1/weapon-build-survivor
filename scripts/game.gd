@@ -1293,7 +1293,7 @@ func _fire(delta: float) -> void:
 		if not bool(w["enabled"]):
 			continue
 		var mo := _weapon_mods(w)
-		var iv := float(w["interval"]) * float(mo["iv"])
+		var iv := _iv_of(w, mo)
 		w["fire_t"] = float(w["fire_t"]) + delta
 		if float(w["fire_t"]) < iv:
 			continue
@@ -2777,6 +2777,18 @@ func _board_total(w = null) -> float:
 	return s
 
 
+## 开火间隔：基础 × 间隔修正（间隔模块 + 攻速 buff），激光环再吃「激光充能」的固定减秒
+## （plan-v6 §9.2：激光环 40s 用乘法 buff 减不动，只能减固定秒数，最低 6s 防止每帧清场）
+func _iv_of(w: Dictionary, mo = null) -> float:
+	var ww: Dictionary = w
+	var m: Dictionary = _weapon_mods(ww) if mo == null else mo
+	var iv := float(ww["interval"]) * float(m["iv"])
+	if String(ww["id"]) == "laser":
+		iv -= minf(24.0, absf(_buff_sum("laser_iv")))
+		return maxf(6.0, iv)
+	return maxf(iv, 0.05)
+
+
 ## 每格每秒输出（稳态）：per-shot 值 ÷ max(武器间隔, 模块 out_iv)
 ## 快枪吃不满自己的蓄能（上限 1 次/炮），慢枪则每次吃满 —— 这一条就是 plan-v6 §7.1 的全部数学
 func _slot_rate_out(w = null) -> Array:
@@ -2784,7 +2796,7 @@ func _slot_rate_out(w = null) -> Array:
 	var sl: Array = ww["slots"]
 	var per := _slot_out(null, ww, false)
 	var mo := _weapon_mods(ww)
-	var iv := maxf(float(ww["interval"]) * float(mo["iv"]), 0.02)
+	var iv := _iv_of(ww, mo)
 	var out: Array = []
 	out.resize(per.size())
 	for i in per.size():
@@ -2802,7 +2814,7 @@ func _shot_power_steady(w = null) -> float:
 	var ww: Dictionary = weapon if w == null else w
 	var mo := _weapon_mods(ww)
 	var k := float(ww["mul"]) * float(mo["mul"]) * (1.0 + float(mo["mul_add"]))
-	var iv := maxf(float(ww["interval"]) * float(mo["iv"]), 0.02)
+	var iv := _iv_of(ww, mo)
 	var s := float(ww["base"]) / iv
 	for v in _slot_rate_out(ww):
 		s += float(v)
@@ -4067,6 +4079,12 @@ func _pick_buff_variant(cat: String, q: String, used: Dictionary) -> String:
 			continue
 		if _bl(sid) >= int(d["max"]):
 			continue
+		# 激光充能只在手上有激光环时才进池（plan-v6 §9.2 第 3 条）
+		if String(d["fam"]) == "laser_iv" and not _has_weapon_bind("laser"):
+			continue
+		# 只有激光环时「射程 +」完全没用（全屏了），直接不给（plan-v6 §9.2 第 4 条）
+		if String(d["fam"]) == "range" and _laser_only():
+			continue
 		pool.append(sid)
 	if pool.is_empty():
 		return ""
@@ -4130,7 +4148,7 @@ func cur_burn() -> float:
 		if not bool(w["enabled"]):
 			continue
 		var mo := _weapon_mods(w)
-		var iv := float(w["interval"]) * float(mo["iv"])
+		var iv := _iv_of(w, mo)
 		var burn := float(mo["burn"])
 		for m in w["slots"]:
 			if m != null:
@@ -4287,7 +4305,7 @@ func _refresh_build() -> void:
 	var lines: Array = []
 	var mo_now := _weapon_mods(weapon)
 	var rng_now := float(weapon["range"]) + float(mo_now["range"])
-	var iv_now := float(weapon["interval"]) * float(mo_now["iv"])
+	var iv_now := _iv_of(weapon, mo_now)
 	var tg_now := int(weapon["targets"]) + int(mo_now["targets"]) if int(weapon["targets"]) > 0 else int(weapon["targets"])
 	lines.append("构筑（暂停中）      TAB / ESC / ← 返回　　右键：槽位=卸下，别处=返回")
 	lines.append("")
@@ -4690,6 +4708,14 @@ func _has_weapon_bind(bind: String) -> bool:
 	return false
 
 
+## 手上是不是只有激光环（这时射程 buff 无效，抽卡直接跳过）
+func _laser_only() -> bool:
+	for w in weapons:
+		if String(w["id"]) != "laser":
+			return false
+	return not weapons.is_empty()
+
+
 func _set_dev_pick(i: int) -> void:
 	dev_pick_for = i
 	_refresh_build()
@@ -5047,7 +5073,7 @@ func _board_total_slots(sl: Array, w = null) -> float:
 	# 预览也不吃蓄能进度（plan-v6 §7.3）：否则拖拽时的数字会跟着开火相位跳
 	var per := _slot_out(sl, ww, false)
 	var mo := _weapon_mods(ww)
-	var iv := maxf(float(ww["interval"]) * float(mo["iv"]), 0.02)
+	var iv := _iv_of(ww, mo)
 	var total := 0.0
 	for i in per.size():
 		var m = sl[i]
