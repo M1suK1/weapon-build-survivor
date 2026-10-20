@@ -391,8 +391,8 @@ _on_esc():
 | P8 | `feat(laser):` | §9 激光环全屏 + 激光充能 | `e6c5c13` |
 | P9 | `feat(weapon):` | §10 冲锋枪射程 | `794cac0` |
 | P10 | `feat(ui):` | §8 布局重排 | `662c804` |
-| P11 | `docs:` | reference / README / testlog / 本文件状态 | 见文末 |
-| P12 | `refactor:` | 自审（死代码、边界、数值核对） | 见文末 |
+| P11 | `docs:` | reference / README / testlog / 本文件状态 | `73bca85` |
+| P12 | `refactor:` | 自审（死代码、边界、数值核对） | `d7d24e0` |
 
 **实施中的偏离**（与本文不一致的地方，均已按实际代码为准）：
 
