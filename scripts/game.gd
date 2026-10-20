@@ -1112,17 +1112,15 @@ func _input(event: InputEvent) -> void:
 		if _drag_input(event):
 			return
 	# 统一返回：ESC / 鼠标右键 都能退出最上层的界面（选卡 -> 构筑）
+	# plan-v6 §2：ESC 与右键各自只有一个入口，顺序固定（控制台 → 拖拽 → 手持 → 选卡 → 构筑）
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		if not drag.is_empty():
-			drag = {}
-			_drag_clear()
-			return
-		if _close_topmost():
-			return
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
-		if _close_topmost():
+		if _on_esc():
 			get_viewport().set_input_as_handled()
-			return
+		return
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+		if _on_right_click(event as InputEventMouseButton):
+			get_viewport().set_input_as_handled()
+		return
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
@@ -1182,13 +1180,51 @@ func _input(event: InputEvent) -> void:
 		if idx < weapons.size():
 			_use_weapon(idx)
 			_pass()
-	elif k == KEY_ESCAPE and build_root.visible:
-		# 手持模块时 Esc 先放下手持，再按一次才关构筑屏（plan-v5 §1.3 第 3 条）
-		if hand_mid != "":
-			hand_mid = ""
-			_refresh_build()
-		else:
-			_toggle_build()
+
+
+## ESC 的唯一入口（plan-v6 §2.2）：手持模块时先放手、不关屏；再按一次才关
+func _on_esc() -> bool:
+	if console_open:
+		_close_console()
+		return true
+	if not drag.is_empty():
+		drag = {}
+		_drag_clear()
+		return true
+	if hand_mid != "":
+		hand_mid = ""
+		_refresh_build()
+		return true
+	if picking:
+		if pick_mode == "level":
+			return true  # 升级必须选一张，ESC 不吞掉面板
+		_abort_pick()
+		return true
+	if build_root != null and build_root.visible:
+		_toggle_build()
+		return true
+	return false
+
+
+## 右键的唯一入口（plan-v6 §2.2）：槽位 = 卸下；拖拽中 = 取消；其它位置 = 返回上一层
+func _on_right_click(mb: InputEventMouseButton) -> bool:
+	if console_open:
+		return false
+	if picking and pick_mode == "level":
+		return false
+	if not drag.is_empty():
+		drag = {}
+		_drag_clear()
+		return true
+	if build_root != null and build_root.visible:
+		var mp := build_root.get_global_transform_with_canvas().affine_inverse() * mb.position
+		var i := _slot_at(mp)
+		if i >= 0:
+			_on_slot_input(mb, i)
+			return true
+	if _close_topmost():
+		return true
+	return false
 
 
 func _toggle_build() -> void:
@@ -4059,7 +4095,7 @@ func _refresh_build() -> void:
 	_refresh_fill_btn()
 	_refresh_plan_btns()
 	var lines: Array = []
-	lines.append("构筑（暂停中）      TAB / ESC / 右键 / ← 返回")
+	lines.append("构筑（暂停中）      TAB / ESC / ← 返回　　右键：槽位=卸下，别处=返回")
 	lines.append("")
 	lines.append("武器  %s·%s·%d 槽    射程 %.0f    间隔 %.2fs    目标 %s    基础 %.1f    单次出力 %.1f    当前 DPS %.1f" % [
 		str(WEAPONS[weapon["id"]]["name"]), QUALITY_NAME[int(weapon["quality"])],
