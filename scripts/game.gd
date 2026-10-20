@@ -1054,6 +1054,8 @@ func _input(event: InputEvent) -> void:
 			_take_card(0)
 		elif k == KEY_T and pick_mode == "level":
 			_reroll_recipe()
+		elif (k == KEY_0 or k == KEY_KP_0) and pick_mode == "chest":
+			_abandon_chest()
 		return
 	if k == KEY_TAB and not dead:
 		_toggle_build()
@@ -2116,6 +2118,28 @@ func grant_chest(from_chest: bool = false) -> void:
 
 
 ## 把选中的宝箱武器入包（背包满时先走「选一把替换」）
+## 放弃宝箱：按「最好那张卡」的品质折算模块，直接进库存（不经拾取动画，plan-v5 §6.1）
+## 折算 = 2 + quality（白 3、绿 4、蓝 5、紫 6、金 7）；wave ≥ 12 时一半换成「加法」
+func _abandon_chest() -> void:
+	if chest_offer.is_empty():
+		return
+	var best := 1
+	for w in chest_offer:
+		best = maxi(best, int(w.get("quality", 1)))
+	var n := 2 + best
+	var half := n / 2 if wave >= 12 else 0
+	var mid := "add" if wave >= 12 else "base"
+	_add_inv(mid, half)
+	_add_inv("base", n - half)
+	chest_offer.clear()
+	_close_pick()
+	_refresh_hud()
+	if half > 0:
+		_toast("放弃宝箱：+%d 个模块（%d 基础 + %d 加法）" % [n, n - half, half])
+	else:
+		_toast("放弃宝箱：+%d 个模块" % n)
+
+
 func _take_weapon_card(i: int) -> void:
 	if i < 0 or i >= chest_offer.size():
 		return
@@ -3063,6 +3087,27 @@ func _chest_tip_data(i: int) -> Dictionary:
 			lines.append("[color=#ffd479]%s · 对比 %s[/color]" % ["、".join(bits), cur])
 	lines.append("[color=#8fa0b8]选它会进背包；背包满时先选一把旧的替换[/color]")
 	return {"title": "%s  %s" % [String(QUALITY_NAME[q]), String(wd["name"])], "lines": lines, "color": col}
+
+
+## 已有武器的悬浮说明（plan-v5 §6.2「现有武器」横条）：完整数值 + 实测/理论 dps
+func _weapon_tip_data(idx: int) -> Dictionary:
+	if idx < 0 or idx >= weapons.size():
+		return {"title": "", "lines": []}
+	var w: Dictionary = weapons[idx]
+	var q := int(w["quality"])
+	var lines: Array = []
+	lines.append("%d 槽 · 评分 %.2f / %.2f" % [
+		(w["slots"] as Array).size(), float(w["score"]), float(w["p0"]) * float(QM[3])])
+	lines.append("射程 %d · 间隔 %.2fs · 目标 %s" % [
+		int(w["range"]), float(w["interval"]), "全部" if int(w["targets"]) < 0 else str(int(w["targets"]))])
+	lines.append("基础 %.2f · 倍率 %.2f" % [float(w["base"]), float(w["mul"])])
+	if w.has("blast"):
+		lines.append("爆炸半径 %d" % int(w["blast"]))
+	if w.has("ramp_max"):
+		lines.append("连击上限 %.0f%%" % (100.0 * float(w["ramp_max"])))
+	lines.append("实测 %.1f / 理论 %.1f dps" % [_actual_dps(w), _theory_dps(w)])
+	lines.append("背包 %d/%d%s" % [_backpack_used(), backpack_cap, "　已满：选卡后先替换" if backpack_cap >= 0 and _backpack_used() >= backpack_cap else ""])
+	return {"title": "武器 %d「%s」" % [idx + 1, String(WEAPONS[w["id"]]["name"])], "lines": lines, "color": _qcol(q)}
 
 
 ## 销毁提示节流：3 秒内只弹一次，免得连续拆卸刷屏
@@ -4666,6 +4711,37 @@ func _paint_chest() -> void:
 		var fl := _label(btn, Vector2(14, 388), 14, Color(0.62, 0.68, 0.78))
 		fl.text = "背包 %d/%d" % [_backpack_used(), backpack_cap]
 
+	# --- 底部：「现有武器」横条（§6.2）+ 放弃按钮（§6.1）---
+	_label(pick_root, Vector2(36, 590), 14, Color(0.62, 0.68, 0.78)).text = "现有武器："
+	var full := backpack_cap >= 0 and _backpack_used() >= backpack_cap
+	var bx := 118.0
+	for wi in weapons.size():
+		var ow: Dictionary = weapons[wi]
+		var oc := _qcol(int(ow["quality"]))
+		var chip := Panel.new()
+		chip.position = Vector2(bx, 584)
+		chip.size = Vector2(150, 34)
+		var csb := StyleBoxFlat.new()
+		csb.bg_color = Color(0.10, 0.11, 0.15, 0.98)
+		csb.border_color = oc
+		csb.set_border_width_all(2)
+		csb.border_width_left = 8  # 左边一条品质色块
+		csb.set_corner_radius_all(6)
+		chip.add_theme_stylebox_override("panel", csb)
+		pick_root.add_child(chip)
+		var cl := _label(chip, Vector2(12, 6), 14, oc)
+		cl.text = "%d槽 %s%s" % [(ow["slots"] as Array).size(),
+			String(WEAPONS[ow["id"]]["name"]), " ▸" if wi == sel else ""]
+		if full:
+			_label(chip, Vector2(110, 9), 11, Color(1.0, 0.55, 0.45)).text = "替换"
+		_bind_tip(chip, _weapon_tip_data.bind(wi))
+		bx += 158.0
+	var ab := UIKit.button("放弃并换模块（0）", Vector2(200, 40), UIKit.C_GOLD, 15)
+	ab.position = Vector2(900, 596)
+	ab.tooltip_text = "按最好那张卡的品质折算：2 + 品质 个模块，直接进库存（wave ≥ 12 一半换成加法）"
+	ab.pressed.connect(_abandon_chest)
+	pick_root.add_child(ab)
+
 
 func _paint_replace() -> void:
 	var bg := ColorRect.new()
@@ -4708,6 +4784,7 @@ func _paint_replace() -> void:
 		btn.add_theme_stylebox_override("pressed", sh)
 		btn.add_theme_stylebox_override("focus", sh)
 		btn.pressed.connect(_replace_weapon.bind(i))
+		_bind_tip(btn, _weapon_tip_data.bind(i))
 		pick_root.add_child(btn)
 	var mini := _mini_board(w["layout"], qc, 22.0, 9.0)
 	mini.position = Vector2(760, 160)
