@@ -103,6 +103,15 @@ const LEVEL_COST_GROWTH_LATE := 1.12
 const DAMAGE_PER_MODULE := 8.0
 const FIRE_RANGE := 260.0
 const PULSE_DUR := 0.30
+## 环绕刃（plan-v5 §7）：扇叶贴着玩家转，命中看「半径 + 角度」而不是开火循环
+## 转速从 2.2 降到 1.4（R4：转太快看不清扇叶），单发相应从 1.00 降到 0.45
+const BLADE_SPIN := 1.4
+const BLADE_PETALS_BASE := 3
+const BLADE_PETALS_MAX := 7
+const BLADE_PETAL_ARC := 0.50
+const BLADE_RING_TOL := 18.0
+const BLADE_HIT_CD := 0.25
+const BLADE_DMG_MULT := 0.45
 
 # ============================================================================
 # 状态
@@ -681,6 +690,7 @@ func _physics_process(delta: float) -> void:
 		_auto_plan_fix(delta)
 	var c0 := Time.get_ticks_usec()
 	_fire(delta)
+	_blade_tick(delta)
 	_contact(delta)
 	Perf.combat_usec += Time.get_ticks_usec() - c0
 	_hud_tick(delta)
@@ -713,7 +723,7 @@ func _hud_tick(delta: float) -> void:
 		if float(blast_fx[i]["t"]) <= 0.0:
 			blast_fx.remove_at(i)
 	for w in weapons:
-		w["blade_ph"] = float(w.get("blade_ph", 0.0)) + delta * 2.2
+		w["blade_ph"] = float(w.get("blade_ph", 0.0)) + delta * BLADE_SPIN
 	queue_redraw()
 	# 每 0.1s 刷一次 HUD，避免每帧拼字符串
 	if fmod(elapsed, 0.1) < delta:
@@ -1130,13 +1140,17 @@ func _fire(delta: float) -> void:
 		w["fire_t"] = float(w["fire_t"]) + delta
 		if float(w["fire_t"]) < iv:
 			continue
+		# 环绕刃：只在这里按 interval 扣弹药，命中由 _blade_tick 独立结算（plan-v5 §7.2）
+		if String(w["id"]) == "blade":
+			w["fire_t"] = float(w["fire_t"]) - iv
+			_burn_slots(w, float(mo["burn"]))
+			continue
 		var rng_d := float(w["range"]) + float(mo["range"])
 		var tg := int(w["targets"])
 		if tg > 0:
 			tg += int(mo["targets"])
 		var targets := _targets_for(w, rng_d, tg)
-		# 环绕刃不需要目标：空转一圈也照常烧弹药
-		if targets.is_empty() and String(w["id"]) != "blade":
+		if targets.is_empty():
 			w["fire_t"] = minf(float(w["fire_t"]), iv)
 			continue
 		w["fire_t"] = float(w["fire_t"]) - iv
@@ -1158,18 +1172,7 @@ func _fire(delta: float) -> void:
 			w["combo_t"] = elapsed
 			dmg *= 1.0 + float(mo["combo"]) * float(int(w["combo"]))
 		# 消耗次数：每次开火每个模块 -1（与目标数无关 → 高射速 = 高消耗）
-		var burn := float(mo["burn"])
-		var sl: Array = w["slots"]
-		for i in sl.size():
-			var m = sl[i]
-			if m == null:
-				continue
-			m["left"] = float(m["left"]) - burn
-			if float(m["left"]) <= 0.0:
-				sl[i] = null
-				# 自动补料只由 auto_fill 决定（人类默认关：烧完就空着，格子画幽灵框等玩家自己补）
-				if auto_fill:
-					_refill(i, w)
+		_burn_slots(w, float(mo["burn"]))
 		var hits := float(targets.size())
 		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / maxf(1.0, hits)
 		# 榴弹炮：主目标吃满，不叠多目标折扣（溅射在下面单独结算）
@@ -1281,6 +1284,73 @@ func _targets_in_range(r: float, n: int) -> Array:
 	return out
 
 
+## 每次开火给每个模块扣寿命（与目标数无关 → 高射速 = 高消耗）
+## 自动补料只由 auto_fill 决定（人类默认关：烧完就空着，格子画幽灵框等玩家自己补）
+func _burn_slots(w: Dictionary, burn: float) -> void:
+	var sl: Array = w["slots"]
+	for i in sl.size():
+		var m = sl[i]
+		if m == null:
+			continue
+		m["left"] = float(m["left"]) - burn
+		if float(m["left"]) <= 0.0:
+			sl[i] = null
+			if auto_fill:
+				_refill(i, w)
+
+
+## 扇叶数量：基础 3 + 旋刃 buff（§7.4 的 petal 族），上限 7
+func _blade_petals() -> int:
+	return clampi(BLADE_PETALS_BASE + _blade_petal_bonus(), BLADE_PETALS_BASE, BLADE_PETALS_MAX)
+
+
+## 旋刃 buff 的扇叶加成：M12 会把 buff 换成 96 条变体，这里留一个接缝
+func _blade_petal_bonus() -> int:
+	return mini(int(buffs.get("petal", 0)), BLADE_PETALS_MAX - BLADE_PETALS_BASE)
+
+
+## 环绕刃的独立判定（plan-v5 §7.2）：每片扇叶是「半径 ±18、角度宽 0.5」的扇形环带，
+## 同一敌人 0.25 秒内只会被扇叶打一次（冷却期间任何扇叶都不重复结算）
+func _blade_tick(delta: float) -> void:
+	if dead or picking or (build_root != null and build_root.visible):
+		return
+	for w in weapons:
+		if String(w["id"]) != "blade" or not bool(w["enabled"]):
+			continue
+		var mo := _weapon_mods(w)
+		var rad := float(WEAPONS["blade"]["range"]) + float(mo["range"]) + float(mo["blade"])
+		var petals := _blade_petals()
+		var ph := float(w.get("blade_ph", 0.0))
+		var dmg := _shot_power_of(w) * BLADE_DMG_MULT
+		var dealt := 0.0
+		for e in enemies:
+			if not is_instance_valid(e):
+				continue
+			e.blade_cd = maxf(0.0, float(e.blade_cd) - delta)
+			var rel: Vector2 = e.position - player.position
+			var dist := rel.length()
+			if absf(dist - rad) > BLADE_RING_TOL:
+				continue
+			if float(e.blade_cd) > 0.0:
+				continue
+			var ea := rel.angle()
+			var hit := false
+			for k in petals:
+				var a0 := ph + TAU * float(k) / float(petals)
+				if absf(angle_difference(a0, ea)) <= BLADE_PETAL_ARC * 0.5:
+					hit = true
+					break
+			if not hit:
+				continue
+			e.blade_cd = BLADE_HIT_CD
+			var d := dmg
+			if float(mo["elite"]) > 0.0 and String(e.kind) in ["charger", "rock"]:
+				d *= 1.0 + float(mo["elite"])
+			dealt += _apply_hit(e, d)
+		if dealt > 0.0:
+			_log_damage(w, dealt)
+
+
 ## 弹道特效：瞬发 hitscan + 短命拖尾线（比脉冲圆环更能读出「谁在打谁」）
 func _add_shot(targets: Array, w: Dictionary) -> void:
 	var col: Color = Color(WEAPONS[w["id"]]["color"])
@@ -1303,15 +1373,26 @@ func _draw() -> void:
 		var k2: float = clampf(float(b["t"]) / 0.18, 0.0, 1.0)
 		draw_circle(b["p"], float(b["r"]), Color(1.0, 0.55, 0.22, 0.10 * k2))
 		draw_arc(b["p"], float(b["r"]) * (1.25 - 0.25 * k2), 0.0, TAU, 40, Color(1.0, 0.62, 0.28, 0.55 * k2), 2.0, true)
-	# 环绕刃：贴着玩家转的弧（每把刀一个相位）
+	# 环绕刃（plan-v5 §7.2）：每片扇叶画成有厚度的刀刃，角度和判定共用 blade_ph
 	for w in weapons:
 		if String(w["id"]) != "blade" or not bool(w["enabled"]):
 			continue
-		var rad := float(WEAPONS["blade"]["range"]) + float(_weapon_mods(w)["blade"])
+		var mo := _weapon_mods(w)
+		var rad := float(WEAPONS["blade"]["range"]) + float(mo["range"]) + float(mo["blade"])
 		var ph := float(w.get("blade_ph", 0.0))
-		for b in 2:
-			var a0 := ph + float(b) * PI
-			draw_arc(player.position, rad, a0, a0 + 1.5, 18, Color(0.82, 0.94, 0.45, 0.75), 4.0, true)
+		var petals := _blade_petals()
+		var col := Color(0.82, 0.94, 0.45, 0.80)
+		for k in petals:
+			var a0 := ph + TAU * float(k) / float(petals)
+			var dv := Vector2.from_angle(a0)
+			var tv := Vector2(-dv.y, dv.x)
+			var inner: Vector2 = player.position + dv * (rad - BLADE_RING_TOL)
+			var outer: Vector2 = player.position + dv * (rad + 10.0)
+			# 刀身：一条粗主刃 + 一条细亮边，尖端补一个三角，转起来才看得出是「刃」
+			draw_line(inner, outer, col, 5.0, true)
+			draw_line(inner + tv * 3.0, outer, Color(0.96, 1.0, 0.72, 0.85), 1.5, true)
+			draw_colored_polygon(PackedVector2Array([
+				outer, outer - dv * 12.0 + tv * 6.0, outer - dv * 12.0 - tv * 6.0]), col)
 
 
 func _nearest_enemy(max_dist: float) -> Node2D:
@@ -1462,7 +1543,8 @@ func _eff_targets(w: Dictionary) -> float:
 	if id == "grenade":
 		return 1.0 + 0.6 * float(w.get("blast", 90.0)) / 90.0
 	if id == "blade":
-		return 3.0 * float(w["range"]) / 105.0
+		# 环绕刃按「扇叶数 × 贴环时间」估值（plan-v5 §7.2）：贴环的敌人 ≈ 1，扇叶越多覆盖越广
+		return float(_blade_petals()) * 0.9
 	if id == "laser":
 		return 3.0
 	if t < 0:

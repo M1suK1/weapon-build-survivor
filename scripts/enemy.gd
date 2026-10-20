@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 敌人：直线追击玩家。hp / max_hp / speed / kind / radius / body_color 由 game.gd 生成后赋值。
 ##
 ## 行为按 kind 分：
@@ -44,6 +44,8 @@ var telegraph := 0.0
 var variant := ""
 ## 单次命中上限：>0 时任何一次命中最多打掉这么多血（重装「至少 5 发」的硬保证）
 var hit_cap := 0.0
+## 环绕刃的每敌命中冷却（plan-v5 §7.2：0.25 秒内不被任何扇叶重复打）
+var blade_cd := 0.0
 
 ## 通用计时
 var shoot_t := 0.0
