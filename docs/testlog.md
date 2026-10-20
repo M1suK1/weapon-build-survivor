@@ -5,6 +5,15 @@
 
 ---
 
+## 2026-10-20 · v7 静态校验（Q1–Q7）
+
+- **命令**：`cmd /c ".\.tools\godot\Godot_v4.7.2-stable_win64.exe --headless --path . --check-only --script res://scripts/game.gd & echo EXIT=%ERRORLEVEL%"`（15 个脚本逐个同式）+ `--headless --path . --quit-after 3`
+- **目的**：Q1–Q7 改完后的静态校验。**按用户要求不跑 playtest / boardtest**，行为留人工复核。
+- **关键输出**：15 个脚本全部 `EXIT=0`，无 `Parse Error`；启动冒烟打印 `DATA OK  buff=100  modules=24  INV OK`（`INV OK` 是 Q1 新加的库存自检：`add(+3)/add(-1)/take(5)` 后计数正确）。
+- **结论**：静态通过。待人工手测（§5 清单）：升级与合成真的扣库存、装置槽位与扩容、产物直进库存、装置升级只加速、右键四路映射、紫/金卡两行副效果、Buff 页两行。
+
+---
+
 ## 2026-10-20 · v6 静态校验（P1–P12）
 
 - **命令**：`cmd /c ".\.tools\godot\Godot_v4.7.2-stable_win64.exe --headless --path . --check-only --script res://scripts/game.gd & echo EXIT=%ERRORLEVEL%"`（其余脚本逐个同式）
