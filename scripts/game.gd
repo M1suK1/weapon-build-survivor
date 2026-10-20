@@ -223,6 +223,11 @@ var tab_btns: Array = []
 var hand_mid := ""
 var autoplan := false
 var noautoplan := false
+## 烧空后是否自动从库存补料（docs/plan-v5.md §1.2 第 3 条）。
+## 人类默认关：模块烧完就空着，补不补由玩家点；bot / playtest / autoplan 强制开，回归曲线不断。
+## 合成出件、地上捡到、拆卸回退**不受这个开关影响**（前两个永远进库存，见 §1.2 第 1、2 条）。
+var auto_fill := false
+var noautofill := false
 var god := false
 var cheat_arg := ""
 var plan_fix_t := 0.0
@@ -257,6 +262,9 @@ var drag_label: Label = null
 var drag_hl: Panel = null
 var drag_hint: Label = null
 var recycle_btn: Button = null
+## 构筑屏顶部两个按钮：烧空自动补料开关（plan-v5 §1.4）；plan-v5 §1.5 的「保存方案」也挂在这条线上
+var fill_btn: Button = null
+var hud_fill: Label = null
 var slot_rects: Array = []
 var slot_panels: Array = []
 var inv_rows: Array = []
@@ -361,6 +369,12 @@ func _ready() -> void:
 		elif a == "noautoplan":
 			autoplan = false
 			noautoplan = true
+		elif a == "autofill":
+			auto_fill = true
+			noautofill = false
+		elif a == "noautofill":
+			auto_fill = false
+			noautofill = true
 		elif a.begins_with("tab="):
 			tab = int(a.substr(4))
 		elif a == "planmissing":
@@ -396,6 +410,10 @@ func _ready() -> void:
 	# bot 默认开着「自动配置方案」：它不会自己去拖模块，得让补料规则替它决定每格放什么
 	if bot and not noautoplan:
 		autoplan = true
+	# 烧空自动补料：人类默认关（plan-v5 §1.2），自测/自动配置一律强制开，
+	# 否则机器人只会看着模块烧光不补，回归曲线直接断掉
+	if (bot or playtest or autoplan) and not noautofill:
+		auto_fill = true
 	if playtest:
 		# 无头模拟按实时速度跑太慢，放大时间步（步长变粗，数值平衡够用）
 		Engine.time_scale = 8.0
@@ -420,7 +438,8 @@ func _ready() -> void:
 	_use_weapon(0)
 	for i in weapon.slots.size():
 		weapon.slots[i] = _new_module("base")
-		weapon.plan[i] = "base"  # 开局满板基础模块，方案也一起登记，之后烧完会自动补
+		# 开局满板基础模块，方案也一起登记；烧完补不补看 auto_fill（人类默认手动，见 plan-v5 §1.2）
+		weapon.plan[i] = "base"
 	_add_inv("base", 2)
 	devices.append(_new_device())
 	_make_player()
@@ -763,6 +782,10 @@ func _make_hud() -> void:
 	hud_brute.visible = false
 	hud_tip = _label(layer, Vector2(18, 690), 16, Color(0.6, 0.65, 0.75))
 	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   / 控制台   F3 调试   R 重开"
+	# 补料状态（plan-v5 §1.4）：关掉自动补料时常驻一行，免得玩家以为模块消失是 bug
+	hud_fill = _label(layer, Vector2(18, 664), 15, Color(0.62, 0.68, 0.78))
+	hud_fill.text = "补料：手动（烧空不自动补，TAB 里可开自动补料）"
+	hud_fill.visible = not auto_fill
 
 	# 解锁提示（plan-v4 §7.2 第 4 条）：屏幕中上方飘一行，2 秒淡出
 	toast_lbl = _label(layer, Vector2(440, 108), 20, UIKit.C_GOLD)
@@ -848,6 +871,13 @@ func _make_hud() -> void:
 	recycle_btn.position = Vector2(330, 640)
 	recycle_btn.tooltip_text = "把电路板上的模块拖进来：卸下并退回库存，同时清空这一格的方案"
 	build_root.add_child(recycle_btn)
+
+	# 烧空自动补料开关（plan-v5 §1.2/§1.4）：只影响「烧空后从库存补同 id」，
+	# 合成出件与地上捡到永远只进库存，不受这里影响
+	fill_btn = UIKit.button("自动补料：关", Vector2(150, 40), UIKit.C_DIM, 14)
+	fill_btn.position = Vector2(496, 640)
+	fill_btn.pressed.connect(_toggle_auto_fill)
+	build_root.add_child(fill_btn)
 
 	# 拖拽层：幽灵 + 落点高亮 + 出力预览（全部 IGNORE，不抢鼠标）
 	drag_layer = Control.new()
@@ -1023,6 +1053,8 @@ func _toggle_build() -> void:
 	hud_status.visible = not build_root.visible
 	hud_ammo.visible = not build_root.visible
 	hud_tip.visible = not build_root.visible
+	if hud_fill != null:
+		hud_fill.visible = (not build_root.visible) and (not auto_fill)
 	wpanel.visible = not build_root.visible
 	if build_root.visible:
 		_refresh_build()
@@ -1081,7 +1113,9 @@ func _fire(delta: float) -> void:
 			m["left"] = float(m["left"]) - burn
 			if float(m["left"]) <= 0.0:
 				sl[i] = null
-				_refill(i, w)
+				# 自动补料只由 auto_fill 决定（人类默认关：烧完就空着，格子画幽灵框等玩家自己补）
+				if auto_fill:
+					_refill(i, w)
 		var hits := float(targets.size())
 		var per: float = dmg * (1.0 + 0.1 * (hits - 1.0)) / maxf(1.0, hits)
 		# 榴弹炮：主目标吃满，不叠多目标折扣（溅射在下面单独结算）
@@ -2085,7 +2119,7 @@ func _auto_plan_fix(delta: float) -> void:
 		for i in _missing_cells():
 			var want := String(weapon.plan[i])
 			if want != "" and _inv(want) > 0:
-				_refill(i)  # 有料就直接补，不改方案
+				_refill(i, null, true)  # 有料就直接补，不改方案
 				continue
 			var best_id := ""
 			var best_v := _board_total(weapon)
@@ -2105,7 +2139,7 @@ func _auto_plan_fix(delta: float) -> void:
 			if best_id == "":
 				continue
 			weapon.plan[i] = best_id
-			_refill(i)
+			_refill(i, null, true)
 		# 已装但快烧空的格子：只把方案改成「库存里更强」的 id，不立刻顶掉模块。
 		# 等这一格烧空时 _refill 会按新方案补货 —— 既满足「不自动替换已装模块」，
 		# 又不会让机器人永远停在基础模块上。
@@ -2324,8 +2358,12 @@ func _board_total(w = null) -> float:
 	return s
 
 
-## DEBUG
-func _refill(i: int, w = null) -> void:
+## 补料：按这一格的方案（没有方案时按整板增益）从库存补一个模块。
+## `force = true` 是手动路径（点空格、拖拽、bot 修方案）——不受 auto_fill 开关限制；
+## 自动路径（烧空补料）必须让 auto_fill 为真，见 _fire() 与 plan-v5 §1.2。
+func _refill(i: int, w = null, force := false) -> void:
+	if not auto_fill and not force:
+		return
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = ww["slots"]
 	var plan: Array = ww["plan"]
@@ -2366,7 +2404,12 @@ func _board_weapon() -> Dictionary:
 	return best
 
 
-func _install(mid: String, w = null) -> void:
+## `force = true`：手动路径（库存「装到当前武器」），不受 auto_fill 影响。
+## 自动路径（合成出件）只在 auto_fill / bot / autoplan 为真时才会走到这里，见 plan-v5 §1.2。
+func _install(mid: String, w = null, force := false) -> void:
+	if not force and not auto_fill:
+		_add_inv(mid, 1)
+		return
 	# 手动构筑（合成/升级/拾取）默认装到「当前选中的那把」，玩家按 1-9 切枪就能分别喂饱
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = ww["slots"]
@@ -2413,7 +2456,11 @@ func _installed_id(mid: String) -> int:
 	return n
 
 
+## 地上捡到模块（pickup.gd:31）。人类只进库存——直接塞进空格会把玩家的构筑打乱（plan-v5 §1.2 第 2 条）。
 func add_module(mid: String) -> void:
+	if not (autoplan or bot):
+		_add_inv(mid, 1)
+		return
 	var sl: Array = weapon["slots"]
 	for i in sl.size():
 		if sl[i] == null:
@@ -2443,7 +2490,7 @@ func _on_slot_input(event: InputEvent, i: int) -> void:
 	if hand_mid != "":
 		_place_at(i, hand_mid)
 	elif String(weapon.plan[i]) != "" and weapon.slots[i] == null:
-		_refill(i)  # 有方案但缺料：手动点一下等于「再试一次补料」
+		_refill(i, null, true)  # 有方案但缺料：手动点一下等于「再试一次补料」，不受开关限制
 	else:
 		# 点空白格默认什么都不做：装哪个模块是玩家的决定，不该被系统代劳。
 		# 只有自测机器人（bot / playtest）才自动挑一个当前最优的填进去。
@@ -2535,8 +2582,8 @@ func _slot_tip(i: int) -> String:
 	var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
 	if want != "":
 		parts.append("方案：%s%s" % [String(MODULES[want]["name"]),
-			"" if _inv(want) > 0 else "（库存缺料，攒够自动补）"])
-	parts.append("左键：装入手里的模块 / 自动补料　　右键：卸下")
+			"" if _inv(want) > 0 else ("（库存缺料，攒够自动补）" if auto_fill else "（库存缺料：点这一格手动补，或开自动补料）")])
+	parts.append("左键：装入手里的模块 / 手动补料　　右键：卸下")
 	return "\n".join(parts)
 
 
@@ -2664,7 +2711,12 @@ func _craft_tick(delta: float) -> void:
 		d["total"] = 0.0
 		d["paid"] = []
 		crafted[k] = int(crafted.get(k, 0)) + 1
-		_install(k)
+		# 人类：产物只进库存，装到哪一格是玩家的决定（plan-v5 §1.2 第 1 条，没有开关）；
+		# bot / autoplan：保持自动装板，回归曲线不断
+		if autoplan or bot:
+			_install(k)
+		else:
+			_add_inv(k, 1)
 		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
 		if bool(d.get("auto", false)):
 			if not try_craft(k, devices.find(d)):
@@ -3062,6 +3114,7 @@ func _refresh_build() -> void:
 	if build_text == null or dead:
 		return
 	_rebuild_board()
+	_refresh_fill_btn()
 	var lines: Array = []
 	lines.append("构筑（暂停中）      TAB / ESC / 右键 / ← 返回")
 	lines.append("")
@@ -3095,7 +3148,8 @@ func _refresh_build() -> void:
 		var mn: Array = []
 		for i in miss:
 			mn.append(String(MODULES[String(weapon.plan[i])]["name"]))
-		info.append("缺料 %d 格：%s（攒够自动补上）" % [miss.size(), " / ".join(mn)])
+		info.append("缺料 %d 格：%s（%s）" % [miss.size(), " / ".join(mn),
+			"攒够会自动补" if auto_fill else "点格子手动补，或开自动补料"])
 	build_info.text = "\n".join(info)
 	_rebuild_tab()
 	_highlight_tab()
@@ -3109,6 +3163,23 @@ func _set_tab(i: int) -> void:
 func _highlight_tab() -> void:
 	for i in tab_btns.size():
 		(tab_btns[i] as Button).modulate = Color(1, 1, 1) if i == tab else Color(0.58, 0.63, 0.72)
+
+
+## 构筑屏「自动补料」开关（plan-v5 §1.2 第 3 条 / §1.4）
+func _toggle_auto_fill() -> void:
+	auto_fill = not auto_fill
+	_refresh_fill_btn()
+	if hud_fill != null:
+		hud_fill.visible = not auto_fill
+	_refresh_build()
+
+
+func _refresh_fill_btn() -> void:
+	if fill_btn == null:
+		return
+	fill_btn.text = "自动补料：开" if auto_fill else "自动补料：关"
+	fill_btn.tooltip_text = "开：模块烧空后自动从库存补同一个模块\n关：烧完就空着，格子显示半透明幽灵，攒够料自己点一下补\n只影响烧空补料 —— 合成产物、地上捡到的模块永远先进库存"
+	UIKit.tint_button(fill_btn, UIKit.C_GOLD if auto_fill else UIKit.C_DIM)
 
 
 ## 右栏标签页内容。每次重建（行数不大，重建比增量更新简单可靠）
@@ -3380,7 +3451,7 @@ func _install_from_inv(mid: String) -> void:
 	if _inv(mid) <= 0:
 		return
 	_take_inv(mid, 1)
-	_install(mid)
+	_install(mid, null, true)  # 手动路径：不受 auto_fill 开关限制
 	_refresh_build()
 
 
@@ -3433,9 +3504,11 @@ func _rebuild_board() -> void:
 			sb.bg_color = Color(col.r, col.g, col.b, 0.10)
 		var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
 		if m == null and want != "":
-			# 有方案但缺料：红框，把「缺什么」写在格子上
-			sb.border_color = UIKit.C_RED
-			sb.bg_color = Color(0.35, 0.10, 0.12, 0.35)
+			# 有方案但缺料（plan-v5 §1.4）：灰虚线般的细边 + 暗底，模块名半透明写在格子上，
+			# 表示「这一格按方案应该有 X，等库存补」——不再用红色，红色留给真错误
+			sb.border_color = Color(0.45, 0.50, 0.60, 0.85)
+			sb.set_border_width_all(1)
+			sb.bg_color = Color(0.16, 0.18, 0.24, 0.32)
 		panel.add_theme_stylebox_override("panel", sb)
 		panel.mouse_filter = Control.MOUSE_FILTER_STOP
 		panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -3453,8 +3526,10 @@ func _rebuild_board() -> void:
 		name_l.add_theme_font_size_override("font_size", 16)
 		name_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		if m == null and want != "":
-			name_l.text = "缺 %s" % String(MODULES[want]["name"])
-			name_l.add_theme_color_override("font_color", UIKit.C_RED)
+			# 幽灵框：半透明的方案模块名，一眼看出这格缺什么
+			var wcol: Color = MODULES[want]["color"]
+			name_l.text = String(MODULES[want]["name"])
+			name_l.add_theme_color_override("font_color", Color(wcol.r, wcol.g, wcol.b, 0.45))
 		elif m == null:
 			name_l.text = "%d 空" % (i + 1)
 			name_l.add_theme_color_override("font_color", Color(0.42, 0.46, 0.56))
@@ -3492,6 +3567,9 @@ func _rebuild_board() -> void:
 		use_l.add_theme_color_override("font_color", Color(0.55, 0.62, 0.72))
 		use_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		use_l.text = "" if m == null else "%d/%d" % [int(m.left), int(m.max)]
+		if m == null and want != "":
+			use_l.text = "缺料"
+			use_l.add_theme_color_override("font_color", Color(0.62, 0.68, 0.78, 0.75))
 		panel.add_child(use_l)
 
 
@@ -3685,7 +3763,7 @@ func _drag_click_fallback() -> void:
 	if String(drag["src"]) == "slot":
 		var i := int(drag["from"])
 		if String(weapon.plan[i]) != "" and weapon.slots[i] == null:
-			_refill(i)
+			_refill(i, null, true)
 			_refresh_build()
 
 
@@ -4381,9 +4459,9 @@ func _pt_log() -> void:
 	for i in (bw["plan"] as Array).size():
 		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
 			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d fill=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
-		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
+		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss, 1 if auto_fill else 0,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),

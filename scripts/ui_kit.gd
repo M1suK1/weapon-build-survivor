@@ -54,6 +54,16 @@ static func button(text: String, size: Vector2, accent: Color = C_BLUE, font_siz
 	return b
 
 
+## 换色：把已经建好的按钮重刷一套 accent（开关类按钮用「金色 = 开、灰色 = 关」）
+static func tint_button(b: Button, accent: Color) -> void:
+	if b == null:
+		return
+	b.add_theme_stylebox_override("normal", _sb(C_PANEL, accent * Color(1, 1, 1, 0.55), 1, 8))
+	b.add_theme_stylebox_override("hover", _sb(C_PANEL_HOVER, accent, 2, 8))
+	b.add_theme_stylebox_override("pressed", _sb(accent * Color(1, 1, 1, 0.25), accent, 2, 8))
+	b.add_theme_stylebox_override("focus", _sb(C_PANEL_HOVER, accent, 2, 8))
+
+
 ## 小号方形图标按钮（× / ← / 锁）
 static func icon_button(glyph: String, side: float = 30.0, accent: Color = C_DIM) -> Button:
 	var b := button(glyph, Vector2(side, side), accent, 18)
