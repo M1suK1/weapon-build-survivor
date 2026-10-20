@@ -3235,7 +3235,8 @@ func _buff_tip_data(id: String) -> Dictionary:
 	else:
 		lines.append("[color=#ffd76a]下一级：%s[/color]" % String(d.get("desc", "")))
 	lines.append("[color=#8fa0b8]同族 4 个品质各自独立升级，白/蓝/紫/金可同时持有[/color]")
-	return {"title": "%s  Lv%d→%d" % [String(d.get("name", id)), lv, mini(lv + 1, mx)], "lines": lines, "color": col}
+	var head := "· 满级" if lv >= mx else "Lv%d→%d" % [lv, mini(lv + 1, mx)]
+	return {"title": "%s  %s" % [String(d.get("name", id)), head], "lines": lines, "color": col}
 
 
 ## 配方卡的悬浮说明：模块效果 + 合成消耗 + 前置条件（unlock 时讲解锁条件）
