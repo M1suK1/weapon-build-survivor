@@ -276,6 +276,9 @@ var _perf_report := 0.0
 ## 不再每帧 get_nodes_in_group("enemy") / 每次查询遍历全场。
 var enemies: Array = []
 var kind_n := {}
+## 本波配额序列与读指针（docs/plan-v4.md §5.2）
+var kind_seq: Array = []
+var kind_seq_i := 0
 ## 集中渲染：所有敌人由这一个 Node2D 一次画完（§4.2 A）
 var enemy_renderer: Node2D = null
 var roll_test := false
@@ -429,6 +432,7 @@ func _ready() -> void:
 	# 自测里自动配置方案默认开着：否则「只填空槽」的规则会让机器人永远停在基础模块上
 	if (playtest or bot) and not noautoplan:
 		autoplan = true
+	_build_kind_seq()
 	_refresh_hud()
 	_test_banner()
 
@@ -1624,6 +1628,73 @@ func _plan() -> Dictionary:
 	return WAVE_PLANS[(wave - 1) % WAVE_PLANS.size()]
 
 
+## 主导种类（权重最大的那个）：配额序列里「陪衬」的定义
+func _dominant_kind() -> String:
+	var plan := _plan()
+	var best := ""
+	var bw := -1.0
+	for k in plan["kinds"]:
+		var w := float(plan["kinds"][k])
+		if w > bw:
+			bw = w
+			best = String(k)
+	return best
+
+
+## 本波配额序列（docs/plan-v4.md §5.2）：
+## 长度 ≈ 本波预计生成数，按权重抽种类后，**每 6 只保证至少 1 只不是主导**；
+## 再在每组 6 只内部打乱，既不会整波只有一种，同 seed 也完全可复现。
+func _build_kind_seq() -> void:
+	kind_seq.clear()
+	kind_seq_i = 0
+	var plan := _plan()
+	var kinds: Dictionary = plan["kinds"]
+	var dom := _dominant_kind()
+	var total := 0.0
+	for k in kinds:
+		total += float(kinds[k])
+	var n := clampi(int(ceil(_spawn_rate() * WAVE_SEC)), 24, 1200)
+	var seq: Array = []
+	for i in n:
+		var r := rng.randf() * total
+		var pick := dom
+		for k in kinds:
+			r -= float(kinds[k])
+			if r <= 0.0:
+				pick = String(k)
+				break
+		seq.append(pick)
+	# 每 6 只一组：组里全是主导就把最后一只换成陪衬（按权重轮转，避免总是同一种）
+	var others: Array = []
+	for k in kinds:
+		if String(k) != dom:
+			others.append(String(k))
+	if not others.is_empty():
+		var oi := 0
+		for g in range(0, n, 6):
+			var endi := mini(g + 6, n)
+			var has := false
+			for j in range(g, endi):
+				if String(seq[j]) != dom:
+					has = true
+					break
+			if has:
+				continue
+			# 按陪衬权重轮转（runner/shooter/rock 交替出现）
+			var kk := String(others[oi % others.size()])
+			oi += 1
+			seq[endi - 1] = kk
+	# 组内打乱：位置随机，但「每 6 只至少 1 只陪衬」的保证还在
+	for g in range(0, n, 6):
+		var endi := mini(g + 6, n)
+		for i in range(endi - 1, g, -1):
+			var j := g + rng.randi() % (i - g + 1)
+			var tmp = seq[i]
+			seq[i] = seq[j]
+			seq[j] = tmp
+	kind_seq = seq
+
+
 ## 本波敌人的平均血量倍率（用来把「总血量预算」换算成刷怪速度）
 func _plan_avg_mult() -> float:
 	var plan := _plan()
@@ -1647,21 +1718,15 @@ func _spawn_rate() -> float:
 
 
 func _pick_kind() -> String:
-	var plan := _plan()
-	# 射手要占住「射程外打你」的位置，数量一多就没法玩了：同屏上限 10
-	if _count_kind("shooter") >= SHOOTER_MAX:
-		for k in plan["kinds"]:
-			if k != "shooter":
-				return k
-	var total := 0.0
-	for k in plan["kinds"]:
-		total += float(plan["kinds"][k])
-	var r := rng.randf() * total
-	for k in plan["kinds"]:
-		r -= float(plan["kinds"][k])
-		if r <= 0.0:
-			return k
-	return "flood"
+	# 配额序列优先（docs/plan-v4.md §5.2）：保证每 6 只至少 1 只不是主导
+	if kind_seq_i >= kind_seq.size():
+		_build_kind_seq()
+	var kind := String(kind_seq[kind_seq_i])
+	kind_seq_i += 1
+	# 射手要占住「射程外打你」的位置，数量一多就没法玩了：同屏上限 5
+	if kind == "shooter" and _count_kind("shooter") >= SHOOTER_MAX:
+		kind = _dominant_kind()
+	return kind
 
 
 func _count_kind(k: String) -> int:
@@ -1671,6 +1736,8 @@ func _count_kind(k: String) -> int:
 ## 每波开始：精英保底（wave 4 首只，之后每 6 波一只，同屏上限 3）
 ## 同时在地图上随机扔一个宝箱，让玩家有理由离开中心区域。
 func _on_wave_start() -> void:
+	# 新波次换编成：重算本波配额序列（每 6 只至少 1 只陪衬）
+	_build_kind_seq()
 	_spawn_chest_random()
 	if wave < ELITE_FIRST_WAVE:
 		return
@@ -2859,7 +2926,7 @@ func _refresh_hud() -> void:
 	if hud_status == null:
 		return
 	hud_status.text = ("GOD    " if god else "") + "HP %d/%d    波次 %d · %s    时间 %s    等级 %d" % [
-		int(maxf(hp, 0.0)), int(max_hp), wave, _plan()["name"], _fmt_time(elapsed), level
+		int(maxf(hp, 0.0)), int(max_hp), wave, _plan()["label"], _fmt_time(elapsed), level
 	]
 	var net := cur_drop() - cur_burn()
 	var sign_s := "+" if net >= 0.0 else ""
@@ -4276,13 +4343,13 @@ func _pt_log() -> void:
 	for i in (bw["plan"] as Array).size():
 		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
 			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d" % [
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d kinds=f%d/r%d/rk%d/s%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
-		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"),
+		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"), _count_kind("flood"), _count_kind("runner"), _count_kind("rock"), _count_kind("shooter"),
 	])
 
 
@@ -4399,6 +4466,10 @@ func _run_rolltest(n: int = 300) -> void:
 				"倒挂" if bad == 1 else "-"])
 		print("")
 	print("总倒挂次数 %d（必须为 0）" % total_bad)
+
+
+# ============================================================================
+# 16. 开发控制台（docs/plan-v4.md §1）
 
 
 # ============================================================================

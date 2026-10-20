@@ -1,4 +1,4 @@
-extends RefCounted
+﻿extends RefCounted
 ## 敌人与刷怪数据表（纯数据，零逻辑）。
 ##
 ## 谁在用：`scripts/game.gd` 的刷怪 / 波次 / 编队 / 精英 / 重装变种 / 掉落，
@@ -71,11 +71,16 @@ const BRUTE_TINT_WEIGHT := 0.55
 ## 波次编成：coeff = 总血量预算系数（1.0 = 涌潮基准），kinds = 相对权重。
 ## 每 5 波循环一次，所以玩家能从「这波怪变多了/变硬了」读出编成变化。
 const WAVE_PLANS := [
-	{"name": "涌潮", "coeff": 1.00, "kinds": {"flood": 1.0}},
-	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 5.0, "runner": 3.0, "shooter": 2.0}},
-	{"name": "疾行", "coeff": 1.40, "kinds": {"runner": 1.0}},
-	{"name": "磐石", "coeff": 0.60, "kinds": {"rock": 1.0}},
-	{"name": "混编", "coeff": 0.80, "kinds": {"flood": 4.0, "rock": 2.0, "runner": 2.0, "shooter": 1.0}},
+	{"name": "涌潮", "label": "涌潮（+混编）", "coeff": 1.00,
+		"kinds": {"flood": 0.70, "runner": 0.15, "shooter": 0.10, "rock": 0.05}},
+	{"name": "混编", "label": "混编", "coeff": 0.80,
+		"kinds": {"flood": 0.40, "runner": 0.25, "shooter": 0.20, "rock": 0.15}},
+	{"name": "疾行", "label": "疾行（+混编）", "coeff": 1.40,
+		"kinds": {"runner": 0.65, "flood": 0.20, "shooter": 0.10, "rock": 0.05}},
+	{"name": "磐石", "label": "磐石（+混编）", "coeff": 0.60,
+		"kinds": {"rock": 0.60, "flood": 0.25, "shooter": 0.10, "runner": 0.05}},
+	{"name": "混编", "label": "混编", "coeff": 0.80,
+		"kinds": {"flood": 0.40, "runner": 0.25, "shooter": 0.20, "rock": 0.15}},
 ]
 
 ## 生成编队：单点 / 一团 / 弧线 / 一圈。同样的人数，排布不同，压迫感完全不同。

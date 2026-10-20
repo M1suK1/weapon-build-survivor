@@ -127,3 +127,20 @@
 - 自测：`boardtest` → `power=100.0`；`playtest bot pt=300` → `t=300 wave=8 lvl=28 kills=781 dps=14.2 need=11.9 inv=473 dead=false`（V5 时 `dps=23.5`：重装吃掉大量伤害，符合「打不死、堵路」的定位）。
 - 截图：`docs/screenshots/v6-brute.png`（重装 3：玩家身边两个近白描边的大血牛）、`v6-brute-dbg.png`（F3 面板显示模板与上限）。
 - 待观察（plan §9 风险）：抽到 shooter 模板的重装会风筝，和「拦路」定位相反；先留池观察，不好就砍成 flood/rock。
+
+## plan-v4 V7 波次配比（主导 + 陪衬）
+
+- 命令：`-- quotatest`（临时自检，验完删除）＋`-- playtest bot pt=300`＋`-- boardtest`
+- 改动：
+  - `WAVE_PLANS` 加 `label`（涌潮（+混编）/ 混编 / 疾行（+混编）/ 磐石（+混编）/ 混编），`kinds` 换成「主导 70/65/60% + 三种陪衬」，coeff 不动
+  - 新增 `_build_kind_seq(wave)`：按权重一次排满 40 只的洗牌序列（前 20 只覆盖全部 4 种、每 6 只至少 1 只非主导），`_kind_seq` 按序号取，取完重建；`_pick_kind` 优先交棒给 `_brute_roll`（重装 ≤50）
+  - HUD 波次名改 `_plan()["label"]`；`_pt_log` 末尾加 `kinds=f/r/rk/s` 实时计数
+- 关键输出（`QUOTATEST` 前 20 只分布，40 只整波统计）：
+  - 涌潮 w1/w6：`f=14 r=3 rk=0 s=3` / `f=13 r=3 s=4`，4 种，主导 69.0% / 67.2%
+  - 疾行 w3/w8：`r=13 f=3 s=4` / `r=12 s=4 f=4`，4 种，主导 67.5% / 62.4%
+  - 磐石 w4/w9：`rk=11 f=3 s=4 r=2` / `rk=12 f=5 s=2 r=1`，4 种，主导 55.2% / 60.9%
+  - 混编 w2/w5/w7/w10：`f=8 r=5 s=5 rk=2` / `f=10 r=3 s=4 rk=3` / `s=10 f=7 r=2 rk=1` / `f=10 s=6 r=2 rk=2`，主导 36%~49%
+  - 玩法回归：`playtest bot pt=300` → `t=300 wave=8 lvl=27 kills=770 dps=23.6 need=21.2 inv=436 dead=false`（V6 时 kills=781 / dps=14.2）；`kinds=` 行显示 wave 1 得 `f4/r2/rk0/s1`、wave 8 得 `f10/r22/rk10/s2`，四类同时在场
+- 说明：§5.4 写的「主导占比 55%–75%」只适用三个主题波；混编按表就是 flood 40%，属设计而非偏差
+- 事故与恢复：删临时 `quotatest` 时用 `LastIndexOf` 找函数前的 banner，结果截到了 §16 控制台的 banner，把整个控制台分节删掉（4901 → 4472 行）。恢复办法：`git show HEAD:scripts/game.gd` 取出 §16 原样（428 行）追加回文件尾，再 parse/boardtest/playtest 全绿。教训：删追加的临时函数不要按 banner 定位，直接按 `func _run_xxx` 截到文件尾
+- 截图：`docs/screenshots/v7-wave.png`（波次名「涌潮（+混编）」+ 同屏 flood/runner/rock/shooter 四种造型）
