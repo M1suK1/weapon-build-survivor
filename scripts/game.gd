@@ -3962,16 +3962,19 @@ func _buff_lv(fam: String, q: String) -> int:
 
 
 ## 按效果键汇总「加法量」：遍历已持有变体的 fx，Σ 等级 × 每级量（plan-v7 §4.2）。
-## 整数族（带 thr）只走 _buff_int，这里跳过，免得「目标 +1」被当成 +1 点伤害。
+## 整数族（带 thr）里**阈值那条 fx** 只由 _buff_int 结算，这里必须跳过，
+## 但同变体的副效果（连续量，例如「目标·紫」的伤害 +4%/级）要照常累加。
 func _buff_sum(key: String) -> float:
 	var s := 0.0
 	for b in _buff_list():
 		var d: Dictionary = BUFFS[String(b["id"])]
-		if int(d.get("thr", 0)) > 0:
-			continue
+		var int_fam := int(d.get("thr", 0)) > 0
 		var lv := float(int(b["lv"]))
 		for e in (d["fx"] as Array):
-			if String(e["k"]) == key:
+			var k := String(e["k"])
+			if int_fam and BuffDB.INT_KEYS.has(k):
+				continue
+			if k == key:
 				s += float(e["v"]) * lv
 	return s
 
@@ -3981,11 +3984,13 @@ func _buff_mul(key: String) -> float:
 	var m := 1.0
 	for b in _buff_list():
 		var d: Dictionary = BUFFS[String(b["id"])]
-		if int(d.get("thr", 0)) > 0:
-			continue
+		var int_fam := int(d.get("thr", 0)) > 0
 		var lv := float(int(b["lv"]))
 		for e in (d["fx"] as Array):
-			if String(e["k"]) == key:
+			var k := String(e["k"])
+			if int_fam and BuffDB.INT_KEYS.has(k):
+				continue
+			if k == key:
 				m *= pow(1.0 + float(e["v"]), lv)
 	var cap := float(BuffDB.CAPS.get(key, 1.0))
 	if m < 1.0:

@@ -29,6 +29,10 @@ const CAPS := {
 	"rate": 0.45, "power": 0.80, "craft": 0.50, "device": 0.50, "move": 0.60,
 }
 
+## 整数族（到阈值才 +1）的效果键：这类条目只由 _buff_int 读，连续量汇总必须跳过；
+## 但同一变体上挂的**副效果**（连续量，比如「目标·紫」的伤害）要照常算进去。
+const INT_KEYS := ["target", "pierce", "petal", "ricochet", "shield", "revive"]
+
 const FAMILIES := {
 	# ---------------- 攻击 ----------------
 	"rate": {
