@@ -180,6 +180,9 @@ var wpanel: Label
 var build_root: Control
 var pick_root: Control
 var build_text: Label
+var build_top: Label = null
+var build_legend: Label = null
+var build_foot: Label = null
 var board_root: Control
 var build_info: Label
 var flash: ColorRect
@@ -1013,43 +1016,72 @@ func _make_hud() -> void:
 	build_back_btn = UIKit.back_button(build_root, "返回战斗", _toggle_build, Vector2(24, 14))
 
 	build_text = Label.new()
-	build_text.position = Vector2(80, 60)
-	build_text.add_theme_font_size_override("font_size", 19)
+	build_text.position = Vector2(24, 64)
+	build_text.size = Vector2(560, 170)
+	build_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	build_text.add_theme_font_size_override("font_size", 17)
 	build_text.add_theme_color_override("font_color", Color(0.88, 0.92, 1.0))
 	build_root.add_child(build_text)
 
+	# 顶栏标题与按键提示（plan-v6 §8.2）：单独一个 Label，避免和左栏内容互相挤
+	build_top = Label.new()
+	build_top.position = Vector2(220, 18)
+	build_top.size = Vector2(700, 26)
+	build_top.add_theme_font_size_override("font_size", 18)
+	build_top.add_theme_color_override("font_color", Color(0.62, 0.70, 0.86))
+	build_root.add_child(build_top)
+
+	# 左栏底部图例
+	build_legend = Label.new()
+	build_legend.position = Vector2(24, 588)
+	build_legend.size = Vector2(560, 54)
+	build_legend.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	build_legend.add_theme_font_size_override("font_size", 13)
+	build_legend.add_theme_color_override("font_color", Color(0.52, 0.60, 0.74))
+	build_legend.text = "左键放模块 ｜ 右键：格子里=卸下销毁，别处=返回 ｜ 拖拽：板内互换保留寿命，拖到「卸下」= 销毁\n金色细边 = 草稿没保存，点「保存方案」才生效"
+	build_root.add_child(build_legend)
+
+	# 底部提示行（不压按钮，plan-v6 §8.2）
+	build_foot = Label.new()
+	build_foot.position = Vector2(24, 694)
+	build_foot.size = Vector2(1230, 20)
+	build_foot.add_theme_font_size_override("font_size", 13)
+	build_foot.add_theme_color_override("font_color", Color(0.48, 0.55, 0.68))
+	build_foot.text = "1-9 换武器　F 开关武器　U 升级　Q/E 选配方　C 合成　X 造装置　TAB 返回战斗"
+	build_root.add_child(build_foot)
+
 	board_root = Control.new()
-	board_root.position = Vector2(100, 185)
+	board_root.position = Vector2(120, 300)
 	build_root.add_child(board_root)
 
 	# 卸载区：把电路板上的模块拖到这里 = 卸下并销毁（plan-v5 §4：拆卸不返还，防「拆下再装」白嫖寿命）
 	recycle_btn = UIKit.button("⌫ 拖到此处卸下", Vector2(150, 40), UIKit.C_RED, 14)
-	recycle_btn.position = Vector2(330, 640)
+	recycle_btn.position = Vector2(24, 648)
 	recycle_btn.tooltip_text = "把电路板上的模块拖进来：卸下即销毁（寿命不返还），同时清空这一格的草稿方案"
 	build_root.add_child(recycle_btn)
 
 	# 烧空自动补料开关（plan-v5 §1.2/§1.4）：只影响「烧空后从库存补同 id」，
 	# 合成出件与地上捡到永远只进库存，不受这里影响
 	fill_btn = UIKit.button("自动补料：关", Vector2(150, 40), UIKit.C_DIM, 14)
-	fill_btn.position = Vector2(660, 640)
+	fill_btn.position = Vector2(348, 648)
 	fill_btn.pressed.connect(_toggle_auto_fill)
 	build_root.add_child(fill_btn)
 
 	# 方案草稿 / 生效（plan-v5 §1.5）：保存方案 = 把草稿写进生效方案，之后自动补料才按新方案补
 	save_btn = UIKit.button("方案已同步", Vector2(150, 40), UIKit.C_DIM, 14)
-	save_btn.position = Vector2(496, 640)
+	save_btn.position = Vector2(186, 648)
 	save_btn.pressed.connect(_save_plan)
 	build_root.add_child(save_btn)
 
 	revert_btn = UIKit.button("还原", Vector2(80, 40), UIKit.C_DIM, 14)
-	revert_btn.position = Vector2(816, 640)
+	revert_btn.position = Vector2(510, 648)
 	revert_btn.tooltip_text = "丢弃草稿：把每格的草稿改回生效方案。板面模块不动，只改方案。"
 	revert_btn.pressed.connect(_revert_plan)
 	build_root.add_child(revert_btn)
 
 	# 自动升级开关（plan-v6 §3.3）：库存够就自动扣料。选卡仍由玩家点，不替人做构筑决策
-	level_btn = UIKit.button("自动升级：关", Vector2(150, 40), UIKit.C_DIM, 14)
-	level_btn.position = Vector2(24, 640)
+	level_btn = UIKit.button("自动升级：关", Vector2(130, 40), UIKit.C_DIM, 14)
+	level_btn.position = Vector2(602, 648)
 	level_btn.pressed.connect(_toggle_auto_level)
 	build_root.add_child(level_btn)
 
@@ -1087,24 +1119,26 @@ func _make_hud() -> void:
 	drag_layer.add_child(drag_hint)
 
 	build_info = Label.new()
-	build_info.position = Vector2(660, 168)
-	build_info.add_theme_font_size_override("font_size", 16)
+	build_info.position = Vector2(632, 60)
+	build_info.size = Vector2(600, 150)
+	build_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	build_info.add_theme_font_size_override("font_size", 14)
 	build_info.add_theme_color_override("font_color", Color(0.82, 0.88, 0.98))
 	build_root.add_child(build_info)
 
 	# 右栏三标签页：库存 / 配方 / 装置（见 docs/plan-ui-v1.md §2.1）
 	tab_bar = Control.new()
-	tab_bar.position = Vector2(660, 248)
+	tab_bar.position = Vector2(632, 214)
 	build_root.add_child(tab_bar)
 	var tab_names := ["库存", "配方", "装置"]
 	for i in 3:
-		var tb := UIKit.button(tab_names[i], Vector2(88, 30), UIKit.C_BLUE, 15)
-		tb.position = Vector2(i * 96, 0)
+		var tb := UIKit.button(tab_names[i], Vector2(96, 32), UIKit.C_BLUE, 15)
+		tb.position = Vector2(i * 104, 0)
 		tb.pressed.connect(_set_tab.bind(i))
 		tab_bar.add_child(tb)
 		tab_btns.append(tb)
 	tab_body = Control.new()
-	tab_body.position = Vector2(660, 290)
+	tab_body.position = Vector2(632, 256)
 	build_root.add_child(tab_body)
 
 	flash = ColorRect.new()
@@ -4307,7 +4341,7 @@ func _refresh_build() -> void:
 	var rng_now := float(weapon["range"]) + float(mo_now["range"])
 	var iv_now := _iv_of(weapon, mo_now)
 	var tg_now := int(weapon["targets"]) + int(mo_now["targets"]) if int(weapon["targets"]) > 0 else int(weapon["targets"])
-	lines.append("构筑（暂停中）      TAB / ESC / ← 返回　　右键：槽位=卸下，别处=返回")
+	build_top.text = "构筑（暂停中）"
 	lines.append("")
 	# 数值全部带满 buff（plan-v6 §10.6）：基础 → 当前，玩家能直接看到 buff 在涨
 	lines.append("武器  %s·%s·%d 槽    射程 %s    间隔 %s    目标 %s    单发 %s    当前 DPS %.1f" % [
@@ -4357,7 +4391,7 @@ func _refresh_build() -> void:
 				fname[fam] = String(b["fam_name"])
 		var shown := 0
 		for fam2 in fams:
-			if shown >= 8:
+			if shown >= 3:
 				info.append("buff  …还有 %d 族（F3 面板里看全）" % (fams.size() - shown))
 				break
 			shown += 1
@@ -4535,9 +4569,9 @@ func _rebuild_tab_recipe() -> void:
 			], Color(d.get("color", Color(0.7, 0.75, 0.85))), "合成",
 				_craft_from_tab.bind(mid2), bool(r["ok"]), String(st2["state"]), "", Callable(), _recipe_tip_data.bind(mid2))
 			y += 34.0
-			if y > 300.0:
+			if y > 330.0:
 				break
-		if y > 300.0:
+		if y > 330.0:
 			break
 	if y == 0.0:
 		_label(tab_body, Vector2(0, 6), 16, UIKit.C_DIM).text = "还没有解锁任何配方（升级时选第 4 张配方卡）"
