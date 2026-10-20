@@ -3189,8 +3189,9 @@ func _recipe_tip_data(mid: String, unlock := false) -> Dictionary:
 		lines.append("[color=#ffd479]只对 %s 生效（合成前要有这把武器）[/color]" % String(WEAPONS[b]["name"]))
 	if unlock:
 		lines.append("[color=#9fe3c8]选它 = 解锁这个配方，之后能反复合成[/color]")
-	lines.append("合成消耗：%d 个第 %d 阶模块 · 约 %.0f 秒" % [
-		int(CRAFT_COST[t]), t - 1, float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))])
+	lines.append("合成消耗：%d 个 %s · 约 %.0f 秒" % [
+		int(CRAFT_COST[t]), String(MODULES[String(d.get("prev", "base"))]["name"]),
+		float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))])
 	var st := recipe_state(mid)
 	lines.append("[color=#9fb2c9]%s[/color]" % String(st["state"]))
 	return {"title": "配方 · %s%s" % [String(d["name"]), "（解锁）" if unlock else ""], "lines": lines, "color": Color(0.55, 0.95, 0.72)}
@@ -3404,7 +3405,7 @@ func _craft_tick(delta: float) -> void:
 				try_craft("", devices.find(d))
 
 
-## 该配方当前能不能开：绑定武器、是否已解锁、材料
+## 该配方当前能不能开：绑定武器、是否已解锁、材料（按族吃前置模块，plan-v5 §11.4）
 func recipe_state(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var t := int(d["tier"])
@@ -3414,8 +3415,10 @@ func recipe_state(mid: String) -> Dictionary:
 		for w in weapons:
 			if String(w["id"]) == bind:
 				has_bind = true
+	var prev := String(d.get("prev", ""))
 	var cost := int(CRAFT_COST[t])
-	var have := _inv_tier(t - 1)
+	var have := _inv(prev) if prev != "" else 0
+	var pname := String(MODULES[prev]["name"]) if MODULES.has(prev) else "料"
 	var st := "可合成"
 	var ok := true
 	if not recipe_unlocked.has(mid):
@@ -3426,8 +3429,8 @@ func recipe_state(mid: String) -> Dictionary:
 		st = "需要%s" % String(WEAPONS[bind]["name"])
 	elif have < cost:
 		ok = false
-		st = "需 %d 个 %d 阶料" % [cost, t - 1]
-	return {"ok": ok, "state": st, "cost": cost, "tier": t, "level": 0}
+		st = "需 %d 个%s（库存 %d）" % [cost, pname, have]
+	return {"ok": ok, "state": st, "cost": cost, "tier": t, "prev": prev, "have": have, "level": 0}
 
 
 ## 合成吃「库存」（槽位是工作区，绝不能被合成顺手拆掉）。
@@ -3451,13 +3454,14 @@ func try_craft(mid: String = "", idx: int = -1) -> bool:
 		return false
 	var t := int(st["tier"])
 	var need := int(st["cost"])
-	# 记录实际扣掉的模块 id，取消合成时按原样退还（种类可能混着，例如 2 个基础 1 个加法）
+	var prev := String(st["prev"])
+	# 记录实际扣掉的模块 id，取消合成时按原样退还（按族吃料：同一族的前置件）
 	var paid: Array = []
 	for i in need:
-		var got := _take_one_of_tier(t - 1)
-		if got == "":
+		if prev == "" or _inv(prev) <= 0:
 			break
-		paid.append(got)
+		_add_inv(prev, -1)
+		paid.append(prev)
 	if paid.size() < need:
 		for p in paid:
 			_add_inv(String(p), 1)
@@ -3468,18 +3472,6 @@ func try_craft(mid: String = "", idx: int = -1) -> bool:
 	devices[idx]["left"] = dur
 	devices[idx]["paid"] = paid
 	return true
-
-
-## 从库存里取走一个指定阶的模块，返回它的 id（取不到返回 ""）
-func _take_one_of_tier(t: int) -> String:
-	var best := inv.richest_of_tier(t)
-	var best_n := 0
-	if best != "":
-		best_n = _inv(best)
-	if best == "":
-		return ""
-	_add_inv(best, -1)
-	return best
 
 
 ## 取消某台装置的合成：材料全额退还
@@ -3627,15 +3619,25 @@ func _roll_offer() -> void:
 
 ## 配方卡：抽一个「还没解锁」的配方（特化配方只在拥有对应武器时进池）。
 ## 全解锁 / 没有匹配武器时退化成模块礼包（unlock=false），保证四选一永远 4 张。
-func _roll_recipe_card() -> Dictionary:
+## 解锁卡只从「前沿」里抽（plan-v5 §11.4）：前置已解锁、自身还没解锁；
+## 特化叶还要对应武器在手（否则解锁了也合不出来）
+func _recipe_frontier() -> Array:
 	var pool: Array = []
 	for mid in MOD_ORDER:
 		if recipe_unlocked.has(mid):
 			continue
 		var d: Dictionary = MODULES[mid]
+		var prev := String(d.get("prev", ""))
+		if prev != "" and prev != "base" and not recipe_unlocked.has(prev):
+			continue
 		if not _has_weapon_bind(String(d.get("bind", ""))):
 			continue
 		pool.append(mid)
+	return pool
+
+
+func _roll_recipe_card() -> Dictionary:
+	var pool := _recipe_frontier()
 	if pool.is_empty():
 		return {"kind": "recipe", "id": "add", "unlock": false}
 	var mid2: String = String(pool[rng.randi_range(0, pool.size() - 1)])
@@ -3969,24 +3971,46 @@ func _rebuild_tab_inv() -> void:
 		_label(tab_body, Vector2(0, y + 2), 15, UIKit.C_DIM).text = "还有 %d 种模块没显示（先合成/升级消化掉）" % rest
 
 
+## 配方页：按「族」分组（plan-v5 §11.4），每族一行标题 + 该族已解锁的条目
+## 族内顺序就是科技树顺序（T2 → T3 → T4），锁着的不占行，只在底部提示还有几个没解锁
+const MOD_FAM_NAME := {"net": "网络主干", "edge": "锐化", "cool": "冷却", "belt": "弹链",
+	"pierce": "穿甲", "cover": "覆盖", "sustain": "维持", "spec": "特化"}
+const MOD_FAM_ORDER := ["net", "edge", "cool", "belt", "pierce", "cover", "sustain", "spec"]
+
+
 func _rebuild_tab_recipe() -> void:
 	var y := 0.0
 	var locked := 0
-	for k in MOD_ORDER:
-		var mid := String(k)
-		var st := recipe_state(mid)
-		var d: Dictionary = MODULES[mid]
-		var t := int(d["tier"])
-		var sec := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
-		var ok := bool(st["ok"])
-		if String(st["state"]).begins_with("未解锁"):
-			locked += 1
+	for fam in MOD_FAM_ORDER:
+		var rows: Array = []
+		for k in MOD_ORDER:
+			var mid := String(k)
+			if String(MODULES[mid].get("fam", "")) != fam:
+				continue
+			var st := recipe_state(mid)
+			var ok := bool(st["ok"])
+			if String(st["state"]).begins_with("未解锁"):
+				locked += 1
+				continue
+			rows.append({"mid": mid, "st": st, "ok": ok})
+		if rows.is_empty():
 			continue
-		_tab_row(y, "%s   %d×%d阶   %.0fs   %s" % [
-			String(d["name"]), int(st["cost"]), t - 1, sec, String(st["state"])
-		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "合成",
-			_craft_from_tab.bind(mid), ok, String(st["state"]), "", Callable(), _recipe_tip_data.bind(mid))
-		y += 34.0
+		_label(tab_body, Vector2(0, y), 13, Color(0.52, 0.60, 0.74)).text = "— %s —" % String(MOD_FAM_NAME.get(fam, fam))
+		y += 22.0
+		for r in rows:
+			var mid2 := String(r["mid"])
+			var st2: Dictionary = r["st"]
+			var d: Dictionary = MODULES[mid2]
+			var t := int(d["tier"])
+			var sec := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
+			_tab_row(y, "%s   %d×%s   %.0fs   %s" % [
+				String(d["name"]), int(st2["cost"]), String(MODULES[String(d.get("prev", "base"))]["name"]),
+				sec, String(st2["state"])
+			], Color(d.get("color", Color(0.7, 0.75, 0.85))), "合成",
+				_craft_from_tab.bind(mid2), bool(r["ok"]), String(st2["state"]), "", Callable(), _recipe_tip_data.bind(mid2))
+			y += 34.0
+			if y > 300.0:
+				break
 		if y > 300.0:
 			break
 	if y == 0.0:
