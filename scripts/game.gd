@@ -88,8 +88,11 @@ const BRUTE_CAP := EnemyDB.BRUTE_CAP
 const BRUTE_TINT := EnemyDB.BRUTE_TINT
 const BRUTE_TINT_WEIGHT := EnemyDB.BRUTE_TINT_WEIGHT
 
-## 升级四选一的 buff 池（scripts/data/buffs_db.gd）
-const BUFFS := BuffDB.BUFFS
+## 升级四选一的 buff 池（scripts/data/buffs_db.gd）：24 族 × 4 品质 = 96 条变体，id 形如 "rate__gold"
+var BUFFS: Dictionary = BuffDB.expand()
+const BUFF_TIERS := BuffDB.TIERS
+const BUFF_TIER_NAME := BuffDB.TIER_NAME
+const BUFF_MAX_LEVEL := BuffDB.MAX_LEVEL
 
 # ============================================================================
 # 留在本文件的调参（还没归属到某张表）
@@ -129,7 +132,7 @@ var sel := 0
 var recipe_sel := 0
 ## 模块库存（逻辑在 scripts/systems/inventory.gd）
 var inv := Inventory.new()
-## 升级三选一：buffs[id] = 层数；offer = 本次 4 张卡；picking = 正在选卡（暂停战斗）
+## 升级三选一：buffs[变体id] = 等级（0–10）；offer = 本次 4 张卡；picking = 正在选卡（暂停战斗）
 var buffs := {}
 var offer: Array = []
 var picking := false
@@ -137,8 +140,15 @@ var reroll_used := false
 ## 本局已解锁的配方（mid → true）：开局全空，靠升级奖励第 4 张「解锁卡」逐个点亮
 var recipe_unlocked := {}
 var level := 1
+const BASE_HP := 100.0
 var hp := 100.0
 var max_hp := 100.0
+## 护盾 / 复生（plan-v5 §9.3 sur 族的整数变体）
+var shield_max := 0
+var shield_left := 0
+var shield_t := 0.0
+var revive_left := 0
+var revive_used := 0
 var elapsed := 0.0
 var wave := 1
 var fire_t := 0.0
@@ -713,7 +723,8 @@ func _hud_tick(delta: float) -> void:
 		_cam_pos = _cam.get_screen_center_position()
 	flash_t = maxf(0.0, flash_t - delta)
 	if elapsed - last_hit_t > REGEN_DELAY:
-		hp = minf(max_hp, hp + (REGEN_RATE + 0.5 * float(_bl("regen"))) * delta)
+		hp = minf(max_hp, hp + (REGEN_RATE + _buff_sum("regen")) * delta)
+	_tick_shield(delta)
 	# 构筑屏/死亡屏打开时不要红色受击遮罩，否则整个面板被染红
 	flash.color = Color(1, 0.2, 0.25, 0.0 if (build_root.visible or dead) else minf(flash_t * 0.9, 0.26))
 	if pulse_t > 0.0:
@@ -735,9 +746,42 @@ func _hud_tick(delta: float) -> void:
 	_update_debug(delta)
 
 
+## 护盾（§9.3 shield 族）：挡下一次伤害后开始冷却，冷却好一层
+func _tick_shield(delta: float) -> void:
+	if shield_max <= 0 or shield_left >= shield_max:
+		return
+	shield_t -= delta
+	if shield_t <= 0.0:
+		shield_left += 1
+		shield_t = _shield_cd()
+
+
+## 冷却 = 20s − Σ 每级减量（白 0.4s/级 … 金 0.8s/级），最低 4s
+func _shield_cd() -> float:
+	return maxf(4.0, 20.0 - _buff_sum("shield"))
+
+
 func _die() -> void:
 	_test_end("dead")
 	if dead:
+		return
+	# 复生（§9.3 revive 族）：还有次数就原地站起来，血回一半，身边一圈推空
+	if revive_left > 0 and not god:
+		revive_left -= 1
+		revive_used += 1
+		hp = maxf(1.0, max_hp * 0.5)
+		last_hit_t = elapsed
+		flash_t = 0.35
+		if player != null:
+			player.invuln = maxf(player.invuln, 1.5)
+		for e in enemies:
+			if not is_instance_valid(e):
+				continue
+			var d2: Vector2 = e.position - player.position
+			if d2.length() < 240.0:
+				e.position = player.position + d2.normalized() * 260.0
+		_toast("复生！还剩 %d 次" % revive_left)
+		_refresh_hud()
 		return
 	dead = true
 	hp = 0.0
@@ -1170,13 +1214,14 @@ func _fire(delta: float) -> void:
 				w["ramp"] = 0.0
 				w["ramp_id"] = tid
 			dmg *= 1.0 + float(w["ramp"])
-		# 时序核：每发连击 +4%，断连（超过 1.2 秒没开火）或换目标就重置
-		if float(mo["combo"]) > 0.0:
+		# 时序核：每发连击 +4%，断连（超过 1.2 秒没开火）就重置；连击 buff 叠加在模块之上
+		var cbon := float(mo["combo"]) + minf(0.60, _buff_sum("combo"))
+		if cbon > 0.0:
 			if float(w.get("combo_t", -99.0)) + 1.2 < elapsed:
 				w["combo"] = 0
 			w["combo"] = mini(int(w.get("combo", 0)) + 1, 10)
 			w["combo_t"] = elapsed
-			dmg *= 1.0 + float(mo["combo"]) * float(int(w["combo"]))
+			dmg *= 1.0 + cbon * float(int(w["combo"]))
 		# 消耗次数：每次开火每个模块 -1（与目标数无关 → 高射速 = 高消耗）
 		_burn_slots(w, float(mo["burn"]))
 		var hits := float(targets.size())
@@ -1206,7 +1251,7 @@ func _fire(delta: float) -> void:
 				dealt += _apply_hit(e, per * 0.6)
 		# 榴弹炮：命中点周围 (90 + blast) 内的其他敌人吃 60%；没目标也照炸（§8.2）
 		if is_gren:
-			var br := float(w.get("blast", 90.0)) + float(mo["blast"])
+			var br := (float(w.get("blast", 90.0)) + float(mo["blast"])) * (1.0 + minf(0.80, _buff_sum("blast")))
 			var c0: Vector2 = targets[0].position if not targets.is_empty() \
 				else player.position + _aim_dir() * rng_d
 			for e in enemies.duplicate():
@@ -1228,9 +1273,9 @@ func _aim_dir() -> Vector2:
 	return d.normalized() if d.length() > 0.01 else Vector2.RIGHT
 
 
-## 弹射层数（plan-v5 §8.1：ricochet 族 4 条品质变体各 +1，上限 4；M12 接变体后改读 _buff_sum）
+## 弹射层数（plan-v5 §8.1：ricochet 族 4 条品质变体各 +1，上限 4）
 func _ricochet_lv() -> int:
-	return clampi(int(buffs.get("ricochet", 0)), 0, RICOCHET_MAX)
+	return clampi(_buff_int("ricochet"), 0, RICOCHET_MAX)
 
 
 ## 弹射：从命中点找 220px 内最近的、不在本次链里的敌人，吃「上一跳 × 衰减」
@@ -1380,9 +1425,14 @@ func _blade_petals() -> int:
 	return clampi(BLADE_PETALS_BASE + _blade_petal_bonus(), BLADE_PETALS_BASE, BLADE_PETALS_MAX)
 
 
-## 旋刃 buff 的扇叶加成：M12 会把 buff 换成 96 条变体，这里留一个接缝
+## 旋刃 buff 的扇叶加成（§9.3 petal 族：4 条品质变体各 +1 片）
 func _blade_petal_bonus() -> int:
-	return mini(int(buffs.get("petal", 0)), BLADE_PETALS_MAX - BLADE_PETALS_BASE)
+	return mini(_buff_int("petal"), BLADE_PETALS_MAX - BLADE_PETALS_BASE)
+
+
+## 扇叶宽度：基础 0.50 弧度 + 金的附带加成（每级 +0.02）
+func _blade_arc() -> float:
+	return BLADE_PETAL_ARC + _buff_sum("petal")
 
 
 ## 环绕刃的独立判定（plan-v5 §7.2）：每片扇叶是「半径 ±18、角度宽 0.5」的扇形环带，
@@ -1413,7 +1463,7 @@ func _blade_tick(delta: float) -> void:
 			var hit := false
 			for k in petals:
 				var a0 := ph + TAU * float(k) / float(petals)
-				if absf(angle_difference(a0, ea)) <= BLADE_PETAL_ARC * 0.5:
+				if absf(angle_difference(a0, ea)) <= _blade_arc() * 0.5:
 					hit = true
 					break
 			if not hit:
@@ -1488,7 +1538,7 @@ func _kill(e: Node2D) -> void:
 	kills_total += 1
 	kill_times.append(elapsed)
 	# 掉落与血量成正比：血厚的敌人掉更多（平均值 = DROP_CHANCE，所以总产出不变，只是分配变公平）
-	var chance := (DROP_CHANCE + 0.04 * float(_bl("drop"))) * float(e.hp_mult) / maxf(_plan_avg_mult(), 0.35)
+	var chance := (DROP_CHANCE + _buff_sum("drop")) * float(e.hp_mult) / maxf(_plan_avg_mult(), 0.35)
 	while chance >= 1.0:
 		_spawn_pickup(e.position, "base")
 		chance -= 1.0
@@ -1530,6 +1580,20 @@ func _apply_hit(e: Node2D, dmg: float) -> float:
 func hurt_player(dmg: float, push: Vector2, src: String = "bullet") -> void:
 	if dead:
 		return
+	# 闪避（§9.3 dodge 族）：整次伤害免掉，不留残血
+	var dodge := minf(0.50, _buff_sum("dodge"))
+	if dodge > 0.0 and rng.randf() < dodge:
+		flash_t = 0.18
+		_toast("闪避")
+		return
+	# 护盾先挡一层（挡住不扣血、不记伤害来源）
+	if shield_left > 0:
+		shield_left -= 1
+		shield_t = _shield_cd()
+		flash_t = 0.2
+		_toast("护盾挡下")
+		return
+	dmg *= 1.0 - minf(0.60, _buff_sum("armor"))
 	last_hit_t = elapsed
 	dmg_src[src] = float(dmg_src[src]) + dmg
 	hp -= dmg
@@ -1551,7 +1615,7 @@ func _contact(delta: float) -> void:
 			if touching >= CROWD_CAP:
 				break
 	if touching > 0:
-		var dmg: float = CONTACT_DPS * pow(0.92, float(_bl("contact"))) * touching * delta
+		var dmg: float = CONTACT_DPS * (1.0 - minf(0.60, _buff_sum("armor"))) * touching * delta
 		dmg_src["contact"] = float(dmg_src["contact"]) + dmg
 		last_hit_t = elapsed
 		if not god:
@@ -2414,7 +2478,7 @@ func _auto_plan_fix(delta: float) -> void:
 ## 模块寿命带 ±15% 抖动：否则同一批装上去的模块会同时烧光，DPS 出现断崖
 func _new_module(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
-	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15) * pow(1.08, float(_bl("uses")))
+	var u := float(d["uses"]) * rng.randf_range(0.85, 1.15) * (1.0 + _buff_sum("uses"))
 	return {"id": mid, "tier": int(d["tier"]), "left": u, "max": u}
 
 
@@ -2510,18 +2574,15 @@ func _weapon_mods(w: Dictionary) -> Dictionary:
 				"blast": mo["blast"] = float(mo["blast"]) + float(e["v"])
 				"blade": mo["blade"] = float(mo["blade"]) + float(e["v"])
 				_: pass  # mirror / boost / reson / recycle 各有自己的结算点
-	# 升级 buff：全局修正
-	var bl := float(_bl("rate"))
-	if bl > 0.0:
-		mo["iv"] = float(mo["iv"]) * pow(0.92, bl)
-	var bpow := float(_bl("power"))
-	if bpow > 0.0:
-		mo["mul"] = float(mo["mul"]) * pow(1.10, bpow)
-	mo["range"] = float(mo["range"]) + 60.0 * float(_bl("range"))
-	mo["pierce"] = int(mo["pierce"]) + _bl("pierce")
-	mo["elite"] = float(mo["elite"]) + 0.25 * float(_bl("elite"))
+	# 升级 buff：全局修正（96 条变体按族汇总，plan-v5 §9.4）
+	mo["iv"] = float(mo["iv"]) * _buff_mul("rate")
+	mo["mul"] = float(mo["mul"]) * _buff_mul("power")
+	mo["range"] = float(mo["range"]) + minf(200.0, _buff_sum("range"))
+	mo["pierce"] = int(mo["pierce"]) + _buff_int("pierce")
+	mo["elite"] = float(mo["elite"]) + _buff_sum("elite")
 	if int(w["targets"]) > 0:
-		mo["targets"] = int(mo["targets"]) + _bl("target")
+		mo["targets"] = int(mo["targets"]) + _buff_int("target")
+		mo["mul"] = float(mo["mul"]) * (1.0 + _buff_sum("target"))
 	return mo
 
 
@@ -2746,6 +2807,7 @@ func _place_at(i: int, mid: String) -> bool:
 	_add_inv(mid, -1)
 	if sl[i] != null:
 		_toast_destroy("覆盖：旧的%s已销毁" % String(MODULES[String(sl[i]["id"])]["name"]))
+		_salvage_roll()
 	sl[i] = _new_module(mid)
 	_set_plan_draft(weapon, i, mid)
 	hand_mid = mid if _inv(mid) > 0 else ""
@@ -2759,8 +2821,19 @@ func _uninstall(i: int) -> void:
 		return
 	if sl[i] != null:
 		_toast_destroy("%s 已销毁" % String(MODULES[String(sl[i]["id"])]["name"]))
+		_salvage_roll()
 	sl[i] = null
 	_set_plan_draft(weapon, i, "")
+
+
+## 回收 buff（§9.3 salvage 族）：拆卸/覆盖销毁时按概率捡回 1 个基础模块
+func _salvage_roll() -> void:
+	var p := minf(0.60, _buff_sum("salvage"))
+	if p <= 0.0:
+		return
+	if rng.randf() < p:
+		_add_inv("base", 1)
+		_toast("回收：捡回 1 个基础模块")
 
 
 ## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成这一格的草稿方案
@@ -3155,24 +3228,22 @@ func _slot_tip_data(i: int) -> Dictionary:
 
 
 ## buff 卡的悬浮说明（plan-v5 §2.2「升级四选一卡片」）
-## 文案全部从 BUFFS 的字段拼，不手写：品质/类别/当前级/下一级效果/满级提示
+## 文案全部从 BUFFS 的字段拼，不手写：族/品质/类别/当前级/下一级效果/满级提示
 func _buff_tip_data(id: String) -> Dictionary:
 	if not BUFFS.has(id):
 		return {"title": id, "lines": []}
 	var d: Dictionary = BUFFS[id]
 	var lv := _bl(id)
-	var mx := int(d.get("max", 0))
-	var cat := String(d.get("cat", ""))
-	var rar := String(d.get("rar", "white"))
-	var cat_s := String({"atk": "攻击", "eco": "经济", "sur": "生存"}.get(cat, cat))
-	var col := Color(0.62, 0.86, 1.0) if rar == "blue" else (Color(1.0, 0.84, 0.35) if rar == "gold" else Color(0.82, 0.84, 0.90))
+	var mx := int(d.get("max", BUFF_MAX_LEVEL))
+	var col: Color = d.get("color", Color(0.82, 0.84, 0.90))
 	var lines: Array = []
-	lines.append("[color=#9fb2c9]%s类 buff · 当前 Lv%d / 上限 Lv%d[/color]" % [cat_s, lv, mx])
+	lines.append("[color=#9fb2c9]%s类 buff · 当前 Lv%d / 上限 Lv%d[/color]" % [
+		String(d.get("cat_name", "")), lv, mx])
 	if lv >= mx:
 		lines.append("[color=#ff6b5e]已经满级：抽到会换成别的卡[/color]")
 	else:
 		lines.append("[color=#ffd76a]下一级：%s[/color]" % String(d.get("desc", "")))
-	lines.append("[color=#8fa0b8]每次升级从同类 buff 里抽，层数叠加不衰减[/color]")
+	lines.append("[color=#8fa0b8]同族 4 个品质各自独立升级，白/蓝/紫/金可同时持有[/color]")
 	return {"title": "%s  Lv%d→%d" % [String(d.get("name", id)), lv, mini(lv + 1, mx)], "lines": lines, "color": col}
 
 
@@ -3191,7 +3262,7 @@ func _recipe_tip_data(mid: String, unlock := false) -> Dictionary:
 		lines.append("[color=#9fe3c8]选它 = 解锁这个配方，之后能反复合成[/color]")
 	lines.append("合成消耗：%d 个 %s · 约 %.0f 秒" % [
 		int(CRAFT_COST[t]), String(MODULES[String(d.get("prev", "base"))]["name"]),
-		float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))])
+		float(CRAFT_TIME[t]) * _buff_mul("craft")])
 	var st := recipe_state(mid)
 	lines.append("[color=#9fb2c9]%s[/color]" % String(st["state"]))
 	return {"title": "配方 · %s%s" % [String(d["name"]), "（解锁）" if unlock else ""], "lines": lines, "color": Color(0.55, 0.95, 0.72)}
@@ -3336,7 +3407,7 @@ func _new_device() -> Dictionary:
 ## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
 func device_cost() -> int:
 	var base := DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))
-	return int(round(base * pow(0.92, float(_bl("device")))))
+	return int(round(base * _buff_mul("device")))
 
 
 func _idle_device() -> int:
@@ -3399,6 +3470,10 @@ func _craft_tick(delta: float) -> void:
 			_install(k)
 		else:
 			_add_inv(k, 1)
+		# 精炼 buff（§9.3 refine 族）：按概率多出一个
+		if rng.randf() < minf(0.60, _buff_sum("refine")):
+			_add_inv(k, 1)
+			_toast("精炼：多出 1 个%s" % String(MODULES[k]["name"]))
 		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
 		if bool(d.get("auto", false)):
 			if not try_craft(k, devices.find(d)):
@@ -3466,7 +3541,7 @@ func try_craft(mid: String = "", idx: int = -1) -> bool:
 		for p in paid:
 			_add_inv(String(p), 1)
 		return false
-	var dur := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
+	var dur := float(CRAFT_TIME[t]) * _buff_mul("craft")
 	devices[idx]["kind"] = mid
 	devices[idx]["total"] = dur
 	devices[idx]["left"] = dur
@@ -3587,34 +3662,166 @@ func _next_pending_level() -> void:
 	_gain_level()
 
 
-## buff 层数
+## buff 变体等级（plan-v5 §9：id 形如 "rate__gold"，每条独立 1→10 级）
 func _bl(id: String) -> int:
 	return int(buffs.get(id, 0))
 
 
-## 抽 4 张卡：3 张 buff（攻击/经济/生存各 1）+ 1 张配方卡
+## 某族某品质的等级
+func _buff_lv(fam: String, q: String) -> int:
+	return int(buffs.get(fam + "__" + q, 0))
+
+
+## 按族汇总「加法量」：Σ 等级 × 每级量。加法族（射程/破甲/掉落/减伤…）直接用它，
+## 读点在末尾统一夹取上限（§9.4：闪避 ≤0.50、减伤 ≤0.60、爆破 ≤0.80、回收 ≤0.60）。
+func _buff_sum(fam: String) -> float:
+	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
+	if f.is_empty():
+		return 0.0
+	var per: Dictionary = f["per"]
+	var s := 0.0
+	for q in BUFF_TIERS:
+		s += float(_buff_lv(fam, String(q))) * float(per.get(q, 0.0))
+	return s
+
+
+## 按族汇总「乘法倍率」：Π (1+每级量)^等级，再按 cap 夹幅度
+func _buff_mul(fam: String) -> float:
+	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
+	if f.is_empty():
+		return 1.0
+	var per: Dictionary = f["per"]
+	var m := 1.0
+	for q in BUFF_TIERS:
+		var lv := float(_buff_lv(fam, String(q)))
+		if lv > 0.0:
+			m *= pow(1.0 + float(per.get(q, 0.0)), lv)
+	var cap := float(f.get("cap", 1.0))
+	if m < 1.0:
+		return maxf(m, 1.0 - cap)
+	return minf(m, 1.0 + cap)
+
+
+## 整数族：某品质等级到阈值就 +1（穿透/目标/扇叶/弹射/护盾/复生）
+func _buff_int(fam: String) -> int:
+	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
+	if f.is_empty():
+		return 0
+	var thr: Dictionary = f.get("thr", {})
+	var n := 0
+	for q in BUFF_TIERS:
+		if float(_buff_lv(fam, String(q))) >= float(thr.get(q, 99)):
+			n += 1
+	return n
+
+
+## 本局已拿到的全部 buff 变体（构筑屏一览与 F3 用）：[{id, fam_name, q, lv}]
+func _buff_list() -> Array:
+	var out: Array = []
+	for id in buffs:
+		var lv := _bl(String(id))
+		if lv <= 0:
+			continue
+		if not BUFFS.has(id):
+			continue
+		var d: Dictionary = BUFFS[id]
+		out.append({
+			"id": String(id), "fam_name": String(d["fam_name"]),
+			"q": String(d["q"]), "tier": int(d["tier"]), "lv": lv,
+		})
+	out.sort_custom(func(a, b): return int(a["tier"]) > int(b["tier"]))
+	return out
+
+
+## 拿卡后重算由 buff 派生的状态：血上限、护盾层数、复生次数
+func _apply_buff_passives() -> void:
+	var nm := BASE_HP * (1.0 + minf(0.60, _buff_sum("hp")))
+	var gain := maxf(0.0, nm - max_hp)
+	max_hp = nm
+	hp = minf(max_hp, maxf(hp, 0.0) + gain)
+	shield_max = _buff_int("shield")
+	shield_left = mini(shield_left, shield_max)
+	revive_left = maxi(0, _buff_int("revive") - revive_used)
+
+
+## 移速倍率（§9.3 move 族）：player.gd 每帧读
+func move_mult() -> float:
+	return _buff_mul("move")
+
+
+## 拾取吸附半径（§9.3 pickup 族）：pickup.gd 读，基础 320
+func pickup_radius() -> float:
+	return 320.0 + minf(400.0, _buff_sum("pickup"))
+
+
+## 抽 4 张卡：3 张同品质 buff（攻击/经济/生存各 1）+ 1 张配方卡（plan-v5 §9.4）
 func _roll_offer() -> void:
 	if pick_mode != "chest" and pick_mode != "replace":
 		pick_mode = "level"
 	offer.clear()
 	reroll_used = false
-	var cats := ["atk", "eco", "sur"]
-	for c in cats:
-		var pool: Array = []
-		for id in BUFFS:
-			var d: Dictionary = BUFFS[id]
-			if String(d["cat"]) != c:
-				continue
-			if _bl(id) >= int(d["max"]):
-				continue
-			if String(d["rar"]) == "gold" and level <= 4:
-				continue
-			pool.append(id)
-		if pool.is_empty():
-			pool = ["rate", "drop", "hp"]
-		var pick: String = String(pool[rng.randi_range(0, pool.size() - 1)])
+	var q := _roll_quality()
+	var used := {}
+	for c in ["atk", "eco", "sur"]:
+		var pick := _pick_buff_variant(String(c), q, used)
+		if pick == "":
+			pick = _pick_buff_variant(String(c), "", used)  # 该品质这类都满级了：随便降品质
+		if pick == "":
+			pick = _pick_buff_variant("", q, used)          # 这类全满：同品质跨类补位
+		if pick == "":
+			continue
+		used[pick] = true
 		offer.append({"kind": "buff", "id": pick})
+	if offer.is_empty():
+		offer.append({"kind": "buff", "id": "rate__white"})
 	offer.append(_roll_recipe_card())
+
+
+## 这次三张 buff 卡抽哪个品质：等级越高越容易出紫/金（§9.4 权重表）
+func _roll_quality() -> String:
+	const W := [
+		{"white": 80.0, "blue": 20.0, "violet": 0.0, "gold": 0.0},
+		{"white": 45.0, "blue": 35.0, "violet": 20.0, "gold": 0.0},
+		{"white": 10.0, "blue": 40.0, "violet": 35.0, "gold": 15.0},
+		{"white": 0.0, "blue": 25.0, "violet": 40.0, "gold": 35.0},
+	]
+	var band := 0
+	if level >= 23:
+		band = 3
+	elif level >= 13:
+		band = 2
+	elif level >= 5:
+		band = 1
+	var w: Dictionary = W[band]
+	var total := 0.0
+	for q in BUFF_TIERS:
+		total += float(w[q])
+	var r := rng.randf() * total
+	for q in BUFF_TIERS:
+		r -= float(w[q])
+		if r <= 0.0:
+			return String(q)
+	return "white"
+
+
+## 挑一条还没满级的变体；cat / q 传空表示不限
+func _pick_buff_variant(cat: String, q: String, used: Dictionary) -> String:
+	var pool: Array = []
+	for id in BUFFS:
+		var d: Dictionary = BUFFS[id]
+		var sid := String(id)
+		if used.has(sid):
+			continue
+		if cat != "" and String(d["cat"]) != cat:
+			continue
+		if q != "" and String(d["q"]) != q:
+			continue
+		if _bl(sid) >= int(d["max"]):
+			continue
+		pool.append(sid)
+	if pool.is_empty():
+		return ""
+	return String(pool[rng.randi_range(0, pool.size() - 1)])
 
 
 ## 配方卡：抽一个「还没解锁」的配方（特化配方只在拥有对应武器时进池）。
@@ -3858,6 +4065,25 @@ func _refresh_build() -> void:
 		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
 	])
+	# buff 一览（plan-v5 §9.7）：一族一行，白/蓝/紫/金 四格各自等级
+	var bl := _buff_list()
+	if bl.is_empty():
+		info.append("buff   还没有 —— 升级时三张同类卡同品质，挑一张")
+	else:
+		var fams: Array = []
+		var fname := {}
+		for b in bl:
+			var fam := String(b["fam"])
+			if not fname.has(fam):
+				fams.append(fam)
+				fname[fam] = String(b["fam_name"])
+		for fam2 in fams:
+			var cells: Array = []
+			for q in BUFF_TIERS:
+				var lv := _buff_lv(String(fam2), String(q))
+				cells.append("%s%s" % [String(BUFF_TIER_NAME[String(q)]),
+					"—" if lv <= 0 else str(lv)])
+			info.append("buff  %s   %s" % [String(fname[fam2]), " · ".join(cells)])
 	var miss := _missing_cells()
 	if hand_mid != "":
 		info.append("手持 %s —— 点电路板格子放下（ESC 取消）" % String(MODULES[hand_mid]["name"]))
@@ -4002,7 +4228,7 @@ func _rebuild_tab_recipe() -> void:
 			var st2: Dictionary = r["st"]
 			var d: Dictionary = MODULES[mid2]
 			var t := int(d["tier"])
-			var sec := float(CRAFT_TIME[t]) * pow(0.90, float(_bl("craft")))
+			var sec := float(CRAFT_TIME[t]) * _buff_mul("craft")
 			_tab_row(y, "%s   %d×%s   %.0fs   %s" % [
 				String(d["name"]), int(st2["cost"]), String(MODULES[String(d.get("prev", "base"))]["name"]),
 				sec, String(st2["state"])
@@ -4118,7 +4344,7 @@ func _rebuild_device_pick() -> void:
 		var ok := bool(st["ok"])
 		var cost := int(st["cost"])
 		var tier := int(st["tier"])
-		var secs := float(CRAFT_TIME[tier]) * pow(0.90, float(_bl("craft")))
+		var secs := float(CRAFT_TIME[tier]) * _buff_mul("craft")
 		var txt := "%s   %d×%d 阶料 · %.0fs" % [String(d["name"]), cost, tier - 1, secs]
 		if not ok:
 			txt += "    " + String(st["state"])
@@ -4597,10 +4823,12 @@ func _paint_offer() -> void:
 		var ds := ""
 		if String(card["kind"]) == "buff":
 			var d: Dictionary = BUFFS[String(card["id"])]
-			nm = "%s  Lv%d→%d" % [String(d["name"]), _bl(String(card["id"])), _bl(String(card["id"])) + 1]
-			ds = String(d["desc"])
-			var r := String(d["rar"])
-			col = Color(0.62, 0.86, 1.0) if r == "blue" else (Color(1.0, 0.84, 0.35) if r == "gold" else Color(0.82, 0.84, 0.90))
+			var lv := _bl(String(card["id"]))
+			var mx := int(d["max"])
+			nm = "%s  Lv%d→%d" % [String(d["name"]), lv, mini(lv + 1, mx)]
+			ds = "%s类 · %s" % [String(d["cat_name"]), String(d["desc"])]
+			var c2: Color = d["color"]
+			col = c2
 		else:
 			var d2: Dictionary = MODULES[String(card["id"])]
 			if bool(card.get("unlock", false)):
@@ -4712,10 +4940,10 @@ func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_
 	var card: Dictionary = offer[i]
 	var id := String(card["id"])
 	if String(card["kind"]) == "buff":
-		buffs[id] = _bl(id) + 1
-		if id == "hp":
-			max_hp += 15.0
-			hp = minf(max_hp, hp + 15.0)
+		var d: Dictionary = BUFFS[id]
+		buffs[id] = mini(int(d["max"]), _bl(id) + 1)
+		_apply_buff_passives()
+		_toast("获得 %s Lv%d" % [String(d["name"]), _bl(id)])
 	elif bool(card.get("unlock", false)):
 		recipe_unlocked[id] = true
 		_toast("解锁配方：%s" % String(MODULES[id]["name"]))
@@ -5264,14 +5492,25 @@ func _pt_log() -> void:
 	for i in (bw["plan_saved"] as Array).size():
 		if (bw["slots"] as Array)[i] == null and String((bw["plan_saved"] as Array)[i]) != "":
 			bmiss += 1
-	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d fill=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d" % [
+	# buff 按族汇总打印，避免 96 条变体刷屏（plan-v5 §9.7）
+	var bl := _buff_list()
+	var famset := {}
+	for b in bl:
+		famset[String(b["fam"])] = true
+	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d fill=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d buff=%d/%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss, 1 if auto_fill else 0,
 		_busy_devices(), devices.size(), comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
 		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"), recipe_unlocked.size(), _count_kind("flood"), _count_kind("runner"), _count_kind("rock"), _count_kind("shooter"),
+		bl.size(), famset.size(),
 	])
+	if not bl.is_empty():
+		var parts: Array = []
+		for b in bl:
+			parts.append("%s%s%d" % [String(b["fam"]), String(b["q"]).substr(0, 2), int(b["lv"])])
+		print("        buff " + " ".join(parts))
 
 
 ## 读上一帧敌人 AI / 绘制 / 战斗的累加值，算出四段耗时（docs/plan-v4.md §4.1）。

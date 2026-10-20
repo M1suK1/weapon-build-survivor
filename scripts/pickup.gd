@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 掉落模块：先小幅弹开，再吸附向玩家。
 
 var mid := "base"
@@ -20,7 +20,12 @@ func _physics_process(delta: float) -> void:
 		return
 	var to_p: Vector2 = p.position - position
 	var dist: float = to_p.length()
-	if age > 0.3 and (dist < 320.0 or age > 1.8):
+	# 吸附半径吃「磁场」buff（plan-v5 §9.3 pickup 族）
+	var g0 = get_tree().get_first_node_in_group("game")
+	var magnet := 320.0
+	if g0 != null and g0.has_method("pickup_radius"):
+		magnet = float(g0.pickup_radius())
+	if age > 0.3 and (dist < magnet or age > 1.8):
 		velocity = velocity.lerp(to_p.normalized() * 460.0, 1.0 - exp(-7.0 * delta))
 	position += velocity * delta
 	queue_redraw()

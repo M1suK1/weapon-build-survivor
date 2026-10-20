@@ -1,4 +1,4 @@
-extends Node2D
+﻿extends Node2D
 ## 玩家：WASD / 方向键移动，视觉为白色圆 + 蓝色内核。
 ## knock 是外部（冲刺精英）给的一次性推力，按指数衰减。
 
@@ -8,6 +8,18 @@ var facing := Vector2.RIGHT
 var knock := Vector2.ZERO
 ## 无敌帧（被子弹/冲撞打中后的短暂免疫），由 game.gd 设置
 var invuln := 0.0
+## 引用 game，读移速倍率（plan-v5 §9.3 move 族）
+var game: Node = null
+
+
+func _ready() -> void:
+	game = get_tree().get_first_node_in_group("game")
+
+
+func _move_mult() -> float:
+	if game != null and game.has_method("move_mult"):
+		return float(game.move_mult())
+	return 1.0
 
 
 func _physics_process(delta: float) -> void:
@@ -24,7 +36,7 @@ func _physics_process(delta: float) -> void:
 	if dir.length() > 0.0:
 		dir = dir.normalized()
 		facing = dir
-		position += dir * SPEED * delta
+		position += dir * SPEED * _move_mult() * delta
 	if knock.length() > 1.0:
 		position += knock * delta
 		knock = knock.lerp(Vector2.ZERO, clampf(delta * 7.0, 0.0, 1.0))
@@ -44,7 +56,7 @@ func take_hit(dmg: float, push: Vector2) -> bool:
 	var g = get_tree().get_first_node_in_group("game")
 	if g == null or not g.has_method("hurt_player"):
 		return false
-	invuln = 0.35 + 0.10 * float(g._bl("iframe"))
+	invuln = 0.45
 	g.hurt_player(dmg, push)
 	return true
 
