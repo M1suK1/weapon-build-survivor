@@ -18,7 +18,10 @@ const HP_LATE_GROWTH := 1.045
 const SPAWN_BASE := 1.20
 const SPAWN_GROWTH := 1.190
 const SPAWN_CAP_MULT := 1.8
+## 同屏总数 400 = 普通 250 + 重装 150（plan-v5 §5）。
+## NORMAL_CAP 是固定值：写成「400 − 当前重装数」会让重装把普通怪挤到刷不出来
 const MAX_ENEMIES := 400
+const NORMAL_CAP := 250
 
 ## 生成半径必须落在**镜头视野之外**：zoom 0.62 时半个屏幕是 1032×580，
 ## 对角约 1184，所以 >1200 才能保证任何角度都在屏幕外，让敌人「走」进来而不是凭空出现
@@ -61,10 +64,12 @@ const BRUTE_HP_MULT := 8.0
 ## 单发上限 = 最大血量的 20% → 任何武器都至少要 5 发才杀得掉（§3.3）
 const BRUTE_HIT_RATIO := 0.20
 const BRUTE_MIN_WAVE := 3
-const BRUTE_INTERVAL := 20.0
-const BRUTE_GROUP_MIN := 2
-const BRUTE_GROUP_MAX := 4
-const BRUTE_CAP := 50
+## 12 秒一波 3–6 只：20 秒 2–4 只要 6 分钟才堆到 150（plan-v5 §5.2）
+const BRUTE_INTERVAL := 12.0
+const BRUTE_GROUP_MIN := 3
+const BRUTE_GROUP_MAX := 6
+## 重装不占普通上限，自己管到 150；和 NORMAL_CAP 合起来刚好是 MAX_ENEMIES
+const BRUTE_CAP := 150
 const BRUTE_TINT := Color(0.72, 0.22, 0.42)
 const BRUTE_TINT_WEIGHT := 0.55
 

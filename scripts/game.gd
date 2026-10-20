@@ -67,6 +67,7 @@ const SPAWN_BASE := EnemyDB.SPAWN_BASE
 const SPAWN_GROWTH := EnemyDB.SPAWN_GROWTH
 const SPAWN_CAP_MULT := EnemyDB.SPAWN_CAP_MULT
 const MAX_ENEMIES := EnemyDB.MAX_ENEMIES
+const NORMAL_CAP := EnemyDB.NORMAL_CAP
 const SPAWN_R_MIN := EnemyDB.SPAWN_R_MIN
 const SPAWN_R_MAX := EnemyDB.SPAWN_R_MAX
 const CONTACT_DPS := EnemyDB.CONTACT_DPS
@@ -217,6 +218,9 @@ var variant_n := {}
 ## 同屏重装数量（HUD / 调试用）
 func _count_variant(v: String) -> int:
 	return int(variant_n.get(v, 0))
+## 同屏普通怪数量 = 总数 − 重装（普通上限 NORMAL_CAP 只看这个，plan-v5 §5）
+func _count_kind_normal() -> int:
+	return maxi(0, enemies.size() - _count_variant("brute"))
 var dt_step := 0
 var tab := 0
 var tab_bar: Control = null
@@ -1840,6 +1844,8 @@ func _on_wave_start() -> void:
 		return
 	if (wave - ELITE_FIRST_WAVE) % ELITE_EVERY != 0:
 		return
+	# 精英只受总数上限管：普通怪长期顶在 250 时，若也卡 NORMAL_CAP，
+	# 后期精英（宝箱来源）会永远刷不出来，属于计划外的手感回退
 	if enemies.size() >= MAX_ENEMIES:
 		return
 	var alive := 0
@@ -1858,7 +1864,7 @@ func _spawn(delta: float) -> void:
 		_spawn_chest_random()
 	spawn_acc = minf(spawn_acc + delta * _spawn_rate(), 24.0)  # 卡顿后不要一口气吐出几百个
 	while spawn_acc >= 1.0:
-		if enemies.size() >= MAX_ENEMIES:
+		if enemies.size() >= MAX_ENEMIES or _count_kind_normal() >= NORMAL_CAP:
 			spawn_acc = minf(spawn_acc, 6.0)
 			break
 		var pat: Dictionary = _pick_pattern()
@@ -1906,7 +1912,7 @@ func _emit_pattern(id: String, n: int) -> void:
 				pos = player.position + Vector2.from_angle(a3) * rad
 			_:
 				pos = player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX)
-		if enemies.size() >= MAX_ENEMIES:
+		if enemies.size() >= MAX_ENEMIES or _count_kind_normal() >= NORMAL_CAP:
 			return
 		_spawn_enemy_at(pos)
 
@@ -1949,8 +1955,8 @@ func _spawn_enemy_at(pos: Vector2, forced: String = "") -> Node2D:
 	return e
 
 
-## 重装变种刷新（docs/plan-v4.md §3.4）：wave ≥ 3 起每 20 秒一波 2–4 只，
-## 同屏上限 50、屏幕外生成、直线走向玩家、**不回收**（清不掉就一直堆成包围圈，逼玩家换位置）
+## 重装变种刷新（docs/plan-v4.md §3.4 / plan-v5 §5）：wave ≥ 3 起每 12 秒一波 3–6 只，
+## 同屏上限 150、屏幕外生成、直线走向玩家、**不回收**（清不掉就一直堆成包围圈，逼玩家换位置）
 func _tick_brute(delta: float) -> void:
 	if wave < BRUTE_MIN_WAVE:
 		return
@@ -1961,9 +1967,11 @@ func _tick_brute(delta: float) -> void:
 	var room := BRUTE_CAP - _count_variant("brute")
 	if room <= 0:
 		return
+	# 总数也要留缝：400 = 普通 250 + 重装 150，两边都不许把对方挤死
+	room = mini(room, MAX_ENEMIES - enemies.size())
+	if room <= 0:
+		return
 	var n := mini(rng.randi_range(BRUTE_GROUP_MIN, BRUTE_GROUP_MAX), room)
-	# 不看 MAX_ENEMIES：重装是「超编」的压迫单位（上限 50 自己管），
-	# 否则后期刷怪把 400 占满后，重装会永远刷不出来（V6 实测踩到过）
 	for i in n:
 		_spawn_brute()
 
@@ -3506,7 +3514,7 @@ func _refresh_hud() -> void:
 	_refresh_brute_badge()
 
 
-## 状态栏右侧「重装 N」：贴在状态文字后面，>30 只（同屏上限 50）变红提醒「该换位置了」
+## 状态栏右侧「重装 N/150」：>100 只（上限的 2/3）变红提醒「该换位置了」（plan-v5 §5.6）
 func _refresh_brute_badge() -> void:
 	if hud_brute == null:
 		return
@@ -3514,13 +3522,13 @@ func _refresh_brute_badge() -> void:
 	hud_brute.visible = n > 0
 	if n <= 0:
 		return
-	hud_brute.text = "重装 %d" % n
+	hud_brute.text = "重装 %d/%d" % [n, BRUTE_CAP]
 	var f := hud_status.get_theme_font("font")
 	var fs := hud_status.get_theme_font_size("font_size")
 	var w := f.get_string_size(hud_status.text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	hud_brute.position = Vector2(18.0 + w + 28.0, 18.0)
 	hud_brute.add_theme_color_override("font_color",
-		Color(1.0, 0.36, 0.32) if n > 30 else Color(1.0, 0.72, 0.42))
+		Color(1.0, 0.36, 0.32) if n > 100 else Color(1.0, 0.72, 0.42))
 
 
 ## 升级按钮三态：可升（金 + 呼吸 + 红点）/ 不可升（灰 + 进度）/ 选卡中（隐藏）
@@ -5077,7 +5085,8 @@ func _refresh_dbg_panel(enemy_total: int) -> void:
 		return
 	dbg_text.text = "\n".join([
 		"FPS %d   帧 %.1fms   峰 %.1fms" % [int(Engine.get_frames_per_second()), frame_ms, frame_ms_max],
-		"敌人 %d   可见 %d   上限 %d   刷怪 %.2f/s" % [enemy_total, vis_enemy, MAX_ENEMIES, _spawn_rate()],
+		"敌人 %d   可见 %d   上限 %d（普通 %d/%d）   刷怪 %.2f/s" % [
+			enemy_total, vis_enemy, MAX_ENEMIES, _count_kind_normal(), NORMAL_CAP, _spawn_rate()],
 		"重装 %d/%d   单发上限 %.0f%%   模板 %s" % [
 			_count_variant("brute"), BRUTE_CAP, BRUTE_HIT_RATIO * 100.0, "/".join(BRUTE_TEMPLATES)],
 		"掉落 %d   子弹 %d   宝箱 %d" % [
@@ -5528,7 +5537,7 @@ func _cmd_spawn(args: Array) -> String:
 	var n := clampi(int(String(args[1])) if args.size() > 1 else 1, 1, 200)
 	var made := 0
 	for i in n:
-		if enemies.size() >= MAX_ENEMIES:
+		if enemies.size() >= MAX_ENEMIES or _count_kind_normal() >= NORMAL_CAP:
 			break
 		var ang := rng.randf() * TAU
 		# 屏外生成：和正常刷怪同一个半径区间（docs/plan-v4.md §3.4）
