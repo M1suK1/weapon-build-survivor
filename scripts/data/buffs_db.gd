@@ -175,6 +175,9 @@ static func expand() -> Dictionary:
 	var out := {}
 	for fam in FAMILIES:
 		var f: Dictionary = FAMILIES[fam]
+		# 纯次数族（int）没有 per，取不到就用 0：曾经在这里无条件 f["per"] 导致整表炸掉
+		var per_tab: Dictionary = f.get("per", {})
+		var thr_tab: Dictionary = f.get("thr", {})
 		for q in TIERS:
 			var d := {
 				"id": vid(fam, q),
@@ -189,9 +192,9 @@ static func expand() -> Dictionary:
 				"color": _tier_color(q),
 				"max": MAX_LEVEL,
 				"kind": String(f["kind"]),
-				"per": float(f["per"].get(q, 0.0)),
+				"per": float(per_tab.get(q, 0.0)),
 				"cap": float(f.get("cap", 0.0)),
-				"thr": int(f["thr"].get(q, 99)) if f.has("thr") else 0,
+				"thr": int(thr_tab.get(q, 99)) if f.has("thr") else 0,
 				"desc": _desc(f, q),
 			}
 			out[d["id"]] = d
@@ -200,11 +203,13 @@ static func expand() -> Dictionary:
 
 static func _desc(f: Dictionary, q: String) -> String:
 	var kind := String(f["kind"])
-	var per := float(f["per"].get(q, 0.0))
+	var per_tab: Dictionary = f.get("per", {})
+	var thr_tab: Dictionary = f.get("thr", {})
+	var per := float(per_tab.get(q, 0.0))
 	var pd := String(f.get("per_desc", {}).get(q, ""))
 	if kind == "int":
 		var s := String(f["tpl"])
-		var thr := int(f["thr"].get(q, 99))
+		var thr := int(thr_tab.get(q, 99))
 		s += "（Lv%d 解锁）" % thr
 		if pd != "":
 			s += " · " + pd

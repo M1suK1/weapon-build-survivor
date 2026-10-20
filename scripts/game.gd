@@ -364,8 +364,41 @@ var bt_print := 0.0
 # ============================================================================
 # 0. 生命周期与主循环
 # ============================================================================
+## 数据表自检（plan-v6 §1.3）：load 期就崩的错误在 --check-only 里看不出来，
+## 所以真跑起来时先把能查的都查一遍，问题直接 push_error 出来，不要等到面板是空的才发现。
+func _check_data() -> void:
+	var bad := 0
+	# 1) buff 变体数 = 族数 × 品质数
+	var want := BuffDB.FAMILIES.size() * BUFF_TIERS.size()
+	if BUFFS.size() != want:
+		push_error("buff 表不完整：%d 条，应为 %d 条（每族缺 per 字段会导致整表中断）" % [BUFFS.size(), want])
+		bad += 1
+	# 2) 纯次数族必须有 thr，连续量族必须有 per
+	for fam in BuffDB.FAMILIES:
+		var f: Dictionary = BuffDB.FAMILIES[fam]
+		if String(f.get("kind", "mul")) == "int" and not f.has("thr"):
+			push_error("buff 族 %s 是 int 型但没写 thr" % String(fam))
+			bad += 1
+		if String(f.get("kind", "mul")) != "int" and not f.has("per"):
+			push_error("buff 族 %s 缺 per 字段" % String(fam))
+			bad += 1
+	# 3) 模块表：id 与顺序表一致、必填字段齐全
+	for mid in ModDB.MOD_ORDER:
+		var d: Dictionary = MODULES.get(mid, {})
+		if d.is_empty():
+			push_error("MOD_ORDER 里的 %s 不在 MODULES 表里" % String(mid))
+			bad += 1
+			continue
+		if not d.has("rate") or not d.has("uses") or not d.has("tier"):
+			push_error("模块 %s 缺 rate/uses/tier" % String(mid))
+			bad += 1
+	if bad == 0 and OS.is_debug_build() and not playtest:
+		print("DATA OK  buff=%d  modules=%d" % [BUFFS.size(), MOD_ORDER.size()])
+
+
 func _ready() -> void:
 	add_to_group("game")
+	_check_data()
 	# 允许暂停时仍接收输入（Tab 退出构筑界面）
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	var args: Array = []
@@ -3666,7 +3699,7 @@ func _buff_sum(fam: String) -> float:
 	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
 	if f.is_empty():
 		return 0.0
-	var per: Dictionary = f["per"]
+	var per: Dictionary = f.get("per", {})
 	var s := 0.0
 	for q in BUFF_TIERS:
 		s += float(_buff_lv(fam, String(q))) * float(per.get(q, 0.0))
@@ -3678,7 +3711,7 @@ func _buff_mul(fam: String) -> float:
 	var f: Dictionary = BuffDB.FAMILIES.get(fam, {})
 	if f.is_empty():
 		return 1.0
-	var per: Dictionary = f["per"]
+	var per: Dictionary = f.get("per", {})
 	var m := 1.0
 	for q in BUFF_TIERS:
 		var lv := float(_buff_lv(fam, String(q)))
@@ -4819,7 +4852,11 @@ func _paint_offer() -> void:
 		var nm := ""
 		var ds := ""
 		if String(card["kind"]) == "buff":
-			var d: Dictionary = BUFFS[String(card["id"])]
+			var bid := String(card["id"])
+			if not BUFFS.has(bid):
+				push_error("选卡里出现了不存在的 buff 变体：%s" % bid)
+				continue
+			var d: Dictionary = BUFFS[bid]
 			var lv := _bl(String(card["id"]))
 			var mx := int(d["max"])
 			nm = "%s  Lv%d→%d" % [String(d["name"]), lv, mini(lv + 1, mx)]
@@ -4937,6 +4974,10 @@ func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_
 	var card: Dictionary = offer[i]
 	var id := String(card["id"])
 	if String(card["kind"]) == "buff":
+		if not BUFFS.has(id):
+			push_error("选卡里出现了不存在的 buff 变体：%s" % id)
+			_close_pick()
+			return
 		var d: Dictionary = BUFFS[id]
 		buffs[id] = mini(int(d["max"]), _bl(id) + 1)
 		_apply_buff_passives()
