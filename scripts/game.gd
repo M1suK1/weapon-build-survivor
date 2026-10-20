@@ -93,9 +93,11 @@ const BUFFS := BuffDB.BUFFS
 # ============================================================================
 # 留在本文件的调参（还没归属到某张表）
 # ============================================================================
-## 升级成本：3 × 1.18^(level−1) 个模块
+## 升级成本：前 10 级 3 × 1.18^(level−1)、之后换成 ×1.12（plan-v5 §3.2：Lv30 从 365 降到 125）
 const LEVEL_COST_BASE := 3.0
 const LEVEL_COST_GROWTH := 1.18
+const LEVEL_COST_SOFT := 10
+const LEVEL_COST_GROWTH_LATE := 1.12
 ## 受击补偿：每损失这么多 HP 补 1 个模块（弹药系统的劣势补偿，挨打就回填）
 const DAMAGE_PER_MODULE := 8.0
 const FIRE_RANGE := 260.0
@@ -3226,24 +3228,50 @@ func _auto_recipe() -> String:
 # ============================================================================
 # 10. 升级与 buff 抽卡
 # ============================================================================
+## 本级的模块成本：前 10 级 ×1.18，10 级之后换成 ×1.12（plan-v5 §3.2）
 func level_cost() -> int:
-	return int(round(LEVEL_COST_BASE * pow(LEVEL_COST_GROWTH, level - 1)))
+	return _level_cost_at(level)
+
+
+## 指定等级的成本（升级按钮要预告下两级，所以单独抽出来）
+func _level_cost_at(lv: int) -> int:
+	var l := maxi(lv, 1)
+	if l <= LEVEL_COST_SOFT:
+		return int(round(LEVEL_COST_BASE * pow(LEVEL_COST_GROWTH, l - 1)))
+	var at_soft := LEVEL_COST_BASE * pow(LEVEL_COST_GROWTH, LEVEL_COST_SOFT - 1)
+	return int(round(at_soft * pow(LEVEL_COST_GROWTH_LATE, l - LEVEL_COST_SOFT)))
+
+
+## 扣升级材料：先扣 T1（base），再 T2 → T3 → T4；同阶内先扣库存最多的（plan-v5 §3.3）
+## 这样不会先把辛苦合成的 T3/T4 吃掉——高阶模块要么用来合成，要么留着换构筑
+func _take_level_mat(cost: int) -> bool:
+	if cost <= 0:
+		return true
+	if _inv_total() < cost:
+		return false
+	var order: Array = []
+	for tier in [1, 2, 3, 4]:
+		var row: Array = []
+		for mid in _ids_all():
+			var d: Dictionary = MODULES.get(String(mid), {})
+			if int(d.get("tier", 1)) == tier:
+				row.append(String(mid))
+		row.sort_custom(func(a, b): return _inv(a) > _inv(b))
+		order.append_array(row)
+	var left := cost
+	for mid in order:
+		if left <= 0:
+			break
+		var take: int = mini(left, _inv(mid))
+		if take > 0:
+			_add_inv(String(mid), -take)
+			left -= take
+	return left <= 0
 
 
 ## 升级只吃库存（槽位是工作区，不能被顺手拆掉）——「多余的基础模块」才拿去升级
 func try_level() -> bool:
-	var cost := level_cost()
-	if _inv_total() < cost:
-		return false
-	var left := cost
-	for k in _ids_all():
-		if left <= 0:
-			break
-		var take: int = mini(left, _inv(k))
-		if take > 0:
-			_add_inv(k, -take)
-			left -= take
-	if left > 0:
+	if not _take_level_mat(level_cost()):
 		return false
 	_gain_level()
 	return true
@@ -3418,7 +3446,8 @@ func _refresh_up_btn() -> void:
 	up_btn.visible = not picking
 	up_dot.visible = can and not picking
 	up_btn.disabled = not can
-	up_btn.tooltip_text = "升级需要 %d 个模块（现有 %d） · 当前 Lv%d · 按 U 也可以" % [cost, have, level]
+	up_btn.tooltip_text = "升级需要 %d 个模块（现有 %d） · 当前 Lv%d · 按 U 也可以\n再升一级 %d · 再下一级 %d" % [
+		cost, have, level, _level_cost_at(level + 1), _level_cost_at(level + 2)]
 	if can:
 		up_btn.text = "↑ 升级"
 		up_btn.add_theme_font_size_override("font_size", 16)
@@ -3523,7 +3552,12 @@ func _refresh_build() -> void:
 	build_text.text = "\n".join(lines)
 
 	var info: Array = []
-	info.append("等级 %d  →  %d     需要 %d 个模块（库存 %d）" % [level, level + 1, level_cost(), _inv_total()])
+	var need := level_cost()
+	var gap := maxi(0, need - _inv_total())
+	info.append("等级 %d  →  %d     需要 %d 个模块（库存 %d，距下一级还差 %d）" % [
+		level, level + 1, need, _inv_total(), gap])
+	info.append("曲线   Lv%d 要 %d · Lv%d 要 %d（10 级后从 ×1.18 放缓到 ×1.12）" % [
+		level + 1, _level_cost_at(level + 1), level + 2, _level_cost_at(level + 2)])
 	info.append("受击补偿 +%d     装置 %d 台（空闲 %d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
 		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
