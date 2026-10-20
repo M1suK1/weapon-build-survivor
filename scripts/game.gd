@@ -1047,7 +1047,7 @@ func _make_hud() -> void:
 	level_btn.pressed.connect(_toggle_auto_level)
 	build_root.add_child(level_btn)
 
-	# 拖拽层：幽灵 + 落点高亮 + 出力预览（全部 IGNORE，不抢鼠标）
+	# 拖拽层：幽灵 + 落点高亮 + 输出预览（全部 IGNORE，不抢鼠标）
 	drag_layer = Control.new()
 	drag_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
 	drag_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1742,7 +1742,7 @@ func _reward_damage(dmg: float) -> void:
 			_spawn_pickup(player.position + Vector2.from_angle(rng.randf() * TAU) * rng.randf_range(38.0, 58.0), t)
 
 
-## 补偿只给「能产出的」模块：增幅自身 0 出力，当补偿发等于发了个空槽
+## 补偿只给「能产出的」模块：增幅自身 0 输出，当补偿发等于发了个空槽
 func _damage_reward_id() -> String:
 	if wave >= 12:
 		return "add"
@@ -2596,7 +2596,7 @@ func _within(i: int, r: int) -> Array:
 	return Board.within(weapon["layout"], i, r)
 
 
-## 每个槽位这次的「出力」。
+## 每个槽位这次的「输出」。
 ## 顺序：共振（读 base）→ 加法镜像（读 eff，不连锁）→ 增幅（加到最终 out，不回流）
 ## cls 决定行为；绑定武器的特化件在这个层面就是普通 flat（效果在 _weapon_mods 里生效）
 func _slot_out(slots = null, w = null) -> Array:
@@ -2630,7 +2630,7 @@ func _slot_out(slots = null, w = null) -> Array:
 				if sl[j] != null and int(sl[j]["tier"]) < t:
 					v += float(eff[j])
 		out[i] = v
-	# 增幅：自身 0 出力，把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
+	# 增幅：自身 0 输出，把 boost 加到相邻模块的最终输出上（不回流给别的增幅）
 	for i in sl.size():
 		var m = sl[i]
 		if m == null or _cls(m) != "boost":
@@ -2701,6 +2701,14 @@ func _shot_power() -> float:
 	return _shot_power_of(weapon)
 
 
+## 显示用：基础值 → 当前值（plan-v6 §10.6）。两者差不到 1% 就只印当前值，免得满屏箭头
+func _eff_num(base: float, cur: float, fmt := "%.1f") -> String:
+	var c := fmt % cur
+	if absf(cur - base) < maxf(0.005, absf(base) * 0.01):
+		return c
+	return "%s → %s" % [fmt % base, c]
+
+
 ## 从槽位里取该阶中寿命最少的模块（顺手把快报废的先花掉）
 func _take_from_slots(t: int) -> bool:
 	var idx := -1
@@ -2741,7 +2749,7 @@ func _take_tier(t: int, n: int, prefer_slots: bool = false) -> void:
 		left -= 1
 
 
-## 整板出力（不含武器基础值，只用于互相比较）
+## 整板输出（不含武器基础值，只用于互相比较）
 func _board_total(w = null) -> float:
 	var s := 0.0
 	for v in _slot_out(null, w):
@@ -2768,7 +2776,7 @@ func _refill(i: int, w = null, force := false) -> void:
 			sl[i] = null
 		return
 	var best_id := ""
-	# 起点是 0：出力为 0 的模块（增幅单独放着）不许占格子，否则板上会周期性地被增幅填满又烧空
+	# 起点是 0：输出为 0 的模块（增幅单独放着）不许占格子，否则板上会周期性地被增幅填满又烧空
 	var best_v := 0.0
 	for k in _stocked_ids():
 		sl[i] = _new_module(k)
@@ -2783,7 +2791,7 @@ func _refill(i: int, w = null, force := false) -> void:
 
 
 ## 把一个模块装进电路板。
-## 规则：统一按「装完后整板出力最高」挑位子，而且必须**严格高于当前**才装，
+## 规则：统一按「装完后整板输出最高」挑位子，而且必须**严格高于当前**才装，
 ## 否则留在库存（旧规则「替换最低阶」会把喂加法的 T1 全换掉，最后板上全是互相吃不到的加法）
 ## 合成产物往「槽位最多的那把武器」上装：否则宝箱一给白武器（2 格），
 ## 后续所有产物都会挤进小板上（实测会把总 DPS 从 1500 压到 150）
@@ -2930,7 +2938,7 @@ func _salvage_roll() -> void:
 		_toast("回收：捡回 1 个基础模块")
 
 
-## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成这一格的草稿方案
+## 空槽自动放一个「让整板输出涨最多」的模块，并把它的 id 记成这一格的草稿方案
 func _auto_place_best(i: int) -> bool:
 	var sl: Array = weapon["slots"]
 	if i < 0 or i >= sl.size() or sl[i] != null:
@@ -3258,9 +3266,9 @@ func _effect_text(e: Dictionary) -> String:
 		"blade": return "环绕刃半径 +%.0f" % v
 		"recycle": return "开火时 %d%% 概率给相邻模块 +%d 次寿命" % [roundi(float(e.get("p", 0.0)) * 100.0), n]
 		"combo": return "连击每层 +%d%%，最多 %d 层（满层 +%d%%）" % [roundi(v * 100.0), n, roundi(v * float(n) * 100.0)]
-		"mirror": return "加法：镜像相邻低阶模块的出力"
-		"boost": return "给相邻模块 +%.1f 出力（自身不产出）" % v
-		"reson": return "相邻同类型模块出力 +%d%%" % roundi(v * 100.0)
+		"mirror": return "加法：镜像相邻低阶模块的输出"
+		"boost": return "给相邻模块 +%.1f 输出（自身不产出）" % v
+		"reson": return "相邻同类型模块输出 +%d%%" % roundi(v * 100.0)
 	return ""
 
 
@@ -3277,7 +3285,7 @@ func _mod_effects(mid: String) -> Array:
 func _mod_tip_data(mid: String) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var lines: Array = []
-	lines.append("第 %d 阶 · 出力 %.1f · 寿命 %d 次" % [int(d["tier"]), float(d["rate"]), int(d.get("uses", 0))])
+	lines.append("第 %d 阶 · 输出 %.1f · 寿命 %d 次" % [int(d["tier"]), float(d["rate"]), int(d.get("uses", 0))])
 	for s in _mod_effects(mid):
 		lines.append("[color=#9fe3c8]%s[/color]" % String(s))
 	var b := String(d.get("bind", ""))
@@ -3289,7 +3297,7 @@ func _mod_tip_data(mid: String) -> Dictionary:
 	return {"title": "%s（%s）" % [String(d["name"]), "特化" if b != "" else "通用"], "lines": lines, "color": d["color"]}
 
 
-## 槽位的悬浮说明（plan-v5 §2.2 第 2 行）：寿命 / 出力 / 邻居加成 / 方案
+## 槽位的悬浮说明（plan-v5 §2.2 第 2 行）：寿命 / 输出 / 邻居加成 / 方案
 func _slot_tip_data(i: int) -> Dictionary:
 	var col := Color(0.55, 0.62, 0.72)
 	var title := "槽 %d · 空" % (i + 1)
@@ -3300,12 +3308,12 @@ func _slot_tip_data(i: int) -> Dictionary:
 		var d: Dictionary = MODULES[mid]
 		col = d["color"]
 		title = "槽 %d · %s" % [i + 1, String(d["name"])]
-		lines.append("第 %d 阶 · 出力 %.1f · 剩余 %d/%d 次" % [int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
+		lines.append("第 %d 阶 · 输出 %.1f · 剩余 %d/%d 次" % [int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
 		for s in _mod_effects(mid):
 			lines.append("[color=#9fe3c8]%s[/color]" % String(s))
 		var out_v := _slot_out(null, weapon)
 		if i < out_v.size():
-			lines.append("实际出力 %.1f" % float(out_v[i]))
+			lines.append("实际输出 %.1f" % float(out_v[i]))
 		if int(d["tier"]) >= 2:
 			lines.append("相邻加成见板面连线（增幅/加法/共振）")
 	else:
@@ -3347,7 +3355,7 @@ func _recipe_tip_data(mid: String, unlock := false) -> Dictionary:
 	var d: Dictionary = MODULES[mid]
 	var t := int(d["tier"])
 	var lines: Array = []
-	lines.append("第 %d 阶 · 出力 %.1f · 寿命 %d 次" % [t, float(d["rate"]), int(d.get("uses", 0))])
+	lines.append("第 %d 阶 · 输出 %.1f · 寿命 %d 次" % [t, float(d["rate"]), int(d.get("uses", 0))])
 	for s in _mod_effects(mid):
 		lines.append("[color=#9fe3c8]%s[/color]" % String(s))
 	var b := String(d.get("bind", ""))
@@ -3615,7 +3623,7 @@ func _sync_device_auto(on: bool) -> void:
 
 
 ## 合成计时：每台装置各自倒计时，到点后产物进电路板
-## （满了会按整板出力决定换不换，换不动就进库存）
+## （满了会按整板输出决定换不换，换不动就进库存）
 func _craft_tick(delta: float) -> void:
 	for d in devices:
 		if String(d["kind"]) == "":
@@ -4224,13 +4232,21 @@ func _refresh_build() -> void:
 	_refresh_plan_btns()
 	_refresh_level_btn()
 	var lines: Array = []
+	var mo_now := _weapon_mods(weapon)
+	var rng_now := float(weapon["range"]) + float(mo_now["range"])
+	var iv_now := float(weapon["interval"]) * float(mo_now["iv"])
+	var tg_now := int(weapon["targets"]) + int(mo_now["targets"]) if int(weapon["targets"]) > 0 else int(weapon["targets"])
 	lines.append("构筑（暂停中）      TAB / ESC / ← 返回　　右键：槽位=卸下，别处=返回")
 	lines.append("")
-	lines.append("武器  %s·%s·%d 槽    射程 %.0f    间隔 %.2fs    目标 %s    基础 %.1f    单次出力 %.1f    当前 DPS %.1f" % [
+	# 数值全部带满 buff（plan-v6 §10.6）：基础 → 当前，玩家能直接看到 buff 在涨
+	lines.append("武器  %s·%s·%d 槽    射程 %s    间隔 %s    目标 %s    单发 %s    当前 DPS %.1f" % [
 		str(WEAPONS[weapon["id"]]["name"]), QUALITY_NAME[int(weapon["quality"])],
-		(weapon["slots"] as Array).size(), float(weapon["range"]), float(weapon["interval"]),
-		"全部" if int(weapon["targets"]) < 0 else str(int(weapon["targets"])),
-		float(weapon["base"]), _shot_power(), _weapon_dps(weapon)
+		(weapon["slots"] as Array).size(),
+		_eff_num(float(weapon["range"]), rng_now, "%.0f"),
+		_eff_num(float(weapon["interval"]), iv_now, "%.2f") + "s",
+		"全部" if int(weapon["targets"]) < 0 else _eff_num(float(weapon["targets"]), float(tg_now), "%.0f"),
+		_eff_num(float(weapon["base"]), _shot_power(), "%.1f"),
+		_weapon_dps(weapon)
 	])
 	if weapons.size() > 1:
 		var names: Array = []
@@ -4396,10 +4412,10 @@ func _rebuild_tab_inv() -> void:
 		if y >= 340.0:
 			rest += 1
 			continue
-		_tab_row(y, "%s  ×%d      %d 阶    出力 %.1f    寿命 %d" % [
+		_tab_row(y, "%s  ×%d      %d 阶    输出 %.1f    寿命 %d" % [
 			String(d["name"]), n, int(d["tier"]), float(d["rate"]), int(d["uses"])
 		], Color(d.get("color", Color(0.7, 0.75, 0.85))), "装入",
-			_install_from_inv.bind(mid), true, "装到当前武器出力增益最大的那一格", "拿起", _pick_up.bind(mid),
+			_install_from_inv.bind(mid), true, "装到当前武器输出增益最大的那一格", "拿起", _pick_up.bind(mid),
 			_mod_tip_data.bind(mid))
 		# 拖拽命中用：tab_body 局部坐标下的整行矩形（右侧按钮区会被 _over_inv_area 排除）
 		inv_rows.append({'mid': mid, 'rect': Rect2(tab_body.position + Vector2(0, y), Vector2(360, 34))})
@@ -4939,7 +4955,7 @@ func _drag_highlight(mp: Vector2) -> void:
 		drag_hint.add_theme_color_override("font_color", UIKit.C_DIM)
 
 
-## 落点预览：换完之后整板出力会变成多少（和 _board_total 同一套计算，所见即所得）
+## 落点预览：换完之后整板输出会变成多少（和 _board_total 同一套计算，所见即所得）
 func _drag_preview(t: int) -> String:
 	var now := _board_total(weapon)
 	var sl: Array = weapon.slots.duplicate()
@@ -4953,7 +4969,7 @@ func _drag_preview(t: int) -> String:
 	var after := _board_total_slots(sl, weapon)
 	var d := after - now
 	var pct := 0.0 if now <= 0.0 else d / now * 100.0
-	return "整板出力 %.1f → %.1f   (%s%.0f%%)" % [now, after, "+" if d >= 0.0 else "", pct]
+	return "整板输出 %.1f → %.1f   (%s%.0f%%)" % [now, after, "+" if d >= 0.0 else "", pct]
 
 
 func _board_total_slots(sl: Array, w = null) -> float:
@@ -5651,7 +5667,7 @@ func _playtest_step(delta: float) -> void:
 		get_tree().quit()
 
 
-## 简化版「玩家」：优先把空闲装置填满（合成是唯一把材料变成出力的手段），
+## 简化版「玩家」：优先把空闲装置填满（合成是唯一把材料变成输出的手段），
 ## 装置全忙且基础模块堆积时再造一台（变相缩短合成时间），每 3 次决策升一次级。
 func _bot_step(delta: float) -> void:
 	bot_t += delta
