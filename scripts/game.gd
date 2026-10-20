@@ -189,10 +189,21 @@ var shots: Array = []
 var blast_fx: Array = []
 
 # --- 合成：每台装置一个并行位，装置可反复买（材料堆积就多做几台） ---
-var devices: Array = []  # [{"kind": int, "left": float, "total": float}]，kind=0 表示空闲
+var devices: Array = []  # [{"kind": str, "left": float, "total": float, "auto": bool, "paid": [], "lv": 1}]
 var craft_seq := 0
 ## 各阶实际合出来的数量（平衡观察用，也进 playtest 日志）
 var crafted := {}
+
+# --- 装置背包（plan-v6 §5.2B）：装置产物先进这里，点一下才进模块库存 ---
+var device_bag: Array = []
+var device_bag_cap := 2
+## 扩容价格：50 起步、每次 ×2.2 再取整到 5 的倍数（50/110/242/532）
+const BAG_COST_BASE := 50.0
+const BAG_COST_GROWTH := 2.2
+const BAG_CAP_MAX := 8
+## 装置升级价（lv1→2 要 30、→3 要 60、→4 要 120、→5 要 240）
+const DEVICE_LV_COSTS := [0, 30, 60, 120, 240]
+const DEVICE_LV_MAX := 5
 
 # --- 无头自动对战（平衡验证用）：godot --headless -- playtest bot pt=1200 ---
 var playtest := false
@@ -1959,9 +1970,9 @@ func _use_weapon(i: int) -> void:
 	weapon = weapons[sel]
 
 
-## 背包占用 = 武器数 + 装置数
+## 背包占用 = 武器数（plan-v6 §5.2A：装置不再占模块背包，装置有自己的 device_bag）
 func _backpack_used() -> int:
-	return weapons.size() + devices.size()
+	return weapons.size()
 
 
 ## 一把武器此刻的 DPS（按板面实装模块算；多目标按分摊公式算总伤）
@@ -3481,7 +3492,83 @@ func _stocked_ids() -> Array:
 # 9. 合成与装置
 # ============================================================================
 func _new_device() -> Dictionary:
-	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": []}
+	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": [], "lv": 1}
+
+
+## 装置背包是不是满了（满了装置停工，产物不丢）
+func _bag_full() -> bool:
+	return device_bag.size() >= device_bag_cap
+
+
+## 本次扩容要多少个模块：按「已经扩过几次」算价格（50 → 110 → 242 → 532）
+func bag_expand_cost() -> int:
+	var n := maxi(0, device_bag_cap - 2)
+	return int(round(BAG_COST_BASE * pow(BAG_COST_GROWTH, n) / 5.0) * 5.0)
+
+
+## 扩容装置背包（plan-v6 §5.2B）：材料按阶从低到高扣
+func expand_device_bag() -> bool:
+	if device_bag_cap >= BAG_CAP_MAX:
+		return false
+	var cost := bag_expand_cost()
+	if not _take_level_mat(cost):
+		_toast("扩容要 %d 个模块，库存不够" % cost)
+		return false
+	device_bag_cap += 1
+	_toast("装置背包扩到 %d 格" % device_bag_cap)
+	return true
+
+
+## 把装置背包里的第 i 个产物取到模块库存（模块背包满了就不给取）
+func take_from_bag(i: int) -> void:
+	if i < 0 or i >= device_bag.size():
+		return
+	if backpack_cap >= 0 and _backpack_used() >= backpack_cap:
+		_toast("模块背包已满（%d/%d），先腾一格" % [_backpack_used(), backpack_cap])
+		return
+	_add_inv(String(device_bag[i]), 1)
+	device_bag.remove_at(i)
+
+
+## 这台装置升下一级要多少模块（1→2 30、→3 60、→4 120、→5 240）
+func device_upgrade_cost(d: Dictionary) -> int:
+	var lv := int(d.get("lv", 1))
+	if lv >= DEVICE_LV_MAX:
+		return 0
+	return int(DEVICE_LV_COSTS[mini(lv, DEVICE_LV_COSTS.size() - 1)])
+
+
+## 装置升级（plan-v6 §5.2C）：三线效果
+##   lv2+ 合成时间每级 −8%
+##   lv3+ 装置背包 +1（每台三级的装置各加一格）
+##   lv4+ 自动开关默认打开
+##   lv5  成品 15% 概率一次出 2 个
+func upgrade_device(idx: int) -> bool:
+	if idx < 0 or idx >= devices.size():
+		return false
+	var d: Dictionary = devices[idx]
+	var lv := int(d.get("lv", 1))
+	if lv >= DEVICE_LV_MAX:
+		return false
+	var cost := device_upgrade_cost(d)
+	if not _take_level_mat(cost):
+		_toast("升级要 %d 个模块，库存不够" % cost)
+		return false
+	d["lv"] = lv + 1
+	if int(d["lv"]) >= 4:
+		d["auto"] = true
+	_recalc_bag_cap()
+	_toast("装置升到 Lv%d" % int(d["lv"]))
+	return true
+
+
+## 装置背包总容量 = 基础 device_bag_cap + 每台 lv≥3 的装置各 1 格
+func _recalc_bag_cap() -> void:
+	var base := 1
+	for d in devices:
+		if int(d.get("lv", 1)) >= 3:
+			base += 1
+	device_bag_cap = maxi(device_bag_cap, base)
 
 
 ## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
@@ -3510,8 +3597,6 @@ func _busy_devices() -> int:
 func buy_device() -> bool:
 	if devices.size() >= DEVICE_MAX:
 		return false
-	if _backpack_used() >= backpack_cap:
-		return false
 	var cost := device_cost()
 	if _inv("base") < cost:
 		return false
@@ -3539,6 +3624,10 @@ func _craft_tick(delta: float) -> void:
 		if float(d["left"]) > 0.0:
 			continue
 		var k := String(d["kind"])
+		# 装置背包满：停工等玩家来取（进度冻在 0，不丢产物、不重复扣料）
+		if _bag_full():
+			d["left"] = 0.01 if _bag_full() else 0.0
+			continue
 		d["kind"] = ""
 		d["left"] = 0.0
 		d["total"] = 0.0
@@ -3549,11 +3638,23 @@ func _craft_tick(delta: float) -> void:
 		if autoplan or bot:
 			_install(k)
 		else:
-			_add_inv(k, 1)
+			device_bag.append(k)
+			if device_bag.size() >= device_bag_cap:
+				_toast("装置背包满（%d/%d）：点装置页里的产物取走" % [device_bag.size(), device_bag_cap])
 		# 精炼 buff（§9.3 refine 族）：按概率多出一个
 		if rng.randf() < minf(0.60, _buff_sum("refine")):
-			_add_inv(k, 1)
+			if autoplan or bot:
+				_add_inv(k, 1)
+			elif not _bag_full():
+				device_bag.append(k)
 			_toast("精炼：多出 1 个%s" % String(MODULES[k]["name"]))
+		# lv5 装置：15% 概率一次出 2 个
+		if int(d.get("lv", 1)) >= 5 and rng.randf() < 0.15:
+			if autoplan or bot:
+				_add_inv(k, 1)
+			elif not _bag_full():
+				device_bag.append(k)
+			_toast("装置 Lv5 双份：多出 1 个%s" % String(MODULES[k]["name"]))
 		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
 		if bool(d.get("auto", false)):
 			if not try_craft(k, devices.find(d)):
@@ -3622,6 +3723,10 @@ func try_craft(mid: String = "", idx: int = -1) -> bool:
 			_add_inv(String(p), 1)
 		return false
 	var dur := float(CRAFT_TIME[t]) * _buff_mul("craft")
+	# 装置等级：每级 −8% 时间（plan-v6 §5.2C）
+	var lv := int(devices[idx].get("lv", 1))
+	if lv > 1:
+		dur *= pow(0.92, float(lv - 1))
 	devices[idx]["kind"] = mid
 	devices[idx]["total"] = dur
 	devices[idx]["left"] = dur
@@ -4146,8 +4251,9 @@ func _refresh_build() -> void:
 	info.append("曲线   Lv%d 要 %d · Lv%d 要 %d（前 %d 级 ×%.2f，之后 ×%.2f）" % [
 		level + 1, _level_cost_at(level + 1), level + 2, _level_cost_at(level + 2),
 		LEVEL_COST_SOFT, LEVEL_COST_GROWTH, LEVEL_COST_GROWTH_LATE])
-	info.append("受击补偿 +%d     装置 %d 台（空闲 %d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
+	info.append("受击补偿 +%d     装置 %d 台（空闲 %d · 背包 %d/%d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
 		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
+		device_bag.size(), device_bag_cap,
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
 	])
 	# buff 一览（plan-v5 §9.7）：一族一行，白/蓝/紫/金 四格各自等级
@@ -4357,18 +4463,49 @@ func _rebuild_tab_device() -> void:
 		_rebuild_device_pick()
 		return
 	var y := 0.0
+	# 装置背包（plan-v6 §5.2B）：产物先放这里，点一下才进模块库存
+	var bh := _label(tab_body, Vector2(0, y), 15, UIKit.C_GOLD)
+	bh.text = "装置背包 %d/%d" % [device_bag.size(), device_bag_cap]
+	y += 24.0
+	if device_bag.is_empty():
+		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "空着 —— 装置做完会先放到这里"
+		y += 28.0
+	else:
+		for i in device_bag.size():
+			var bid := String(device_bag[i])
+			var bn := String(MODULES[bid]["name"]) if MODULES.has(bid) else bid
+			var b := UIKit.button("取 %s" % bn, Vector2(150, 26), UIKit.C_GREEN, 14)
+			b.position = Vector2(150.0 * float(i % 3), y)
+			b.tooltip_text = "取到模块库存（占模块背包一格）"
+			b.pressed.connect(take_from_bag.bind(i))
+			tab_body.add_child(b)
+			if i % 3 == 2:
+				y += 30.0
+		if device_bag.size() % 3 != 0:
+			y += 30.0
+	# 扩容
+	if device_bag_cap < BAG_CAP_MAX:
+		var ecost := bag_expand_cost()
+		_tab_row(y, "扩容装置背包到 %d 格（要 %d 个模块）" % [device_bag_cap + 1, ecost], UIKit.C_BLUE,
+			"扩容", _expand_bag_from_tab, _inv_total() >= ecost,
+			"价格 50 起步、每次 ×2.2（50 / 110 / 242 / 532）；满了装置停工")
+		y += 38.0
+	else:
+		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "装置背包已到上限 %d 格" % BAG_CAP_MAX
+		y += 28.0
 	for i in devices.size():
 		var dv: Dictionary = devices[i]
 		var kind := String(dv["kind"])
 		var busy := kind != ""
+		var lv := int(dv.get("lv", 1))
 		var nm := String(MODULES[kind]["name"]) if MODULES.has(kind) else ""
-		var txt := "装置 %d    空闲" % (i + 1)
+		var txt := "装置 %d    Lv%d    空闲" % [i + 1, lv]
 		if busy:
-			txt = "装置 %d    %s    %.1fs / %.1fs" % [i + 1, nm, float(dv["left"]), float(dv["total"])]
+			txt = "装置 %d    Lv%d    %s    %.1fs / %.1fs" % [i + 1, lv, nm, float(dv["left"]), float(dv["total"])]
 		var l := _label(tab_body, Vector2(0, y), 15, UIKit.C_GOLD if busy else UIKit.C_DIM)
 		l.text = txt
 		if busy:
-			var bw := 330.0
+			var bw := 300.0
 			var bg := ColorRect.new()
 			bg.color = Color(0.16, 0.18, 0.24)
 			bg.position = Vector2(0, y + 22)
@@ -4386,7 +4523,7 @@ func _rebuild_tab_device() -> void:
 		# 选配方 / 取消
 		var act := UIKit.button("取消" if busy else "选配方", Vector2(78, 26),
 			UIKit.C_RED if busy else UIKit.C_BLUE, 14)
-		act.position = Vector2(340, y - 2)
+		act.position = Vector2(310, y - 2)
 		act.tooltip_text = "取消并全额退还材料" if busy else "给这台装置挑一个配方"
 		if busy:
 			act.pressed.connect(_cancel_device.bind(i))
@@ -4397,11 +4534,23 @@ func _rebuild_tab_device() -> void:
 		var au := bool(dv.get("auto", false))
 		var ab := UIKit.button("自动 开" if au else "自动 关", Vector2(86, 26),
 			UIKit.C_GREEN if au else UIKit.C_DIM, 14)
-		ab.position = Vector2(426, y - 2)
+		ab.position = Vector2(396, y - 2)
 		ab.tooltip_text = "做完自动接下一个配方（材料够的话）"
 		ab.pressed.connect(_toggle_dev_auto.bind(i))
 		tab_body.add_child(ab)
-		y += 44.0
+		# 升级（plan-v6 §5.2C）
+		if lv < DEVICE_LV_MAX:
+			var ucost := device_upgrade_cost(dv)
+			var ub := UIKit.button("升级 %d" % ucost, Vector2(96, 26), UIKit.C_GOLD, 14)
+			ub.position = Vector2(490, y - 2)
+			ub.tooltip_text = "Lv%d → Lv%d：合成 −8%%%s" % [
+				lv, lv + 1,
+				"、背包 +1" if lv + 1 == 3 else ("、自动默认开" if lv + 1 == 4 else ("、15% 出双份" if lv + 1 == 5 else ""))]
+			ub.pressed.connect(_upgrade_device_from_tab.bind(i))
+			tab_body.add_child(ub)
+		else:
+			_label(tab_body, Vector2(490, y + 2), 13, UIKit.C_GOLD).text = "已满级"
+		y += 46.0
 	var idle := devices.size() - _busy_devices()
 	var auto_n := 0
 	for d in devices:
@@ -4412,26 +4561,24 @@ func _rebuild_tab_device() -> void:
 	y += 26.0
 	if devices.size() < DEVICE_MAX:
 		var cost := device_cost()
-		var bp_full := _backpack_used() >= backpack_cap
-		var can := (not bp_full) and _inv("base") >= cost
-		var reason := ""
-		if bp_full:
-			reason = "背包已满（%d/%d）：先按 F 关掉不用的武器，或合成掉一些模块" % [_backpack_used(), backpack_cap]
-		elif _inv("base") < cost:
-			reason = "基础模块不够：现有 %d，需要 %d" % [_inv("base"), cost]
+		var can := _inv("base") >= cost
 		_tab_row(y, "再造一台装置（需要 %d 个基础模块）" % cost, UIKit.C_BLUE, "造",
 			_buy_device_from_tab, can, "吃基础模块；装置越多并行合成越快")
-		if reason != "":
-			_label(tab_body, Vector2(0, y + 24), 13, UIKit.C_RED).text = reason
-		if bp_full and weapons.size() > 1:
-			# 背包满时给一条出路：丢掉当前选中的武器，立刻腾出一个格子
-			var sb := UIKit.button("丢弃当前武器（腾格子）", Vector2(200, 26), UIKit.C_RED, 13)
-			sb.position = Vector2(0, y + 46)
-			sb.tooltip_text = "武器+装置共享 6 格背包；丢掉这个武器不会返还材料"
-			sb.pressed.connect(_scrap_sel_weapon)
-			tab_body.add_child(sb)
+		if not can:
+			_label(tab_body, Vector2(0, y + 24), 13, UIKit.C_RED).text = "基础模块不够：现有 %d，需要 %d" % [_inv("base"), cost]
 	else:
 		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
+
+
+## 装置页的两个小回调（按钮只接了无参函数）
+func _expand_bag_from_tab() -> void:
+	expand_device_bag()
+	_refresh_build()
+
+
+func _upgrade_device_from_tab(i: int) -> void:
+	upgrade_device(i)
+	_refresh_build()
 
 
 ## 装置页的二级列表：给某一台装置挑配方
@@ -5358,8 +5505,8 @@ func _apply_cheats(spec: String) -> void:
 
 func _give_all_weapons() -> void:
 	for id in ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]:
-		# 背包是武器+装置共享的：作弊也别把它撑爆，否则「造装置」永远点不动
-		if weapons.size() >= maxi(1, backpack_cap - 1):
+		# 背包现在只装武器（装置有自己的背包），作弊也别把它撑爆
+		if weapons.size() >= backpack_cap:
 			break
 		var w := _make_weapon(String(id), 5)
 		weapons.append(w)
