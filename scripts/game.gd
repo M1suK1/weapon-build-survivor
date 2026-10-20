@@ -411,8 +411,20 @@ func _check_data() -> void:
 		if not d.has("rate") or not d.has("uses") or not d.has("tier"):
 			push_error("模块 %s 缺 rate/uses/tier" % String(mid))
 			bad += 1
+	# 4) 库存接口：负数必须真的扣掉（v7 §1 的回归点）
+	var probe := Inventory.new()
+	probe.add("base", 3)
+	probe.add("base", -1)
+	if probe.total() != 2:
+		push_error("库存 add 负数没扣：加了 3 再 −1 应为 2，实际 %d（会导致升级/合成免费）" % probe.total())
+		bad += 1
+	probe.take("base", 5)
+	probe.take("base", 1)
+	if probe.total() != 0:
+		push_error("库存 take 扣穿了：应为 0，实际 %d" % probe.total())
+		bad += 1
 	if bad == 0 and OS.is_debug_build() and not playtest:
-		print("DATA OK  buff=%d  modules=%d" % [BUFFS.size(), MOD_ORDER.size()])
+		print("DATA OK  buff=%d  modules=%d  INV OK" % [BUFFS.size(), MOD_ORDER.size()])
 
 
 func _ready() -> void:
@@ -3567,6 +3579,7 @@ func _inv_str() -> String:
 
 ## ---- 库存：真实逻辑在 scripts/systems/inventory.gd，这里只留薄封装，
 ##      免得 192 个调用点全部改名（R2 之后会继续把调用点直接改成 inv.xxx）----
+## 注意：_add_inv 的 n 可以是负数（负数走 take 扣库存），见 inventory.gd 的 add()。
 func _inv(mid: String) -> int:
 	return inv.of(mid)
 

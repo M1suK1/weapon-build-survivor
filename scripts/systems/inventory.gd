@@ -1,4 +1,4 @@
-extends RefCounted
+﻿extends RefCounted
 ## 模块库存（纯逻辑，不碰 UI，也不认识武器）。
 ##
 ## 设计要点：库存按**模块 id** 计数，不按阶合并 —— 同阶的「加法 / 锋锐刃 / 轻质弹链」
@@ -21,8 +21,14 @@ func has(id: String, n: int = 1) -> bool:
 	return of(id) >= n
 
 
+## n > 0 加、n < 0 扣（负数走 take，避免「写了扣料却什么也没发生」）。
+## 历史上 add() 只收正数，而 scripts/game.gd 有 7 处用 `_add_inv(x, -n)` 扣料，
+## 于是升级/合成全都不扣库存（v7 §1 修的就是这个）。
 func add(id: String, n: int = 1) -> void:
-	if n <= 0:
+	if n < 0:
+		take(id, -n)
+		return
+	if n == 0:
 		return
 	counts[id] = of(id) + n
 
