@@ -1339,6 +1339,7 @@ func _targets_in_range(r: float, n: int) -> Array:
 
 ## 每次开火给每个模块扣寿命（与目标数无关 → 高射速 = 高消耗）
 ## 自动补料只由 auto_fill 决定（人类默认关：烧完就空着，格子画幽灵框等玩家自己补）
+## 顺带结算「回收」：以前 `mo["recycle"]` 只赋值没人消费，这里按 effect 表真正生效（plan-v5 §11.3）
 func _burn_slots(w: Dictionary, burn: float) -> void:
 	var sl: Array = w["slots"]
 	for i in sl.size():
@@ -1350,6 +1351,28 @@ func _burn_slots(w: Dictionary, burn: float) -> void:
 			sl[i] = null
 			if auto_fill:
 				_refill(i, w)
+	# 回收：每个带 recycle 的模块各自掷一次，命中就给相邻随机一格补 n 次寿命
+	for i in sl.size():
+		var m2 = sl[i]
+		if m2 == null:
+			continue
+		var p := 0.0
+		var n := 0
+		for ef in (MODULES[String(m2["id"])]["effect"] as Array):
+			if String(ef["k"]) == "recycle":
+				p = maxf(p, float(ef["p"]))
+				n = maxi(n, int(ef["n"]))
+		if p <= 0.0 or rng.randf() >= p:
+			continue
+		var alive: Array = []
+		for j in _neighbors(i, w):
+			if sl[j] != null:
+				alive.append(j)
+		if alive.is_empty():
+			continue
+		var j2: int = alive[rng.randi_range(0, alive.size() - 1)]
+		var mx := float(MODULES[String(sl[j2]["id"])]["uses"])
+		sl[j2]["left"] = minf(mx, float(sl[j2]["left"]) + float(n))
 
 
 ## 扇叶数量：基础 3 + 旋刃 buff（§7.4 的 petal 族），上限 7
@@ -2456,42 +2479,37 @@ func _cls(m: Dictionary) -> String:
 	return String(MODULES[String(m["id"])]["cls"])
 
 
-## 武器级效果汇总：扫一遍板面，把带效果的模块折算成「这把枪的修正值」
+## 武器级效果汇总：扫一遍板面，把 `effect` 表里的修正累加成「这把枪的修正值」
 ## bind 非空的模块只在对应武器上生效（否则它只剩 rate，见方案 §1.3）
+## 效果全部来自 `MODULES[mid]["effect"]`（plan-v5 §11.3），这里不再按 id 写死分支
 func _weapon_mods(w: Dictionary) -> Dictionary:
 	var mo := {"mul": 1.0, "mul_add": 0.0, "iv": 1.0, "range": 0.0, "targets": 0,
-		"pierce": 0, "elite": 0.0, "burn": 1.0, "recycle": 0.0, "combo": 0.0,
+		"pierce": 0, "elite": 0.0, "burn": 1.0, "combo": 0.0,
 		"ramp_cap": 0.0, "blast": 0.0, "blade": 0.0}
 	var wid := String(w["id"])
 	for m in w["slots"]:
 		if m == null:
 			continue
-		var mid := String(m["id"])
-		var d: Dictionary = MODULES[mid]
+		var d: Dictionary = MODULES[String(m["id"])]
 		var b := String(d.get("bind", ""))
 		if b != "" and b != wid:
 			continue
-		match mid:
-			"edge": mo["mul_add"] = float(mo["mul_add"]) + 0.08
-			"light": mo["burn"] = float(mo["burn"]) * 0.5
-			"extend": mo["range"] = float(mo["range"]) + 25.0
-			"calib": mo["iv"] = float(mo["iv"]) * 0.95
-			"pierce": mo["pierce"] = int(mo["pierce"]) + 1
-			"breaker": mo["elite"] = float(mo["elite"]) + 0.20
-			"coolant": mo["iv"] = float(mo["iv"]) * 0.92
-			"recycle": mo["recycle"] = float(mo["recycle"]) + 0.20
-			"overload": mo["mul"] = float(mo["mul"]) * 1.15
-			"tempo": mo["combo"] = float(mo["combo"]) + 0.04
-			"multi", "spread": mo["targets"] = int(mo["targets"]) + 1
-			"belt": mo["burn"] = float(mo["burn"]) * 0.35
-			"focus": mo["ramp_cap"] = float(mo["ramp_cap"]) + 1.80
-			"charge": mo["blast"] = float(mo["blast"]) + 40.0
-			"blade": mo["blade"] = float(mo["blade"]) + 25.0
-	# 「扩散器」对霰弹枪是 +2（不是 +1）
-	if wid == "shotgun":
-		for m in w["slots"]:
-			if m != null and String(m["id"]) == "spread":
-				mo["targets"] = int(mo["targets"]) + 1
+		for ef in (d["effect"] as Array):
+			var e: Dictionary = ef
+			match String(e["k"]):
+				"mul": mo["mul"] = float(mo["mul"]) * float(e["v"])
+				"mul_add": mo["mul_add"] = float(mo["mul_add"]) + float(e["v"])
+				"iv": mo["iv"] = float(mo["iv"]) * float(e["v"])
+				"range": mo["range"] = float(mo["range"]) + float(e["v"])
+				"targets": mo["targets"] = int(mo["targets"]) + int(e["v"])
+				"pierce": mo["pierce"] = int(mo["pierce"]) + int(e["v"])
+				"elite": mo["elite"] = float(mo["elite"]) + float(e["v"])
+				"burn": mo["burn"] = float(mo["burn"]) * float(e["v"])
+				"combo": mo["combo"] = float(mo["combo"]) + float(e["v"])
+				"ramp_cap": mo["ramp_cap"] = float(mo["ramp_cap"]) + float(e["v"])
+				"blast": mo["blast"] = float(mo["blast"]) + float(e["v"])
+				"blade": mo["blade"] = float(mo["blade"]) + float(e["v"])
+				_: pass  # mirror / boost / reson / recycle 各有自己的结算点
 	# 升级 buff：全局修正
 	var bl := float(_bl("rate"))
 	if bl > 0.0:
@@ -3490,9 +3508,10 @@ func _auto_recipe() -> String:
 		return "reson"
 	if bool(recipe_state("amp")["ok"]):
 		return "amp"
-	# 剩下的余料：从高阶往低阶找一件能做的
-	for mid in ["tempo", "overload", "coolant", "breaker", "calib", "pierce", "recycle",
-			"temper", "edge", "light", "extend", "add"]:
+	# 剩下的余料：从高阶往低阶找一件能做的（M11 会换成「按族前沿」的顺序）
+	var ids: Array = MOD_ORDER.duplicate()
+	ids.sort_custom(func(a, b): return int(MODULES[a]["tier"]) > int(MODULES[b]["tier"]))
+	for mid in ids:
 		if bool(recipe_state(mid)["ok"]):
 			return mid
 	return ""
