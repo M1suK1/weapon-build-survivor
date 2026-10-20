@@ -220,6 +220,13 @@ var console_lines: Array = []
 var console_hist: Array = []
 var console_hist_i := 0
 var console_open := false
+
+# 升级按钮（docs/plan-v4.md §2）：左下角胶囊 + 小红点 + 可升级时的呼吸光
+var up_btn: Button = null
+var up_dot: Panel = null
+var up_tween: Tween = null
+var up_shake: Tween = null
+var up_home := Vector2(24, 636)
 # --- 鼠标拖拽（构筑屏）---
 var drag := {}
 var drag_layer: Control = null
@@ -698,6 +705,24 @@ func _make_hud() -> void:
 	hud_tip.text = "WASD 移动   TAB 构筑   U 升级   Q/E 选配方  C 合成   X 造装置   1-9 选武器  F 开关   / 控制台   F3 调试   R 重开"
 
 	wpanel = _label(layer, Vector2(18, 84), 17, Color(0.78, 0.86, 1.0))
+
+	# 升级按钮（docs/plan-v4.md §2.1）：材料够时金色呼吸 + 红点，不够时灰化并显示进度
+	up_btn = UIKit.button("↑ 升级", Vector2(140, 40), UIKit.C_GOLD, 16)
+	up_btn.position = up_home
+	up_btn.pivot_offset = Vector2(70, 20)
+	up_btn.pressed.connect(_on_up_pressed)
+	layer.add_child(up_btn)
+
+	up_dot = Panel.new()
+	up_dot.position = up_home + Vector2(-5, -5)
+	up_dot.size = Vector2(11, 11)
+	up_dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	up_dot.visible = false
+	var dot_sb := StyleBoxFlat.new()
+	dot_sb.bg_color = Color(1.0, 0.32, 0.32)
+	dot_sb.set_corner_radius_all(6)
+	up_dot.add_theme_stylebox_override("panel", dot_sb)
+	layer.add_child(up_dot)
 
 	# F3 调试面板（默认关）
 	dbg_root = Control.new()
@@ -2796,6 +2821,67 @@ func _refresh_hud() -> void:
 	hud_ammo.add_theme_color_override("font_color",
 		Color(0.7, 0.95, 0.85) if net >= 0.0 else Color(1.0, 0.55, 0.5))
 	_refresh_weapon_panel()
+	_refresh_up_btn()
+
+
+## 升级按钮三态：可升（金 + 呼吸 + 红点）/ 不可升（灰 + 进度）/ 选卡中（隐藏）
+func _refresh_up_btn() -> void:
+	if up_btn == null:
+		return
+	var cost := level_cost()
+	var have := _inv_total()
+	var can := have >= cost
+	up_btn.visible = not picking
+	up_dot.visible = can and not picking
+	up_btn.disabled = not can
+	up_btn.tooltip_text = "升级需要 %d 个模块（现有 %d） · 当前 Lv%d · 按 U 也可以" % [cost, have, level]
+	if can:
+		up_btn.text = "↑ 升级"
+		up_btn.add_theme_font_size_override("font_size", 16)
+		if up_tween == null or not up_tween.is_valid():
+			up_tween = create_tween().set_loops()
+			up_tween.tween_property(up_btn, "modulate", Color(1.15, 1.15, 1.15, 1.0), 0.6) \
+				.set_trans(Tween.TRANS_SINE)
+			up_tween.tween_property(up_btn, "modulate", Color(1, 1, 1, 1), 0.6) \
+				.set_trans(Tween.TRANS_SINE)
+	else:
+		up_btn.text = "↑ 升级   %d / %d" % [have, cost]
+		up_btn.add_theme_font_size_override("font_size", 14)
+		if up_tween != null and up_tween.is_valid():
+			up_tween.kill()
+		up_tween = null
+		up_btn.modulate = Color(1, 1, 1, 1)
+
+
+func _on_up_pressed() -> void:
+	if up_btn == null or picking or dead or console_open:
+		return
+	if build_root != null and build_root.visible:
+		return
+	if try_level():
+		_anim_up_success()
+	else:
+		_anim_up_fail()
+	_pass()
+	_refresh_up_btn()
+
+
+## 成功后 0.2s 收敛（缩放回弹）；连升时按钮会在下一张卡前再亮起来
+func _anim_up_success() -> void:
+	up_btn.scale = Vector2(0.92, 0.92)
+	var tw := create_tween()
+	tw.tween_property(up_btn, "scale", Vector2.ONE, 0.2).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
+## 材料不足：左右抖 4px / 0.15s
+func _anim_up_fail() -> void:
+	if up_shake != null and up_shake.is_valid():
+		up_shake.kill()
+	up_shake = create_tween()
+	up_shake.tween_property(up_btn, "position", up_home + Vector2(4, 0), 0.04)
+	up_shake.tween_property(up_btn, "position", up_home - Vector2(4, 0), 0.05)
+	up_shake.tween_property(up_btn, "position", up_home + Vector2(2, 0), 0.03)
+	up_shake.tween_property(up_btn, "position", up_home, 0.03)
 
 
 ## 左侧武器栏：每把武器一行，显示开关状态与「实测 DPS / 理论 DPS」
@@ -3487,6 +3573,7 @@ func _open_pick() -> void:
 	pick_root.visible = true
 	_paint_offer()
 	_paint_pick_chrome()
+	_refresh_up_btn()
 
 
 func _paint_offer() -> void:
@@ -3611,8 +3698,7 @@ func _close_pick() -> void:
 	if pick_root != null:
 		for c in pick_root.get_children():
 			c.queue_free()
-
-
+	_refresh_up_btn()
 ## 领第 i 张卡
 func _take_card(i: int) -> void:	# 宝箱面板走的是另一套数据（chest_offer），以前漏了这个分支，
 	# 结果卡片点得动（button_down 有反应）但 pressed 永远落空、面板关不掉

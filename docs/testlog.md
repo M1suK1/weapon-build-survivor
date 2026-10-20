@@ -66,3 +66,10 @@
 - 目的：暂停来源集合、14 条命令、Tab 补全 / `;` 批量、CLI `cheat=` 改走同一套 `_cmd_*`
 - 关键输出：`CT ok open_paused / build_stacks / close_keeps_build / all_closed_unpause / speed4 / speed_bad / god_toggle / give / weapon_sniper sniper / hp / spawn 0->2 / kill / unknown / help / tab help / batch / level20 / pick_closed lvl=20`；`[cheat] 获得 base ×500（库存 502）`、`[cheat] 装置 +3（共 4/8）`、`[cheat] 跳到第 3 波`
 - 结论：暂停必须按来源计数（关控制台不能顺手把构筑屏的暂停也解除）；`cheat=level` 走 `_cmd_level([n, "quiet"])`，否则无头自测在 `_ready` 弹卡会把树暂停、机器人直接停摆。截图 `docs/screenshots/v4-console.png`。
+
+## plan-v4 V3 升级按钮
+
+- 命令：`-- uptest`（临时钩子，验证后已删）＋截图 `-- "shot=docs/screenshots/v4-upgrade.png" "shotat=3"`（灰态）与 `... v4-upgrade-on.png ... "cheat=rich"`（金态）
+- 目的：左下角升级按钮的三态（金呼吸 + 红点 / 灰 + 进度 / 选卡时隐藏）、点击等同 `U`
+- 关键输出：`UPTEST start inv=2 cost=3 level=1`、`UPTEST fail level=1 picking=false`、`UPTEST ok level=2 picking=true paused=true`、`UPTEST after level=2 picking=false paused=false`
+- 结论：材料不足只抖不升；成功后立刻弹四选一（树暂停），选完恢复；`_refresh_hud` 末尾统一刷按钮，`_open_pick` / `_close_pick` 也各补一次，避免选卡期间按钮还挂着。截图 `docs/screenshots/v4-upgrade.png`、`v4-upgrade-on.png`。
