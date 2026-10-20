@@ -197,13 +197,12 @@ var craft_seq := 0
 ## 各阶实际合出来的数量（平衡观察用，也进 playtest 日志）
 var crafted := {}
 
-# --- 装置背包（plan-v6 §5.2B）：装置产物先进这里，点一下才进模块库存 ---
-var device_bag: Array = []
-var device_bag_cap := 2
+# --- 装置槽位（plan-v7 §2）：只能放这么多台装置，产物直接进模块库存 ---
+var device_slots := 2
 ## 扩容价格：50 起步、每次 ×2.2 再取整到 5 的倍数（50/110/242/532）
 const BAG_COST_BASE := 50.0
 const BAG_COST_GROWTH := 2.2
-const BAG_CAP_MAX := 8
+const SLOT_MAX := 8
 ## 装置升级价（lv1→2 要 30、→3 要 60、→4 要 120、→5 要 240）
 const DEVICE_LV_COSTS := [0, 30, 60, 120, 240]
 const DEVICE_LV_MAX := 5
@@ -2025,7 +2024,7 @@ func _use_weapon(i: int) -> void:
 	weapon = weapons[sel]
 
 
-## 背包占用 = 武器数（plan-v6 §5.2A：装置不再占模块背包，装置有自己的 device_bag）
+## 背包占用 = 武器数（plan-v6 §5.2A：装置不占模块背包；装置台数由 device_slots 限制）
 func _backpack_used() -> int:
 	return weapons.size()
 
@@ -3614,40 +3613,23 @@ func _new_device() -> Dictionary:
 	return {"kind": "", "left": 0.0, "total": 0.0, "auto": false, "paid": [], "lv": 1}
 
 
-## 装置背包是不是满了（满了装置停工，产物不丢）
-func _bag_full() -> bool:
-	return device_bag.size() >= device_bag_cap
-
-
 ## 本次扩容要多少个模块：按「已经扩过几次」算价格（50 → 110 → 242 → 532）
-func bag_expand_cost() -> int:
-	var n := maxi(0, device_bag_cap - 2)
+func slot_expand_cost() -> int:
+	var n := maxi(0, device_slots - 2)
 	return int(round(BAG_COST_BASE * pow(BAG_COST_GROWTH, n) / 5.0) * 5.0)
 
 
-## 扩容装置背包（plan-v6 §5.2B）：材料按阶从低到高扣
-func expand_device_bag() -> bool:
-	if device_bag_cap >= BAG_CAP_MAX:
+## 扩容装置槽位（plan-v7 §2）：材料按阶从低到高扣；槽位决定最多能摆几台装置
+func expand_device_slots() -> bool:
+	if device_slots >= SLOT_MAX:
 		return false
-	var cost := bag_expand_cost()
+	var cost := slot_expand_cost()
 	if not _take_level_mat(cost):
 		_toast("扩容要 %d 个模块，库存不够" % cost)
 		return false
-	device_bag_cap += 1
-	_toast("装置背包扩到 %d 格" % device_bag_cap)
+	device_slots += 1
+	_toast("装置槽位扩到 %d 个" % device_slots)
 	return true
-
-
-## 把装置背包里的第 i 个产物取到模块库存（模块背包满了就不给取）
-func take_from_bag(i: int) -> void:
-	if i < 0 or i >= device_bag.size():
-		return
-	if backpack_cap >= 0 and _backpack_used() >= backpack_cap:
-		_toast("模块背包已满（%d/%d），先腾一格" % [_backpack_used(), backpack_cap])
-		return
-	_add_inv(String(device_bag[i]), 1)
-	device_bag.remove_at(i)
-	_refresh_build()
 
 
 ## 这台装置升下一级要多少模块（1→2 30、→3 60、→4 120、→5 240）
@@ -3658,11 +3640,12 @@ func device_upgrade_cost(d: Dictionary) -> int:
 	return int(DEVICE_LV_COSTS[mini(lv, DEVICE_LV_COSTS.size() - 1)])
 
 
-## 装置升级（plan-v6 §5.2C）：三线效果
-##   lv2+ 合成时间每级 −8%
-##   lv3+ 装置背包 +1（每台三级的装置各加一格）
-##   lv4+ 自动开关默认打开
-##   lv5  成品 15% 概率一次出 2 个
+## 装置等级只影响速度：合成时间 × 0.88^(lv−1)（Lv5 −40%）
+func device_speed(d: Dictionary) -> float:
+	return pow(0.88, float(int(d.get("lv", 1)) - 1))
+
+
+## 装置升级（plan-v7 §2）：只加速，不再附带背包/自动/双份
 func upgrade_device(idx: int) -> bool:
 	if idx < 0 or idx >= devices.size():
 		return false
@@ -3675,22 +3658,8 @@ func upgrade_device(idx: int) -> bool:
 		_toast("升级要 %d 个模块，库存不够" % cost)
 		return false
 	d["lv"] = lv + 1
-	if int(d["lv"]) >= 4:
-		d["auto"] = true
-	_recalc_bag_cap()
-	_toast("装置升到 Lv%d" % int(d["lv"]))
+	_toast("装置升到 Lv%d（合成 −%d%%）" % [int(d["lv"]), int(round((1.0 - device_speed(d)) * 100.0))])
 	return true
-
-
-## 装置背包总容量 = 基础 device_bag_cap + 每台 lv≥3 的装置各 1 格
-func _recalc_bag_cap() -> void:
-	var base := 1
-	for d in devices:
-		if int(d.get("lv", 1)) >= 3:
-			base += 1
-	device_bag_cap = maxi(device_bag_cap, base)
-
-
 ## 第 (n+1) 台装置的价格：开局那台免费，第 2 台 12、第 3 台 20、第 4 台 35 ……
 func device_cost() -> int:
 	var base := DEVICE_COST_BASE * pow(DEVICE_COST_GROWTH, maxf(0.0, devices.size() - 1.0))
@@ -3715,7 +3684,7 @@ func _busy_devices() -> int:
 
 ## 用基础模块造一台新装置（材料堆积时的唯一出口）
 func buy_device() -> bool:
-	if devices.size() >= DEVICE_MAX:
+	if devices.size() >= device_slots:
 		return false
 	var cost := device_cost()
 	if _inv("base") < cost:
@@ -3744,37 +3713,25 @@ func _craft_tick(delta: float) -> void:
 		if float(d["left"]) > 0.0:
 			continue
 		var k := String(d["kind"])
-		# 装置背包满：停工等玩家来取（进度冻在 0，不丢产物、不重复扣料）
-		if _bag_full():
-			d["left"] = 0.01
-			continue
 		d["kind"] = ""
 		d["left"] = 0.0
 		d["total"] = 0.0
 		d["paid"] = []
 		crafted[k] = int(crafted.get(k, 0)) + 1
-		# 人类：产物只进库存，装到哪一格是玩家的决定（plan-v5 §1.2 第 1 条，没有开关）；
+		# 人类：产物直接进模块库存（plan-v7 §2：装置背包不再是产物暂存区）；
 		# bot / autoplan：保持自动装板，回归曲线不断
 		if autoplan or bot:
 			_install(k)
 		else:
-			device_bag.append(k)
-			if device_bag.size() >= device_bag_cap:
-				_toast("装置背包满（%d/%d）：点装置页里的产物取走" % [device_bag.size(), device_bag_cap])
-		# 精炼 buff（§9.3 refine 族）：按概率多出一个
+			_add_inv(k, 1)
+			_toast("合成完成：%s +1（库存 %d）" % [String(MODULES[k]["name"]), _inv(k)])
+		# 精炼 buff（refine 族）：按概率多出一个
 		if rng.randf() < minf(0.60, _buff_sum("refine")):
 			if autoplan or bot:
 				_add_inv(k, 1)
-			elif not _bag_full():
-				device_bag.append(k)
-			_toast("精炼：多出 1 个%s" % String(MODULES[k]["name"]))
-		# lv5 装置：15% 概率一次出 2 个
-		if int(d.get("lv", 1)) >= 5 and rng.randf() < 0.15:
-			if autoplan or bot:
+			else:
 				_add_inv(k, 1)
-			elif not _bag_full():
-				device_bag.append(k)
-			_toast("装置 Lv5 双份：多出 1 个%s" % String(MODULES[k]["name"]))
+			_toast("精炼：多出 1 个%s" % String(MODULES[k]["name"]))
 		# 「自动」装置做完立刻接下一个：先试同一个配方，材料不够就退回自动挑一个
 		if bool(d.get("auto", false)):
 			if not try_craft(k, devices.find(d)):
@@ -3842,11 +3799,8 @@ func try_craft(mid: String = "", idx: int = -1) -> bool:
 		for p in paid:
 			_add_inv(String(p), 1)
 		return false
-	var dur := float(CRAFT_TIME[t]) * _buff_mul("craft")
-	# 装置等级：每级 −8% 时间（plan-v6 §5.2C）
-	var lv := int(devices[idx].get("lv", 1))
-	if lv > 1:
-		dur *= pow(0.92, float(lv - 1))
+	# 装置等级只影响速度：合成时间 × 0.88^(lv−1)（plan-v7 §2）
+	var dur := float(CRAFT_TIME[t]) * _buff_mul("craft") * device_speed(devices[idx])
 	devices[idx]["kind"] = mid
 	devices[idx]["total"] = dur
 	devices[idx]["left"] = dur
@@ -4225,8 +4179,8 @@ func _refresh_hud() -> void:
 	]
 	if _count_filled() == 0:
 		hud_ammo.text += "    模块耗尽 · 仅基础 %.1f" % float(weapon.base)
-	hud_ammo.text += "    装置 %d/%d 台    背包 %d%s" % [
-		_busy_devices(), devices.size(), _backpack_used(),
+	hud_ammo.text += "    装置 %d/%d 台（忙 %d）    背包 %d%s" % [
+		devices.size(), device_slots, _busy_devices(), _backpack_used(),
 		"" if backpack_cap < 0 else "/%d" % backpack_cap
 	]
 	hud_ammo.add_theme_color_override("font_color",
@@ -4387,9 +4341,8 @@ func _refresh_build() -> void:
 	info.append("曲线   Lv%d 要 %d · Lv%d 要 %d（前 %d 级 ×%.2f，之后 ×%.2f）" % [
 		level + 1, _level_cost_at(level + 1), level + 2, _level_cost_at(level + 2),
 		LEVEL_COST_SOFT, LEVEL_COST_GROWTH, LEVEL_COST_GROWTH_LATE])
-	info.append("受击补偿 +%d     装置 %d 台（空闲 %d · 背包 %d/%d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
-		modules_from_damage, devices.size(), devices.size() - _busy_devices(),
-		device_bag.size(), device_bag_cap,
+	info.append("受击补偿 +%d     装置 %d/%d 台（空闲 %d）     净弹药 %+.2f/s     实测 %.1f / 理论 %.1f" % [
+		modules_from_damage, devices.size(), device_slots, devices.size() - _busy_devices(),
 		cur_drop() - cur_burn(), cur_actual_dps(), cur_dps()
 	])
 	# buff 一览（plan-v5 §9.7）：一族一行，白/蓝/紫/金 四格各自等级
@@ -4599,35 +4552,23 @@ func _rebuild_tab_device() -> void:
 		_rebuild_device_pick()
 		return
 	var y := 0.0
-	# 装置背包（plan-v6 §5.2B）：产物先放这里，点一下才进模块库存
+	# 装置槽位（plan-v7 §2）：槽位只限制能摆几台装置，产物做完直接进模块库存
 	var bh := _label(tab_body, Vector2(0, y), 15, UIKit.C_GOLD)
-	bh.text = "装置背包 %d/%d" % [device_bag.size(), device_bag_cap]
+	bh.text = "装置槽位 %d/%d" % [devices.size(), device_slots]
 	y += 24.0
-	if device_bag.is_empty():
-		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "空着 —— 装置做完会先放到这里"
-		y += 28.0
+	if devices.size() < device_slots:
+		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "空槽 %d 个 —— 下面「造一台装置」占一个槽" % (device_slots - devices.size())
 	else:
-		for i in device_bag.size():
-			var bid := String(device_bag[i])
-			var bn := String(MODULES[bid]["name"]) if MODULES.has(bid) else bid
-			var b := UIKit.button("取 %s" % bn, Vector2(150, 26), UIKit.C_GREEN, 14)
-			b.position = Vector2(150.0 * float(i % 3), y)
-			b.tooltip_text = "取到模块库存（占模块背包一格）"
-			b.pressed.connect(take_from_bag.bind(i))
-			tab_body.add_child(b)
-			if i % 3 == 2:
-				y += 30.0
-		if device_bag.size() % 3 != 0:
-			y += 30.0
-	# 扩容
-	if device_bag_cap < BAG_CAP_MAX:
-		var ecost := bag_expand_cost()
-		_tab_row(y, "扩容装置背包到 %d 格（要 %d 个模块）" % [device_bag_cap + 1, ecost], UIKit.C_BLUE,
+		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "槽位已占满 —— 想多摆就先扩容"
+	y += 28.0
+	if device_slots < SLOT_MAX:
+		var ecost := slot_expand_cost()
+		_tab_row(y, "扩容到 %d 个槽位（要 %d 个模块）" % [device_slots + 1, ecost], UIKit.C_BLUE,
 			"扩容", _expand_bag_from_tab, _inv_total() >= ecost,
-			"价格 50 起步、每次 ×2.2（50 / 110 / 242 / 532）；满了装置停工")
+			"价格 50 起步、每次 ×2.2（50 / 110 / 242 / 532）；槽位只限装置台数")
 		y += 38.0
 	else:
-		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "装置背包已到上限 %d 格" % BAG_CAP_MAX
+		_label(tab_body, Vector2(0, y), 13, UIKit.C_DIM).text = "槽位已到上限 %d 个" % SLOT_MAX
 		y += 28.0
 	for i in devices.size():
 		var dv: Dictionary = devices[i]
@@ -4679,9 +4620,8 @@ func _rebuild_tab_device() -> void:
 			var ucost := device_upgrade_cost(dv)
 			var ub := UIKit.button("升级 %d" % ucost, Vector2(96, 26), UIKit.C_GOLD, 14)
 			ub.position = Vector2(490, y - 2)
-			ub.tooltip_text = "Lv%d → Lv%d：合成 −8%%%s" % [
-				lv, lv + 1,
-				"、背包 +1" if lv + 1 == 3 else ("、自动默认开" if lv + 1 == 4 else ("、15% 出双份" if lv + 1 == 5 else ""))]
+			ub.tooltip_text = "Lv%d → Lv%d：合成时间 −%d%%" % [
+				lv, lv + 1, int(round((1.0 - pow(0.88, float(lv))) * 100.0))]
 			ub.pressed.connect(_upgrade_device_from_tab.bind(i))
 			tab_body.add_child(ub)
 		else:
@@ -4695,15 +4635,15 @@ func _rebuild_tab_device() -> void:
 	var head := _label(tab_body, Vector2(0, y + 2), 13, UIKit.C_DIM)
 	head.text = "共 %d 台 · 空闲 %d · 自动 %d" % [devices.size(), idle, auto_n]
 	y += 26.0
-	if devices.size() < DEVICE_MAX:
+	if devices.size() < device_slots:
 		var cost := device_cost()
 		var can := _inv("base") >= cost
 		_tab_row(y, "再造一台装置（需要 %d 个基础模块）" % cost, UIKit.C_BLUE, "造",
-			_buy_device_from_tab, can, "吃基础模块；装置越多并行合成越快")
+			_buy_device_from_tab, can, "吃基础模块；占一个装置槽位，装置越多并行合成越快")
 		if not can:
 			_label(tab_body, Vector2(0, y + 24), 13, UIKit.C_RED).text = "基础模块不够：现有 %d，需要 %d" % [_inv("base"), cost]
 	else:
-		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "装置已满（%d 台）" % DEVICE_MAX
+		_label(tab_body, Vector2(0, y + 6), 14, UIKit.C_DIM).text = "槽位满了（%d/%d）：先扩容再加" % [devices.size(), device_slots]
 
 ## Buff 页：手上所有变体按类别分组，悬浮看当前/下一级效果（plan-v6 追加需求）
 func _rebuild_tab_buff() -> void:
@@ -4749,7 +4689,7 @@ func _rebuild_tab_buff() -> void:
 
 ## 装置页的两个小回调（按钮只接了无参函数）
 func _expand_bag_from_tab() -> void:
-	expand_device_bag()
+	expand_device_slots()
 	_refresh_build()
 
 
@@ -5889,7 +5829,7 @@ func _bot_step(delta: float) -> void:
 	while guard < 4 and try_craft():
 		guard += 1
 	# 装置越多越好（每台 = 一个并行合成位），别等全忙了才想起来造
-	if devices.size() < DEVICE_MAX and _inv("base") >= device_cost():
+	if devices.size() < device_slots and _inv("base") >= device_cost():
 		buy_device()
 	if _inv_total() >= level_cost() * 3:
 		try_level()
@@ -5973,7 +5913,7 @@ func _pt_log() -> void:
 	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d fill=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d buff=%d/%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
 		cur_drop(), cur_burn(), level, bfill, (bw["slots"] as Array).size(), bmiss, 1 if auto_fill else 0,
-		_busy_devices(), devices.size(), comp, _inv_str(),
+		devices.size(), device_slots, comp, _inv_str(),
 		crafted.get("base", 0), crafted.get("add", 0), crafted.get("amp", 0), crafted.get("reson", 0), kills_total,
 		float(dmg_src["contact"]), float(dmg_src["bullet"]), float(dmg_src["dash"]),
 		enemies.size(), player.position.x, player.position.y, _cam_pos.x, _cam_pos.y, _count_variant("brute"), recipe_unlocked.size(), _count_kind("flood"), _count_kind("runner"), _count_kind("rock"), _count_kind("shooter"),
