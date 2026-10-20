@@ -1,4 +1,4 @@
-﻿extends Node2D
+extends Node2D
 ## 游戏主控制器（编排层）。
 ##
 ## 职责：创建场景节点、跑主循环（刷怪 → 合成 → 开火 → 接触伤害 → HUD）、
@@ -211,9 +211,10 @@ var no_auto_craft := false
 var pause_reasons := {}
 # `level +n` 连续选卡的待办数，关掉面板时自动弹下一张（docs/plan-v4.md §1.3）
 var pending_levels := 0
-# 开发控制台（docs/plan-v4.md §1）：输出 4 行 + 输入行，打开时独占键盘
+# 开发控制台（docs/plan-v4.md §1）：下 45% 可滚动输出 + 输入行，打开时独占键盘
 var console_root: Control = null
-var console_out: Label = null
+var console_rich: RichTextLabel = null
+var console_hint: Label = null
 var console_input: LineEdit = null
 var console_lines: Array = []
 var console_hist: Array = []
@@ -829,7 +830,7 @@ func _make_hud() -> void:
 # 2. 输入
 # ============================================================================
 func _input(event: InputEvent) -> void:
-	# 控制台打开时独占键盘：除 Esc / ↑↓ 外全部交给输入行，其它快捷键一律不响应
+	# 控制台打开时独占键盘：除 Esc / ↑↓ / Tab 外全部交给输入行，其它快捷键一律不响应
 	if console_open:
 		if event is InputEventKey and event.pressed and not event.echo:
 			match event.keycode:
@@ -843,6 +844,10 @@ func _input(event: InputEvent) -> void:
 					return
 				KEY_DOWN:
 					_console_hist_move(1)
+					get_viewport().set_input_as_handled()
+					return
+				KEY_TAB:
+					_console_complete()
 					get_viewport().set_input_as_handled()
 					return
 		return
@@ -865,8 +870,8 @@ func _input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var k: int = event.keycode
-	# 控制台开关：/ 或 ~ 或 `（docs/plan-v4.md §1）
-	if k == KEY_SLASH or k == KEY_ASCIITILDE or k == KEY_QUOTELEFT:
+	# 控制台开关：F1 或 / 或 ~ 或 `（docs/plan-v4.md §1）
+	if k == KEY_F1 or k == KEY_SLASH or k == KEY_ASCIITILDE or k == KEY_QUOTELEFT:
 		if not dead and not picking:
 			_open_console()
 			get_viewport().set_input_as_handled()
@@ -2773,7 +2778,7 @@ func cur_drop() -> float:
 func _refresh_hud() -> void:
 	if hud_status == null:
 		return
-	hud_status.text = "HP %d/%d    波次 %d · %s    时间 %s    等级 %d" % [
+	hud_status.text = ("GOD    " if god else "") + "HP %d/%d    波次 %d · %s    时间 %s    等级 %d" % [
 		int(maxf(hp, 0.0)), int(max_hp), wave, _plan()["name"], _fmt_time(elapsed), level
 	]
 	var net := cur_drop() - cur_burn()
@@ -3834,6 +3839,7 @@ func _paint_replace() -> void:
 # CLI: -- "cheat=rich,god,level,wave=15"（逗号分隔，可叠加）
 # 运行时请用控制台（/ 或 ` 打开，docs/plan-v4.md §1），F5–F9 快捷键已移除
 func _apply_cheats(spec: String) -> void:
+	# CLI `cheat=` 只做参数映射，具体行为全部走控制台同一套 _cmd_*（docs/plan-v4.md §1.3）
 	for raw in spec.split(",", false):
 		var item := raw.strip_edges()
 		if item == "":
@@ -3843,38 +3849,29 @@ func _apply_cheats(spec: String) -> void:
 		var val := int(kv[1]) if kv.size() > 1 else 0
 		match key:
 			"rich":
-				_add_inv("base", 500)
-				print("[cheat] +500 基础模块")
+				print("[cheat] " + _cmd_give(["base", "500"]))
 			"modules":
 				for k in MOD_ORDER:
-					_add_inv(String(k), 20)
-				_add_inv("base", 300)
-				print("[cheat] 每种模块 +20，基础 +300")
+					_cmd_give([String(k), "20"])
+				print("[cheat] " + _cmd_give(["base", "300"]))
 			"god":
-				god = true
-				print("[cheat] 无敌开")
+				if not god:
+					print("[cheat] " + _cmd_god([]))
 			"level":
-				level = maxi(level, 25 if val <= 0 else val)
-				print("[cheat] 等级 = %d" % level)
+				# 无头自测不能弹选卡（树一暂停机器人就停了）：quiet 只设等级（§7.4）
+				var target := maxi(level, 25 if val <= 0 else val)
+				print("[cheat] " + _cmd_level([str(target), "quiet"]))
 			"wave":
-				elapsed = maxf(0.0, float(val - 1) * WAVE_SEC)
-				wave = maxi(1, val)
-				print("[cheat] 跳到第 %d 波（elapsed=%.0f）" % [wave, elapsed])
+				print("[cheat] " + _cmd_wave([str(maxi(1, val))]))
 			"weapons":
 				_give_all_weapons()
 				print("[cheat] 发全套武器，背包 %d" % weapons.size())
 			"devices":
-				var n: int = maxi(1, val if val > 0 else 5)
-				for i in n:
-					devices.append(_new_device())
-				print("[cheat] 装置 +%d（共 %d 台）" % [n, devices.size()])
+				print("[cheat] " + _cmd_device([str(maxi(1, val if val > 0 else 5))]))
 			"hp":
-				max_hp = 9999.0
-				hp = max_hp
-				print("[cheat] HP 拉满")
+				print("[cheat] " + _cmd_hp(["9999"]))
 			_:
 				print("[cheat] 未知作弊码：%s" % key)
-
 
 func _give_all_weapons() -> void:
 	for id in ["pistol", "smg", "shotgun", "sniper", "beam", "grenade", "blade", "laser"]:
@@ -4150,8 +4147,9 @@ func _update_debug(delta: float) -> void:
 	vis_enemy = vis
 	enemy_ms = float(Time.get_ticks_usec() - t0) / 1000.0
 	if hud_stat != null:
-		hud_stat.text = "FPS %d · 敌 %d(可见 %d)" % [
-			int(Engine.get_frames_per_second()), enemies.size(), vis]
+		hud_stat.text = "FPS %d · 敌 %d(可见 %d)%s" % [
+			int(Engine.get_frames_per_second()), enemies.size(), vis,
+			"" if is_equal_approx(Engine.time_scale, 1.0) else "   ×%.2f" % Engine.time_scale]
 	_refresh_dbg_panel(enemies.size())
 
 
@@ -4209,12 +4207,16 @@ func _run_rolltest(n: int = 300) -> void:
 # ============================================================================
 # 16. 开发控制台（docs/plan-v4.md §1）
 # ============================================================================
-## 面板：深色 + 青色边，位置避开左上 HUD 与右下弹药栏。
-## 打开时独占键盘（见 _input），关闭后一切照旧。
+const CONSOLE_MAX_LINES := 200
+const CONSOLE_CMDS := ["help", "speed", "level", "wave", "weapon", "give", "device",
+	"god", "hp", "kill", "spawn", "fps", "restart", "clear"]
+
+
+## 屏幕下 45%：深色底 + 左侧青色竖线。输出区可滚动，输入行贴底。
 func _make_console(parent: Node) -> void:
 	console_root = Control.new()
-	console_root.position = Vector2(230, 36)
-	console_root.size = Vector2(820, 260)
+	console_root.position = Vector2(0, 396)
+	console_root.size = Vector2(1280, 324)
 	console_root.mouse_filter = Control.MOUSE_FILTER_STOP
 	console_root.process_mode = Node.PROCESS_MODE_ALWAYS
 	console_root.visible = false
@@ -4224,33 +4226,47 @@ func _make_console(parent: Node) -> void:
 	panel.set_anchors_preset(Control.PRESET_FULL_RECT)
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.04, 0.05, 0.08, 0.96)
-	sb.border_color = Color(0.35, 0.80, 0.85, 0.9)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(8)
+	sb.bg_color = Color(0.04, 0.05, 0.08, 0.92)
+	sb.border_color = Color(0.35, 0.85, 0.92, 0.85)
+	sb.set_border_width_all(0)
+	sb.border_width_left = 4
 	panel.add_theme_stylebox_override("panel", sb)
 	console_root.add_child(panel)
 
-	_label(console_root, Vector2(18, 9), 18, Color(0.62, 0.95, 1.0)).text = "控制台"
-	_label(console_root, Vector2(88, 13), 13, Color(0.55, 0.60, 0.68)).text = "help 看命令 · ↑↓ 历史 · Esc 关闭"
+	# 顶部 1px 分隔线：把控制台和上面的 HUD 切开
+	var top_line := ColorRect.new()
+	top_line.color = Color(0.22, 0.34, 0.44, 0.9)
+	top_line.position = Vector2(4, 0)
+	top_line.size = Vector2(1276, 1)
+	top_line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	console_root.add_child(top_line)
 
-	console_out = Label.new()
-	console_out.position = Vector2(18, 40)
-	console_out.size = Vector2(784, 156)
-	console_out.clip_text = true
-	console_out.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	console_out.add_theme_font_size_override("font_size", 14)
-	console_out.add_theme_color_override("font_color", Color(0.82, 0.90, 0.86))
-	console_root.add_child(console_out)
+	_label(console_root, Vector2(20, 8), 17, Color(0.62, 0.95, 1.0)).text = "控制台"
+	_label(console_root, Vector2(92, 11), 13, Color(0.55, 0.60, 0.68)).text = \
+		"help 看命令 · ↑↓ 历史 · Tab 补全 · ; 分隔 · Esc 关闭"
 
-	_label(console_root, Vector2(18, 210), 16, Color(0.62, 0.95, 1.0)).text = ">"
+	console_rich = RichTextLabel.new()
+	console_rich.position = Vector2(20, 38)
+	console_rich.size = Vector2(1240, 206)
+	console_rich.bbcode_enabled = true
+	console_rich.scroll_active = true
+	console_rich.scroll_following = true
+	console_rich.mouse_filter = Control.MOUSE_FILTER_PASS
+	console_rich.add_theme_font_size_override("normal_font_size", 14)
+	console_root.add_child(console_rich)
+
+	console_hint = _label(console_root, Vector2(20, 250), 13, Color(0.50, 0.56, 0.64))
+	console_hint.text = ""
+
+	_label(console_root, Vector2(20, 274), 16, Color(0.62, 0.95, 1.0)).text = ">"
 	console_input = LineEdit.new()
-	console_input.position = Vector2(40, 202)
-	console_input.size = Vector2(762, 38)
+	console_input.position = Vector2(42, 266)
+	console_input.size = Vector2(1214, 42)
 	console_input.add_theme_font_size_override("font_size", 16)
-	console_input.placeholder_text = "输入命令，回车执行（help）"
+	console_input.placeholder_text = "输入命令，回车执行（输入 help 查看全部命令）"
 	console_input.caret_blink = true
 	console_input.text_submitted.connect(_console_submit)
+	console_input.text_changed.connect(_console_hint_update)
 	console_root.add_child(console_input)
 
 
@@ -4270,8 +4286,9 @@ func _open_console() -> void:
 	console_root.visible = true
 	_set_pause("console", true)
 	console_input.text = ""
+	console_hint.text = ""
 	if console_lines.is_empty():
-		_console_print("输入 help 看命令（↑↓ 历史 · Esc 关闭）")
+		_console_print("输入 help 看命令（↑↓ 历史 · Tab 补全 · Esc 关闭）")
 	console_input.grab_focus.call_deferred()
 
 
@@ -4287,19 +4304,23 @@ func _close_console() -> void:
 
 
 func _console_submit(raw: String) -> void:
-	var line := raw.strip_edges()
-	if line.is_empty():
-		return
-	if console_hist.is_empty() or String(console_hist[console_hist.size() - 1]) != line:
-		console_hist.append(line)
-		if console_hist.size() > 50:
-			console_hist.pop_front()
-	console_hist_i = console_hist.size()
-	_console_print("> " + line)
-	_console_print(_console_run(line))
 	if console_input != null:
 		console_input.text = ""
 		console_input.caret_column = 0
+	if console_hint != null:
+		console_hint.text = ""
+	# 批量：`god; speed 4; level 20`（§1.2）
+	for one in raw.split(";", false):
+		var line := one.strip_edges()
+		if line.is_empty():
+			continue
+		if console_hist.is_empty() or String(console_hist[console_hist.size() - 1]) != line:
+			console_hist.append(line)
+			if console_hist.size() > 50:
+				console_hist.pop_front()
+		console_hist_i = console_hist.size()
+		_console_print("> " + line, "#7f9bb0")
+		_console_print(_console_run(line))
 
 
 ## ↑↓ 翻历史：下标停在 size 时表示「空输入」
@@ -4311,16 +4332,71 @@ func _console_hist_move(d: int) -> void:
 	console_input.caret_column = console_input.text.length()
 
 
-## 只保留最近 4 行，避免 Label 越写越慢
-func _console_print(text: String) -> void:
+func _console_hint_update(txt: String) -> void:
+	if console_hint == null:
+		return
+	var pre := txt.strip_edges().to_lower()
+	if pre == "" or pre.contains(" "):
+		console_hint.text = ""
+		return
+	var hits: Array = []
+	for c in CONSOLE_CMDS:
+		if String(c).begins_with(pre):
+			hits.append(c)
+	console_hint.text = ("匹配：" + "  ".join(hits)) if not hits.is_empty() else ""
+
+
+## Tab：补全命令名；give 的第二个参数补模块 id（§1.1）
+func _console_complete() -> void:
+	if console_input == null:
+		return
+	var txt := console_input.text
+	var parts := txt.strip_edges().split(" ", false)
+	if parts.is_empty():
+		console_input.text = "help"
+		console_input.caret_column = 4
+		return
+	if txt.strip_edges().contains(" "):
+		var head := String(parts[0]).to_lower()
+		var prefix := String(parts[parts.size() - 1])
+		var pool: Array = MODULES.keys() if head == "give" else (WEAPONS.keys() if head == "weapon" else [])
+		for k in pool:
+			var ks := String(k)
+			if ks.begins_with(prefix) and ks != prefix:
+				parts[parts.size() - 1] = ks
+				console_input.text = " ".join(parts)
+				console_input.caret_column = console_input.text.length()
+				return
+		return
+	var pre := String(parts[0]).to_lower()
+	for c in CONSOLE_CMDS:
+		if String(c).begins_with(pre) and String(c) != pre:
+			console_input.text = String(c) + " "
+			console_input.caret_column = console_input.text.length()
+			return
+
+
+## 输出：`?` 红字（未知命令）、`!` 黄字（参数错）、其余正文绿字；只留最近 200 行
+func _console_print(text: String, hex: String = "") -> void:
 	if text == "":
 		return
+	var col := hex
+	if col == "":
+		if text.begins_with("?"):
+			col = "#ff8f8f"
+			text = text.substr(1)
+		elif text.begins_with("!"):
+			col = "#ffd27f"
+			text = text.substr(1)
+		else:
+			col = "#cfe8d8"
 	for ln in text.split("\n"):
-		console_lines.append(String(ln))
-	while console_lines.size() > 4:
+		console_lines.append("[color=%s]%s[/color]" % [col, ln])
+	while console_lines.size() > CONSOLE_MAX_LINES:
 		console_lines.pop_front()
-	if console_out != null:
-		console_out.text = "\n".join(console_lines)
+	if console_rich != null:
+		console_rich.text = "\n".join(console_lines)
+		console_rich.scroll_to_line(maxi(0, console_lines.size() - 1))
 
 
 func _console_run(line: String) -> String:
@@ -4346,45 +4422,96 @@ func _console_run(line: String) -> String:
 		"fps": return _cmd_fps(args)
 		"restart": return _cmd_restart(args)
 		"clear": return _cmd_clear(args)
-	return "未知命令：%s（输入 help 看命令）" % cmd
+	return _console_unknown(cmd)
 
 
-func _cmd_help(_args: Array) -> String:
-	return "运行  speed <倍率> / level [+n|-n] / wave <n> / restart\n" \
-		+ "战斗  weapon <id> / give <模块|武器> [n] / device [n] / god / hp [n]\n" \
-		+ "敌人  kill all|area|<kind> [r] / spawn <kind> [n] / fps / clear / help"
+## 未知命令：编辑距离 ≤2 给一条「你是不是想输入」
+func _console_unknown(cmd: String) -> String:
+	var best := ""
+	var bd := 99
+	for c in CONSOLE_CMDS:
+		var d := _edit_dist(cmd, String(c))
+		if d < bd:
+			bd = d
+			best = String(c)
+	var tail := "（你是不是想输入 %s）" % best if bd <= 2 else ""
+	return "?未知命令：%s%s" % [cmd, tail]
+
+
+func _edit_dist(a: String, b: String) -> int:
+	var n := a.length()
+	var m := b.length()
+	var dp: Array = []
+	for i in n + 1:
+		var row: Array = []
+		for j in m + 1:
+			row.append(0)
+		dp.append(row)
+	for i in n + 1:
+		dp[i][0] = i
+	for j in m + 1:
+		dp[0][j] = j
+	for i in range(1, n + 1):
+		for j in range(1, m + 1):
+			var cost := 0 if a[i - 1] == b[j - 1] else 1
+			dp[i][j] = mini(mini(int(dp[i - 1][j]) + 1, int(dp[i][j - 1]) + 1), int(dp[i - 1][j - 1]) + cost)
+	return int(dp[n][m])
+
+
+func _cmd_help(args: Array) -> String:
+	if args.is_empty():
+		return "运行  speed <倍率> / level <n|+n> / wave <n> / restart\n" \
+			+ "战斗  weapon <id> [品质1-5] / give <模块id> <数量> / device [台数] / god / hp <数值>\n" \
+			+ "敌人  kill / spawn <种类> <数量> / fps / clear / help [命令]"
+	var c := String(args[0]).to_lower()
+	match c:
+		"speed": return "speed <倍率>：0.25–8，speed 1 复原；倍速≠1 时 HUD 显示 ×N"
+		"level": return "level <n> 直接设等级 / level +n 连升 n 级（不扣材料，每次弹四选一）"
+		"wave": return "wave <n>：跳到第 n 波并触发开波（宝箱/精英）"
+		"weapon": return "weapon <id> [品质1-5]：获得并选中一把武器（id 见 reference §1）"
+		"give": return "give <模块id> <数量>：往库存加模块"
+		"device": return "device [台数]：免费造装置（默认 1 台，上限 %d 台）" % DEVICE_MAX
+		"god": return "god：无敌开关（HUD 左上显示 GOD）"
+		"hp": return "hp <数值>：设置当前 HP"
+		"kill": return "kill：清空场上敌人（不计击杀、不掉落）"
+		"spawn": return "spawn <种类> <数量>：在屏外生成指定敌人（flood/runner/rock/shooter/charger）"
+		"fps": return "fps：切换 F3 调试面板"
+		"restart": return "restart：重开一局"
+		"clear": return "clear：清空输出区"
+		"help": return "help [命令]：列出全部命令 / 单条用法"
+	return "!未知命令：%s" % c
 
 
 func _cmd_speed(args: Array) -> String:
 	if args.is_empty():
-		return "倍速 %.2f" % Engine.time_scale
-	var v := absf(String(args[0]).to_float())
-	if v <= 0.0:
-		return "倍速要是正数"
-	Engine.time_scale = clampf(v, 0.1, 8.0)
-	return "倍速 → %.2f" % Engine.time_scale
+		return "!用法：speed <倍率>（当前 %.2f）" % Engine.time_scale
+	var v := String(args[0]).to_float()
+	if v < 0.25 or v > 8.0:
+		return "!倍速范围 0.25–8：%s" % String(args[0])
+	Engine.time_scale = v
+	return "倍速 → %.2f" % v
 
 
 func _cmd_level(args: Array) -> String:
 	if args.is_empty():
-		if try_level():
-			return "升级 → Lv%d" % level
-		return "材料不够：库存 %d / 需要 %d" % [_inv_total(), level_cost()]
+		return "!用法：level <n> 或 level +n（当前 Lv%d，升级需要 %d 个模块，现有 %d）" % [
+			level, level_cost(), _inv_total()]
 	var txt := String(args[0])
 	if txt.begins_with("+"):
 		var n := maxi(1, int(txt.substr(1)))
 		_gain_levels(n)
 		return "连升 %d 级（一张一张选）" % n
-	if txt.begins_with("-"):
-		level = maxi(0, level - maxi(1, int(txt.substr(1))))
-		return "等级 → %d" % level
-	level = maxi(level, int(txt))
-	return "等级 = %d" % level
+	var n := int(txt)
+	if n <= level:
+		return "!等级只能往上：当前 Lv%d" % level
+	level = n - 1
+	_gain_level()
+	return "等级 → %d（弹一次四选一）" % n
 
 
 func _cmd_wave(args: Array) -> String:
 	if args.is_empty():
-		return "当前第 %d 波（%s）" % [wave, _fmt_time(elapsed)]
+		return "!用法：wave <n>（当前第 %d 波）" % wave
 	var n := maxi(1, int(String(args[0])))
 	elapsed = float(n - 1) * WAVE_SEC
 	wave = n
@@ -4399,31 +4526,31 @@ func _cmd_weapon(args: Array) -> String:
 			names.append(String(w["id"]))
 		return "当前武器：" + (", ".join(names) if not names.is_empty() else "无")
 	var id := String(args[0])
+	if not WEAPONS.has(id):
+		return "!未知武器：%s（pistol/smg/shotgun/sniper/laser/beam/grenade/blade）" % id
+	var q := clampi(int(String(args[1])) if args.size() > 1 else 3, 1, 5)
 	for i in weapons.size():
 		if String(weapons[i]["id"]) == id:
 			_use_weapon(i)
-			return "切到 %s" % id
-	return "没有这把武器：%s" % id
+			return "选中已有 %s（%s）" % [id, String(QUALITY_NAME[q])]
+	if _backpack_used() >= backpack_cap:
+		return "!背包已满（%d/%d）：先按 F 关掉不用的武器，或合成掉一些模块" % [_backpack_used(), backpack_cap]
+	weapons.append(_make_weapon(id, q))
+	_use_weapon(weapons.size() - 1)
+	_refresh_hud()
+	return "获得并选中 %s（%s）" % [id, String(QUALITY_NAME[q])]
 
 
 func _cmd_give(args: Array) -> String:
-	if args.is_empty():
-		return "用法：give <模块|武器> [数量]"
+	if args.size() < 2:
+		return "!用法：give <模块id> <数量>"
 	var id := String(args[0])
-	var n := maxi(1, int(String(args[1]))) if args.size() > 1 else 1
-	if MODULES.has(id):
-		_add_inv(id, n)
-		return "获得 %s ×%d（库存 %d）" % [id, n, _inv(id)]
-	if WEAPONS.has(id):
-		var added := 0
-		for i in n:
-			if _backpack_used() >= backpack_cap:
-				break
-			weapons.append(_make_weapon(id, 3))
-			added += 1
-		_refresh_hud()
-		return "获得武器 %s ×%d" % [id, added]
-	return "未知模块/武器：%s" % id
+	if not MODULES.has(id):
+		return "!未知模块：%s" % id
+	var n := maxi(1, int(String(args[1])))
+	_add_inv(id, n)
+	_refresh_hud()
+	return "获得 %s ×%d（库存 %d）" % [id, n, _inv(id)]
 
 
 func _cmd_device(args: Array) -> String:
@@ -4441,56 +4568,55 @@ func _cmd_device(args: Array) -> String:
 
 func _cmd_god(_args: Array) -> String:
 	god = not god
+	_refresh_hud()
 	return "无敌 %s" % ("开" if god else "关")
 
 
 func _cmd_hp(args: Array) -> String:
-	var v := 9999.0 if args.is_empty() else maxf(1.0, String(args[0]).to_float())
-	max_hp = v
-	hp = max_hp
+	if args.is_empty():
+		return "!用法：hp <数值>（当前 %d/%d）" % [int(hp), int(max_hp)]
+	var v := clampf(String(args[0]).to_float(), 1.0, 99999.0)
+	max_hp = maxf(max_hp, v)
+	hp = v
+	_refresh_hud()
 	return "HP = %d / %d" % [int(hp), int(max_hp)]
 
 
 func _cmd_kill(args: Array) -> String:
-	var mode := "all" if args.is_empty() else String(args[0])
-	var r := 260.0
-	if args.size() > 1:
-		r = maxf(1.0, String(args[1]).to_float())
-	var hit := 0
+	if not args.is_empty():
+		return "!kill 不带参数：清空场上全部敌人"
+	var n := 0
 	for e in get_tree().get_nodes_in_group("enemy"):
-		if not is_instance_valid(e):
-			continue
-		var near: bool = player != null and e.position.distance_to(player.position) <= r
-		if mode == "all" or (mode == "area" and near) or e.kind == mode:
-			_kill(e)
-			hit += 1
-	return "清掉 %d 只敌人" % hit
+		if is_instance_valid(e):
+			e.queue_free()
+			n += 1
+	return "清空 %d 只敌人（不计击杀、不掉落）" % n
 
 
 func _cmd_spawn(args: Array) -> String:
 	if args.is_empty():
-		var ks: Array = []
-		for k in ENEMY_KINDS:
-			ks.append(String(k))
-		return "用法：spawn <kind> [数量]（%s）" % ", ".join(ks)
+		return "!用法：spawn <种类> <数量>（flood/runner/rock/shooter/charger）"
 	var kind := String(args[0])
 	if not ENEMY_KINDS.has(kind):
-		return "未知敌人类型：%s" % kind
+		return "!未知敌人类型：%s" % kind
 	var n := clampi(int(String(args[1])) if args.size() > 1 else 1, 1, 200)
 	var made := 0
 	for i in n:
 		if get_tree().get_nodes_in_group("enemy").size() >= MAX_ENEMIES:
 			break
 		var ang := rng.randf() * TAU
-		_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(420.0, 520.0), kind)
+		# 屏外生成：和正常刷怪同一个半径区间（docs/plan-v4.md §3.4）
+		_spawn_enemy_at(player.position + Vector2.from_angle(ang) * rng.randf_range(SPAWN_R_MIN, SPAWN_R_MAX), kind)
 		made += 1
-	return "生成 %s ×%d" % [kind, made]
+	return "屏外生成 %s ×%d" % [kind, made]
 
 
 func _cmd_fps(_args: Array) -> String:
-	return "FPS %d · 帧 %.1fms · 敌人 %d/%d · 倍速 %.2f" % [
-		int(Engine.get_frames_per_second()), frame_ms,
-		get_tree().get_nodes_in_group("enemy").size(), MAX_ENEMIES, Engine.time_scale]
+	dbg_on = not dbg_on
+	if dbg_root != null:
+		dbg_root.visible = dbg_on
+	_refresh_dbg_panel(get_tree().get_nodes_in_group("enemy").size())
+	return "F3 调试面板 %s" % ("开" if dbg_on else "关")
 
 
 func _cmd_restart(_args: Array) -> String:
@@ -4502,9 +4628,6 @@ func _cmd_restart(_args: Array) -> String:
 
 func _cmd_clear(_args: Array) -> String:
 	console_lines.clear()
-	if console_out != null:
-		console_out.text = ""
+	if console_rich != null:
+		console_rich.text = ""
 	return ""
-
-
-

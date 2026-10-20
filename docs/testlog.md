@@ -60,3 +60,9 @@
 - 关键输出（修后）：`t=586 w=15 dps=237.2 need=169.6 lvl=22 slot=4/4 miss=0 [2233] dev=3/3`、`[TEST] end t=600 wave=16 lvl=23 dps=136.3 need=222.0`
 - 结论：`_install` 在 autoplan/playtest/bot 下只填空槽；方案升级改成「寿命剩 25% 以下时才把 plan 改写成更高阶」，等烧空时由 `_refill` 按新方案补货 —— 既不顶掉模块，也不卡在 T1。另修 `_auto_plan_all` 用 `sel = i` 切武器无效（`weapon` 是别名，必须 `_use_weapon`）。
 - 装置按钮：`buy_device()` 需要 `背包 < 6`，之前背包满时按钮看着能点其实无效；现在按钮禁用 + 红字说明原因，并提供「丢弃当前武器（腾格子）」。
+## plan-v4 V1+V2 控制台
+
+- 命令：`godot --headless --path . -- consoletest`（临时钩子，验证后已删）＋`-- playtest bot pt=20 "cheat=rich,devices=3,wave=3"`＋截图 `-- "shot=docs/screenshots/v4-console.png" "shotat=3" shotconsole`
+- 目的：暂停来源集合、14 条命令、Tab 补全 / `;` 批量、CLI `cheat=` 改走同一套 `_cmd_*`
+- 关键输出：`CT ok open_paused / build_stacks / close_keeps_build / all_closed_unpause / speed4 / speed_bad / god_toggle / give / weapon_sniper sniper / hp / spawn 0->2 / kill / unknown / help / tab help / batch / level20 / pick_closed lvl=20`；`[cheat] 获得 base ×500（库存 502）`、`[cheat] 装置 +3（共 4/8）`、`[cheat] 跳到第 3 波`
+- 结论：暂停必须按来源计数（关控制台不能顺手把构筑屏的暂停也解除）；`cheat=level` 走 `_cmd_level([n, "quiet"])`，否则无头自测在 `_ready` 弹卡会把树暂停、机器人直接停摆。截图 `docs/screenshots/v4-console.png`。
