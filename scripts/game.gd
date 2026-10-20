@@ -265,6 +265,10 @@ var recycle_btn: Button = null
 ## 构筑屏顶部两个按钮：烧空自动补料开关（plan-v5 §1.4）；plan-v5 §1.5 的「保存方案」也挂在这条线上
 var fill_btn: Button = null
 var hud_fill: Label = null
+## 方案草稿 / 保存（plan-v5 §1.5）：草稿改了按「保存方案」才写进生效方案
+var save_btn: Button = null
+var revert_btn: Button = null
+var save_tween: Tween = null
 var slot_rects: Array = []
 var slot_panels: Array = []
 var inv_rows: Array = []
@@ -439,7 +443,9 @@ func _ready() -> void:
 	for i in weapon.slots.size():
 		weapon.slots[i] = _new_module("base")
 		# 开局满板基础模块，方案也一起登记；烧完补不补看 auto_fill（人类默认手动，见 plan-v5 §1.2）
-		weapon.plan[i] = "base"
+		weapon.plan_draft[i] = "base"
+	# 开局草稿 = 生效：否则一进构筑屏就显示「方案未保存」（plan-v5 §1.5 边界第 3 条）
+	_sync_plan(weapon)
 	_add_inv("base", 2)
 	devices.append(_new_device())
 	_make_player()
@@ -448,7 +454,8 @@ func _ready() -> void:
 	if plan_missing_demo:
 		for i in weapon.slots.size():
 			weapon.slots[i] = null
-			weapon.plan[i] = "reson"
+			weapon.plan_draft[i] = "reson"
+		_sync_plan(weapon)
 	if cheat_arg != "":
 		_apply_cheats(cheat_arg)
 	# bot / playtest 默认把所有装置设成自动，等价于旧版「装置一直在干活」的行为
@@ -875,9 +882,21 @@ func _make_hud() -> void:
 	# 烧空自动补料开关（plan-v5 §1.2/§1.4）：只影响「烧空后从库存补同 id」，
 	# 合成出件与地上捡到永远只进库存，不受这里影响
 	fill_btn = UIKit.button("自动补料：关", Vector2(150, 40), UIKit.C_DIM, 14)
-	fill_btn.position = Vector2(496, 640)
+	fill_btn.position = Vector2(660, 640)
 	fill_btn.pressed.connect(_toggle_auto_fill)
 	build_root.add_child(fill_btn)
+
+	# 方案草稿 / 生效（plan-v5 §1.5）：保存方案 = 把草稿写进生效方案，之后自动补料才按新方案补
+	save_btn = UIKit.button("方案已同步", Vector2(150, 40), UIKit.C_DIM, 14)
+	save_btn.position = Vector2(496, 640)
+	save_btn.pressed.connect(_save_plan)
+	build_root.add_child(save_btn)
+
+	revert_btn = UIKit.button("还原", Vector2(80, 40), UIKit.C_DIM, 14)
+	revert_btn.position = Vector2(816, 640)
+	revert_btn.tooltip_text = "丢弃草稿：把每格的草稿改回生效方案。板面模块不动，只改方案。"
+	revert_btn.pressed.connect(_revert_plan)
+	build_root.add_child(revert_btn)
 
 	# 拖拽层：幽灵 + 落点高亮 + 出力预览（全部 IGNORE，不抢鼠标）
 	drag_layer = Control.new()
@@ -1392,9 +1411,10 @@ func _make_weapon(id: String, q: int) -> Dictionary:
 		"enabled": true, "fire_t": 0.0, "dmg": {},
 		"blast": 90.0, "ramp_max": 1.20,
 		"score": 0.0, "p0": 0.0, "band": 1.0, "dr": {},
-		# 槽位方案：每格记住「这一格该放什么模块 id」。寿命耗尽后按它自动补料，
-		# 空字符串表示这一格没有方案（自动入槽才允许乱填）。
-		"plan": [],
+		# 槽位方案，分「草稿 / 生效」两份（plan-v5 §1.5）：
+		#   plan_draft = 板面当前状态，装机/卸下/交换随手改；
+		#   plan_saved = 生效方案，只有点「保存方案」才同步过去，自动补料只认它。
+		"plan_draft": [], "plan_saved": [],
 	}
 	_set_quality_of(w, q)
 	_roll_weapon(w)
@@ -1567,15 +1587,17 @@ func _set_quality_of(w: Dictionary, q: int) -> void:
 	w["base"] = float(QUALITY_BASE[q])
 	w["layout"] = _gen_layout(int(LAYOUTS[q].size()))
 	var slots: Array = w["slots"]
-	var plan: Array = w["plan"]
+	var pd: Array = w["plan_draft"]
+	var ps: Array = w["plan_saved"]
 	while slots.size() < w["layout"].size():
 		slots.append(null)
 	while slots.size() > w["layout"].size():
 		slots.pop_back()
-	while plan.size() < slots.size():
-		plan.append("")
-	while plan.size() > slots.size():
-		plan.pop_back()
+	for plan in [pd, ps]:
+		while plan.size() < slots.size():
+			plan.append("")
+		while plan.size() > slots.size():
+			plan.pop_back()
 
 
 func _set_quality(q: int) -> void:
@@ -2117,7 +2139,7 @@ func _auto_plan_fix(delta: float) -> void:
 	for wi in weapons.size():
 		_use_weapon(wi)
 		for i in _missing_cells():
-			var want := String(weapon.plan[i])
+			var want := _plan_saved_at(weapon, i)
 			if want != "" and _inv(want) > 0:
 				_refill(i, null, true)  # 有料就直接补，不改方案
 				continue
@@ -2138,7 +2160,7 @@ func _auto_plan_fix(delta: float) -> void:
 					best_id = k
 			if best_id == "":
 				continue
-			weapon.plan[i] = best_id
+			_set_plan_draft(weapon, i, best_id)
 			_refill(i, null, true)
 		# 已装但快烧空的格子：只把方案改成「库存里更强」的 id，不立刻顶掉模块。
 		# 等这一格烧空时 _refill 会按新方案补货 —— 既满足「不自动替换已装模块」，
@@ -2166,7 +2188,7 @@ func _auto_plan_fix(delta: float) -> void:
 					best_v2 = v2
 					best2 = k
 			if best2 != "":
-				weapon.plan[i] = best2
+				_set_plan_draft(weapon, i, best2)
 	_use_weapon(keep)
 
 
@@ -2366,9 +2388,9 @@ func _refill(i: int, w = null, force := false) -> void:
 		return
 	var ww: Dictionary = weapon if w == null else w
 	var sl: Array = ww["slots"]
-	var plan: Array = ww["plan"]
+	# 只认**生效**方案（plan_saved）：草稿还没保存，不该影响补料（plan-v5 §1.5）
 	# 有方案的格子：只认方案里的 id，缺料就空着（绝不降阶替换），等库存补上再自动装回
-	var want := String(plan[i]) if i < plan.size() else ""
+	var want := _plan_saved_at(ww, i)
 	if want != "":
 		if _inv(want) > 0:
 			_add_inv(want, -1)
@@ -2434,8 +2456,8 @@ func _install(mid: String, w = null, force := false) -> void:
 			best = i
 	if best >= 0:
 		sl[best] = _new_module(mid)
-		if best < (ww["plan"] as Array).size():
-			ww["plan"][best] = mid  # 装进去 = 这一格的方案被更新
+		# 装进去 = 这一格的草稿被更新（草稿要保存才生效，plan-v5 §1.5）
+		_set_plan_draft(ww, best, mid)
 		return
 	_add_inv(mid, 1)
 
@@ -2489,7 +2511,7 @@ func _on_slot_input(event: InputEvent, i: int) -> void:
 		return
 	if hand_mid != "":
 		_place_at(i, hand_mid)
-	elif String(weapon.plan[i]) != "" and weapon.slots[i] == null:
+	elif _plan_saved_at(weapon, i) != "" and weapon.slots[i] == null:
 		_refill(i, null, true)  # 有方案但缺料：手动点一下等于「再试一次补料」，不受开关限制
 	else:
 		# 点空白格默认什么都不做：装哪个模块是玩家的决定，不该被系统代劳。
@@ -2499,10 +2521,9 @@ func _on_slot_input(event: InputEvent, i: int) -> void:
 	_refresh_build()
 
 
-## 把库存里的 mid 放进第 i 格，并登记成这一格的方案（方案 = 以后自动补料的目标）
+## 把库存里的 mid 放进第 i 格，并把这一格的**草稿**方案改成它（保存后才影响补料）
 func _place_at(i: int, mid: String) -> bool:
 	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
 	if i < 0 or i >= sl.size() or not MODULES.has(mid) or _inv(mid) <= 0:
 		hand_mid = ""
 		return false
@@ -2510,27 +2531,25 @@ func _place_at(i: int, mid: String) -> bool:
 	if sl[i] != null:
 		_add_inv(String(sl[i]["id"]), 1)  # 原有的退回库存，等于覆盖
 	sl[i] = _new_module(mid)
-	plan[i] = mid
+	_set_plan_draft(weapon, i, mid)
 	hand_mid = ""
 	return true
 
 
-## 卸下第 i 格：模块退回库存，方案清空
+## 卸下第 i 格：模块退回库存，草稿方案清空（生效方案要保存才变）
 func _uninstall(i: int) -> void:
 	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
 	if i < 0 or i >= sl.size():
 		return
 	if sl[i] != null:
 		_add_inv(String(sl[i]["id"]), 1)
 	sl[i] = null
-	plan[i] = ""
+	_set_plan_draft(weapon, i, "")
 
 
-## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成方案
+## 空槽自动放一个「让整板出力涨最多」的模块，并把它的 id 记成这一格的草稿方案
 func _auto_place_best(i: int) -> bool:
 	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
 	if i < 0 or i >= sl.size() or sl[i] != null:
 		return false
 	var best_id := ""
@@ -2544,7 +2563,7 @@ func _auto_place_best(i: int) -> bool:
 			best_id = k
 	if best_id == "":
 		return false
-	plan[i] = best_id
+	_set_plan_draft(weapon, i, best_id)
 	_add_inv(best_id, -1)
 	sl[i] = _new_module(best_id)
 	return true
@@ -2553,19 +2572,132 @@ func _auto_place_best(i: int) -> bool:
 ## 自动配置方案（bot 与懒人用）：所有「空格子 + 没方案」都按最优填一次，填完固化成方案
 func _auto_plan_fill() -> void:
 	var sl: Array = weapon["slots"]
-	var plan: Array = weapon["plan"]
 	for i in sl.size():
-		if sl[i] == null and String(plan[i]) == "":
+		if sl[i] == null and _plan_saved_at(weapon, i) == "":
 			_auto_place_best(i)
+
+
+# ---- 方案：草稿 / 生效（plan-v5 §1.5）--------------------------------------
+# 为什么分两份：拆装不返还（§4），误覆盖本身已经付出代价；但**补料规则**不该跟着
+# 板面悄悄改掉——以后自动补料会按新方案补，玩家却不知道。所以板面动 = 改草稿，
+# 显式点「保存方案」才写进生效方案，自动补料与幽灵框只读生效方案。
+## 生效方案：自动补料、幽灵框、缺料统计都读这份
+func _plan_saved_at(w: Dictionary, i: int) -> String:
+	var ps: Array = w["plan_saved"]
+	return String(ps[i]) if i >= 0 and i < ps.size() else ""
+
+
+## 草稿：板面当前状态
+func _plan_draft_at(w: Dictionary, i: int) -> String:
+	var pd: Array = w["plan_draft"]
+	return String(pd[i]) if i >= 0 and i < pd.size() else ""
+
+
+## 写草稿。bot / playtest / autoplan 没有「保存」这个动作，写完立刻同步生效方案，
+## 免得自测跑出来的仍是旧方案。
+func _set_plan_draft(w: Dictionary, i: int, mid: String) -> void:
+	var pd: Array = w["plan_draft"]
+	if i < 0 or i >= pd.size():
+		return
+	pd[i] = mid
+	if bot or playtest or autoplan:
+		_sync_plan(w)
+
+
+## 草稿 → 生效
+func _sync_plan(w: Dictionary) -> void:
+	var ps: Array = w["plan_saved"]
+	ps.assign(w["plan_draft"])
+
+
+## 草稿和生效方案是否有差异（有差异 = 「保存方案」按钮亮起）
+func _plan_dirty(w = null) -> bool:
+	var ww: Dictionary = weapon if w == null else w
+	var pd: Array = ww["plan_draft"]
+	var ps: Array = ww["plan_saved"]
+	for i in mini(pd.size(), ps.size()):
+		if String(pd[i]) != String(ps[i]):
+			return true
+	return false
+
+
+## 差异明细：[{i, from, to}]，给「保存方案」的 tooltip 用
+func _plan_diff(w = null) -> Array:
+	var ww: Dictionary = weapon if w == null else w
+	var out: Array = []
+	var pd: Array = ww["plan_draft"]
+	var ps: Array = ww["plan_saved"]
+	for i in mini(pd.size(), ps.size()):
+		if String(pd[i]) != String(ps[i]):
+			out.append({"i": i, "from": String(ps[i]), "to": String(pd[i])})
+	return out
+
+
+## 「保存方案」：草稿 → 生效。开着自动补料时顺便按新方案把缺的格子补一遍（plan-v5 §1.5 第 1 条）
+func _save_plan() -> void:
+	if not _plan_dirty():
+		return
+	_sync_plan(weapon)
+	if auto_fill:
+		for i in _missing_cells():
+			_refill(i)
+	_toast("方案已保存")
+	_refresh_build()
+
+
+## 「还原」：丢掉草稿，改回生效方案。板面上的模块不动，只改方案
+func _revert_plan() -> void:
+	if not _plan_dirty():
+		return
+	var pd: Array = weapon["plan_draft"]
+	pd.assign(weapon["plan_saved"])
+	_refresh_build()
+
+
+## 保存/还原按钮的状态与呼吸提示。bot / playtest / autoplan 没有「保存」这一步，直接藏掉
+func _refresh_plan_btns() -> void:
+	if save_btn == null or revert_btn == null:
+		return
+	var auto_mode := bot or playtest or autoplan
+	save_btn.visible = not auto_mode
+	revert_btn.visible = not auto_mode
+	if auto_mode:
+		return
+	var dirty := _plan_dirty()
+	save_btn.disabled = not dirty
+	revert_btn.disabled = not dirty
+	save_btn.text = "保存方案 •" if dirty else "方案已同步"
+	revert_btn.text = "还原"
+	var lines: Array = ["保存后才会按新方案自动补料；不保存则继续沿用旧方案"]
+	if dirty:
+		var d := _plan_diff()
+		for row in d.slice(0, 5):
+			lines.append("%d 号：%s → %s" % [int(row["i"]) + 1,
+				"空" if String(row["from"]) == "" else String(MODULES[String(row["from"])]["name"]),
+				"空" if String(row["to"]) == "" else String(MODULES[String(row["to"])]["name"])])
+		if d.size() > 5:
+			lines.append("…还有 %d 格" % (d.size() - 5))
+	save_btn.tooltip_text = "\n".join(lines)
+	if dirty:
+		UIKit.tint_button(save_btn, UIKit.C_GOLD)
+		if save_tween == null or not save_tween.is_valid():
+			save_tween = create_tween().set_loops()
+			save_tween.tween_property(save_btn, "modulate", Color(1.18, 1.18, 1.18, 1.0), 0.7)
+			save_tween.tween_property(save_btn, "modulate", Color(1.0, 1.0, 1.0, 1.0), 0.7)
+	else:
+		if save_tween != null and save_tween.is_valid():
+			save_tween.kill()
+		save_tween = null
+		save_btn.modulate = Color(1.0, 1.0, 1.0, 1.0)
+		UIKit.tint_button(save_btn, UIKit.C_DIM)
 
 
 func _missing_cells(w = null) -> Array:
 	var ww: Dictionary = weapon if w == null else w
 	var out: Array = []
 	var sl: Array = ww["slots"]
-	var plan: Array = ww["plan"]
 	for i in sl.size():
-		if sl[i] == null and i < plan.size() and String(plan[i]) != "":
+		if sl[i] == null and _plan_saved_at(ww, i) != "":
 			out.append(i)
 	return out
 
@@ -2579,10 +2711,13 @@ func _slot_tip(i: int) -> String:
 			String(d["name"]), int(d["tier"]), float(d["rate"]), int(m["left"]), int(m["max"])])
 	else:
 		parts.append("空")
-	var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
+	var want := _plan_saved_at(weapon, i)
 	if want != "":
 		parts.append("方案：%s%s" % [String(MODULES[want]["name"]),
 			"" if _inv(want) > 0 else ("（库存缺料，攒够自动补）" if auto_fill else "（库存缺料：点这一格手动补，或开自动补料）")])
+	var draft := _plan_draft_at(weapon, i)
+	if draft != want:
+		parts.append("草稿：%s —— 未保存，保存后才会按它补料" % ("空" if draft == "" else String(MODULES[draft]["name"])))
 	parts.append("左键：装入手里的模块 / 手动补料　　右键：卸下")
 	return "\n".join(parts)
 
@@ -3115,6 +3250,7 @@ func _refresh_build() -> void:
 		return
 	_rebuild_board()
 	_refresh_fill_btn()
+	_refresh_plan_btns()
 	var lines: Array = []
 	lines.append("构筑（暂停中）      TAB / ESC / 右键 / ← 返回")
 	lines.append("")
@@ -3147,7 +3283,7 @@ func _refresh_build() -> void:
 	elif miss.size() > 0:
 		var mn: Array = []
 		for i in miss:
-			mn.append(String(MODULES[String(weapon.plan[i])]["name"]))
+			mn.append(String(MODULES[_plan_saved_at(weapon, i)]["name"]))
 		info.append("缺料 %d 格：%s（%s）" % [miss.size(), " / ".join(mn),
 			"攒够会自动补" if auto_fill else "点格子手动补，或开自动补料"])
 	build_info.text = "\n".join(info)
@@ -3502,13 +3638,19 @@ func _rebuild_board() -> void:
 			var col: Color = MODULES[String(m["id"])]["color"]
 			sb.border_color = col
 			sb.bg_color = Color(col.r, col.g, col.b, 0.10)
-		var want := String(weapon.plan[i]) if i < weapon.plan.size() else ""
+		var want := _plan_saved_at(weapon, i)
+		var draft := _plan_draft_at(weapon, i)
+		var unsaved := draft != want
 		if m == null and want != "":
 			# 有方案但缺料（plan-v5 §1.4）：灰虚线般的细边 + 暗底，模块名半透明写在格子上，
 			# 表示「这一格按方案应该有 X，等库存补」——不再用红色，红色留给真错误
 			sb.border_color = Color(0.45, 0.50, 0.60, 0.85)
 			sb.set_border_width_all(1)
 			sb.bg_color = Color(0.16, 0.18, 0.24, 0.32)
+		elif unsaved:
+			# 草稿和生效方案不一致：金色细边提示「保存后才会按它补料」（plan-v5 §1.5 第 4 条）
+			sb.border_color = Color(UIKit.C_GOLD.r, UIKit.C_GOLD.g, UIKit.C_GOLD.b, 0.75)
+			sb.set_border_width_all(2)
 		panel.add_theme_stylebox_override("panel", sb)
 		panel.mouse_filter = Control.MOUSE_FILTER_STOP
 		panel.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -3571,6 +3713,18 @@ func _rebuild_board() -> void:
 			use_l.text = "缺料"
 			use_l.add_theme_color_override("font_color", Color(0.62, 0.68, 0.78, 0.75))
 		panel.add_child(use_l)
+
+		if unsaved:
+			# 「草稿」角标：这格方案改了但没保存，保存后才会按新方案补料
+			var dbg_l := Label.new()
+			dbg_l.position = Vector2(cell - 34, -4)
+			dbg_l.size = Vector2(34, 16)
+			dbg_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			dbg_l.add_theme_font_size_override("font_size", 10)
+			dbg_l.add_theme_color_override("font_color", Color(UIKit.C_GOLD.r, UIKit.C_GOLD.g, UIKit.C_GOLD.b, 0.9))
+			dbg_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			dbg_l.text = "草稿"
+			panel.add_child(dbg_l)
 
 
 ## 鼠标点格子：左键 = 放入手里的模块（或没拿东西时自动挑最优 / 按方案补料），右键 = 卸下
@@ -3743,26 +3897,29 @@ func _over_inv_area(mp: Vector2) -> bool:
 	return Rect2(tab_body.position, Vector2(430, 340)).has_point(mp)
 
 
+## 交换两格：模块和**草稿**方案一起换（生效方案要保存才变，plan-v5 §1.5）
 func _swap_slots(a: int, b: int) -> void:
 	if a == b or a < 0 or b < 0:
 		return
 	var sl: Array = weapon["slots"]
-	var pl: Array = weapon["plan"]
+	var pd: Array = weapon["plan_draft"]
 	if a >= sl.size() or b >= sl.size():
 		return
 	var m = sl[a]
-	var p = pl[a]
+	var p = pd[a]
 	sl[a] = sl[b]
-	pl[a] = pl[b]
+	pd[a] = pd[b]
 	sl[b] = m
-	pl[b] = p
+	pd[b] = p
+	if bot or playtest or autoplan:
+		_sync_plan(weapon)
 
 
 ## 没拖动就松手 = 普通点击：交给原有的格子点击逻辑（空格子补料等）
 func _drag_click_fallback() -> void:
 	if String(drag["src"]) == "slot":
 		var i := int(drag["from"])
-		if String(weapon.plan[i]) != "" and weapon.slots[i] == null:
+		if _plan_saved_at(weapon, i) != "" and weapon.slots[i] == null:
 			_refill(i, null, true)
 			_refresh_build()
 
@@ -4312,7 +4469,7 @@ func _run_dragtest() -> void:
 	get_viewport().push_input(mm)
 	_push_btn(to, false)
 	print("DRAGTEST mid=%s inv %d->%d  slot1 %s -> %s  plan1=%s  active=%s" % [
-		mid, inv_before, _inv(mid), before, str(weapon.slots[1]), str(weapon.plan[1]), str(drag.get("active", false))])
+		mid, inv_before, _inv(mid), before, str(weapon.slots[1]), str(weapon.plan_draft[1]), str(drag.get("active", false))])
 	get_tree().quit()
 
 
@@ -4456,8 +4613,8 @@ func _pt_log() -> void:
 		if m != null:
 			bfill += 1
 	var bmiss := 0
-	for i in (bw["plan"] as Array).size():
-		if (bw["slots"] as Array)[i] == null and String((bw["plan"] as Array)[i]) != "":
+	for i in (bw["plan_saved"] as Array).size():
+		if (bw["slots"] as Array)[i] == null and String((bw["plan_saved"] as Array)[i]) != "":
 			bmiss += 1
 	print("t=%3d w=%2d hp=%3d dps=%5.1f need=%5.1f drop=%.2f burn=%.2f lvl=%2d slot=%d/%d miss=%d fill=%d dev=%d/%d [%s] inv=[%s] c=%d/%d/%d/%d kills=%d dmg c%.0f/b%.0f/d%.0f alive=%d ppos=%.0f,%.0f cpos=%.0f,%.0f brute=%d rcp=%d kinds=f%d/r%d/rk%d/s%d" % [
 		int(pt_t), wave, int(maxf(hp, 0.0)), cur_dps(), need,
